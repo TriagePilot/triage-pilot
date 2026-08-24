@@ -1,0 +1,8 @@
+title = "TriagePilot public repository secret scan"
+
+[allowlist]
+description = "Allow documented placeholder values"
+regexes = [
+  '''replace-with-[a-z0-9-]+''',
+  '''triagepilot:triagepilot@postgres'''
+]

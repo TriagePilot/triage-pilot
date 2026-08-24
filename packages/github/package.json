@@ -1,0 +1,19 @@
+{
+  "name": "@triagepilot/github",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@triagepilot/shared": "workspace:*",
+    "@octokit/app": "^15.1.2",
+    "@octokit/request": "^9.1.4",
+    "zod": "^3.24.1"
+  }
+}

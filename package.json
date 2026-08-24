@@ -1,0 +1,30 @@
+{
+  "name": "triage-pilot",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.1.2",
+  "scripts": {
+    "build": "pnpm -r build",
+    "check": "pnpm -r check",
+    "check:public-boundary": "node scripts/check-public-boundary.mjs",
+    "dev:web": "pnpm --filter @triagepilot/web dev",
+    "dev:worker": "pnpm --filter @triagepilot/worker dev",
+    "smoke:compose": "bash scripts/compose-smoke.sh",
+    "test": "vitest run",
+    "test:integration": "vitest run packages/db/test/schema.integration.test.ts packages/db/test/deliveries.integration.test.ts packages/db/test/decisions.integration.test.ts packages/db/test/jobs.integration.test.ts packages/db/test/operations.integration.test.ts apps/worker/test/runtime-services.integration.test.ts",
+    "test:watch": "vitest",
+    "db:migrate": "pnpm --filter @triagepilot/db migrate"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "happy-dom": "^20.11.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

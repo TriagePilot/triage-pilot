@@ -1,0 +1,55 @@
+# Repository Configuration
+
+Place configuration at `.github/triagepilot.yml` in each selected repository. Missing configuration uses safe defaults in shadow mode.
+
+```yaml
+version: 1
+mode: shadow
+routing:
+  high_risk_reviewers: 2
+  exclude_target_branches: ["main", "master"]
+risk:
+  size:
+    high_changed_files: 120
+    high_changed_lines: 6000
+  thresholds:
+    low: 25
+    high: 70
+  paths:
+    - pattern: "src/auth/**"
+      weight: 30
+      tag: auth
+  suppressors:
+    - if_all_match: ["docs/**", "*.md", "*.mdx"]
+      ceiling: 25
+  ai_authorship:
+    enabled: true
+    modifier: 10
+ownership:
+  rules:
+    - paths: ["src/auth/**"]
+      reviewers: ["@sasha"]
+  fallback_reviewers: ["@sasha"]
+```
+
+Reviewer values must be individual GitHub user handles such as `@sasha`; organization team handles are not supported. Path patterns use glob syntax.
+
+Reaching either `risk.size.high_changed_files` or `risk.size.high_changed_lines` marks a pull request high risk after test files are excluded. The defaults are 100 changed files and 5,000 changed lines.
+
+Routing is intentionally bounded by risk tier:
+
+- low risk receives a policy approval and requests no human reviewer;
+- medium risk requests one human reviewer;
+- high risk requests one human reviewer by default, or up to two when `routing.high_risk_reviewers: 2` is set.
+
+`high_risk_reviewers` accepts only `1` or `2`. When equally loaded candidates are available, TriagePilot uses a stable pull-request-specific ordering instead of always favoring the alphabetically first handle. If fewer reviewers are eligible than requested, it records the shortfall and requests only the available reviewers. TriagePilot never requests more than two human reviewers for one decision.
+
+`exclude_target_branches` accepts exact target branch names and defaults to an empty list. A pull request targeting a listed branch is silently skipped: TriagePilot does not score it, select reviewers, store a decision, or make a GitHub write. For example, set `exclude_target_branches: ["main"]` to skip release pull requests from `develop` into `main`.
+
+The only accepted mode values are `shadow` and `enforce`. This repository file is the sole write control: only an explicit `mode: enforce` in the pull request's trusted base commit permits GitHub actions. TriagePilot never reads this policy from the unmerged head commit, so a pull request cannot enable writes for itself. Missing configuration stays in shadow mode; invalid configuration records a configuration-failure decision and performs no write. Follow the [rollout guide](../operations/shadow-to-enforce.md) before enabling enforce mode.
+
+## Required human-review policy
+
+In enforce mode, the stored selected individual reviewers form the policy cohort for `triagepilot/human-review-policy`. The check succeeds for a no-human route and after every selected user approves the current pull-request head. It remains in progress while an approval is missing or changes are requested, and it fails when a human-review route has no eligible individual reviewer or TriagePilot reaches a permanent evaluation failure. Team reviewer targets are invalid and result in no GitHub writes.
+
+Use the [required human-review policy guide](required-human-review-policy.md) to configure this check in a GitHub ruleset. Subscribe the GitHub App to `Pull request review` events as described in the [setup guide](setup.md); those events trigger the policy re-evaluation.

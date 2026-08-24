@@ -1,0 +1,19 @@
+{
+  "name": "@triagepilot/db",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "migrate": "tsx src/migrate.ts"
+  },
+  "dependencies": {
+    "@triagepilot/shared": "workspace:*",
+    "kysely": "^0.27.4",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.10"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "@triagepilot/web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build && tsc -p tsconfig.json --noEmit",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.8",
+    "@triagepilot/config": "workspace:*",
+    "@triagepilot/core": "workspace:*",
+    "@triagepilot/db": "workspace:*",
+    "@triagepilot/github": "workspace:*",
+    "@triagepilot/shared": "workspace:*",
+    "@vitejs/plugin-react": "^4.3.4",
+    "hono": "^4.6.14",
+    "kysely": "^0.27.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^6.0.7",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5"
+  }
+}

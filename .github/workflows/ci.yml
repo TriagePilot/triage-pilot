@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: triagepilot
+          POSTGRES_PASSWORD: triagepilot
+          POSTGRES_DB: triagepilot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U triagepilot -d triagepilot"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm test
+      - run: pnpm test:integration
+        env:
+          TEST_DATABASE_URL: postgres://triagepilot:triagepilot@localhost:5432/triagepilot
+      - run: pnpm build
+      - run: pnpm db:migrate
+        env:
+          DATABASE_URL: postgres://triagepilot:triagepilot@localhost:5432/triagepilot
+      - run: docker compose config
+      - run: docker build .
+      - run: pnpm check:public-boundary
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  smoke-compose:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: pnpm smoke:compose
