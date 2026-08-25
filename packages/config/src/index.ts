@@ -23,6 +23,7 @@ const routingInputSchema = z
     high_risk_reviewers: z.union([z.literal(1), z.literal(2)]).default(1),
     exclude_target_branches: z.array(z.string().min(1)).default([]),
     exclude_source_branch_patterns: z.array(z.string().min(1)).default([]),
+    include_draft_pull_requests: z.boolean().default(false),
   })
   .strict()
   .default({})
@@ -30,6 +31,7 @@ const routingInputSchema = z
     highRiskReviewers: routing.high_risk_reviewers,
     excludeTargetBranches: routing.exclude_target_branches,
     excludeSourceBranchPatterns: routing.exclude_source_branch_patterns,
+    includeDraftPullRequests: routing.include_draft_pull_requests,
   }));
 
 const riskPathSchema = z

@@ -86,6 +86,9 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
 
   const publicMode: RepositoryMode = configResult.config.mode;
   await services.updateRepositoryConfigState({ configState: "valid", mode: publicMode });
+  if (message.isDraft && !configResult.config.routing.includeDraftPullRequests) {
+    return;
+  }
   const pullRequestMetadata = await services.fetchPullRequestMetadata(message);
   if (
     configResult.config.routing.excludeTargetBranches.includes(pullRequestMetadata.targetBranchName) ||

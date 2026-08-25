@@ -153,6 +153,32 @@ routing:
     expect(services.applyDecisionActions).not.toHaveBeenCalled();
   });
 
+  it("silently skips a draft pull request by default", async () => {
+    const services = buildRoutingServices({ config: "version: 1\nmode: enforce\n" });
+
+    await processRoutingJob({ ...message, isDraft: true }, services);
+
+    expect(services.updateRepositoryConfigState).toHaveBeenCalledWith({ configState: "valid", mode: "enforce" });
+    expect(services.fetchPullRequestMetadata).not.toHaveBeenCalled();
+    expect(services.fetchChangedFiles).not.toHaveBeenCalled();
+    expect(services.fetchCommitMessages).not.toHaveBeenCalled();
+    expect(services.getReviewerLoad).not.toHaveBeenCalled();
+    expect(services.persistDecision).not.toHaveBeenCalled();
+    expect(services.applyDecisionActions).not.toHaveBeenCalled();
+  });
+
+  it("routes a draft pull request when configuration includes drafts", async () => {
+    const services = buildRoutingServices({
+      config: "version: 1\nmode: shadow\nrouting:\n  include_draft_pull_requests: true\n",
+    });
+
+    await processRoutingJob({ ...message, isDraft: true }, services);
+
+    expect(services.persistDecision).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "policy_approval", mode: "shadow" }),
+    );
+  });
+
   it("records enforce action success", async () => {
     const services = buildRoutingServices({ config: "version: 1\nmode: enforce\n" });
 

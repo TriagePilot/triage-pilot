@@ -21,6 +21,7 @@ const pullRequestWebhookSchema = z.object({
   repository: repositorySchema.extend({ owner: accountSchema }),
   pull_request: z.object({
     number: z.number(),
+    draft: z.boolean(),
     base: z.object({ sha: z.string().trim().min(1) }),
     head: z.object({ sha: z.string() }),
   }),
@@ -135,6 +136,7 @@ export function githubWebhookRoutes(services: WebhookServices) {
         pullNumber: payload.pull_request.number,
         baseSha: payload.pull_request.base.sha,
         headSha: payload.pull_request.head.sha,
+        isDraft: payload.pull_request.draft,
         eventName: `pull_request.${payload.action}`,
         routingKey: buildRoutingKey({
           repositoryId: payload.repository.id,

@@ -9,6 +9,7 @@ routing:
   high_risk_reviewers: 2
   exclude_target_branches: ["main", "master"]
   exclude_source_branch_patterns: ["dependabot/**"]
+  include_draft_pull_requests: false
 risk:
   size:
     high_changed_files: 120
@@ -48,6 +49,8 @@ Routing is intentionally bounded by risk tier:
 In enforce mode, TriagePilot also synchronizes one risk label on each routed pull request: `triagepilot:risk-low`, `triagepilot:risk-medium`, or `triagepilot:risk-high`. It creates these labels with green, amber, and red colors when needed. On a later routing decision it replaces only an older `triagepilot:risk-*` label; labels managed by the repository team are left unchanged. Shadow mode never creates or changes labels.
 
 `exclude_target_branches` accepts exact target branch names and defaults to an empty list. `exclude_source_branch_patterns` accepts source branch glob patterns and also defaults to an empty list. A pull request matching either exclusion is silently skipped: TriagePilot does not score it, select reviewers, store a decision, or make a GitHub write. For example, set `exclude_target_branches: ["main"]` to skip release pull requests from `develop` into `main`, or set `exclude_source_branch_patterns: ["dependabot/**"]` to skip Dependabot pull requests. Source exclusions are opt-in for each repository.
+
+Draft pull requests are silently skipped by default: TriagePilot does not score them, select reviewers, store a decision, or make a GitHub write. Set `routing.include_draft_pull_requests: true` to route drafts normally. When the default is retained, GitHub's `ready_for_review` event routes the pull request using the trusted base configuration at that time.
 
 The only accepted mode values are `shadow` and `enforce`. This repository file is the sole write control: only an explicit `mode: enforce` in the pull request's trusted base commit permits GitHub actions. TriagePilot never reads this policy from the unmerged head commit, so a pull request cannot enable writes for itself. Missing configuration stays in shadow mode; invalid configuration records a configuration-failure decision and performs no write. Follow the [rollout guide](../operations/shadow-to-enforce.md) before enabling enforce mode.
 
