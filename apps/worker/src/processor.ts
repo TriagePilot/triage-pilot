@@ -7,6 +7,7 @@ import {
   type RepositoryMode,
   type RiskTier,
   type RoutingJobPayload,
+  type ScoreComponent,
 } from "@triagepilot/shared";
 
 export type RoutingJobMessage = RoutingJobPayload;
@@ -48,6 +49,11 @@ export interface RoutingJobServices {
     action: string;
     expectedHeadSha: string;
     riskTier: RiskTier;
+    risk?: {
+      score: number;
+      classifierVersion: string;
+      components: ScoreComponent[];
+    };
     selectedReviewers?: string[];
     noHumanReason?: string;
     decisionId: string;
@@ -135,6 +141,7 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
       decisionId: persisted.decisionId,
       expectedHeadSha: message.headSha,
       riskTier: risk.tier,
+      risk,
     };
     if (routing.selectedReviewers.length > 0) actionInput.selectedReviewers = routing.selectedReviewers;
     if (routing.noHumanReason) actionInput.noHumanReason = routing.noHumanReason;

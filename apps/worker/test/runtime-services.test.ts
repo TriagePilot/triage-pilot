@@ -127,12 +127,22 @@ describe("worker routing GitHub reads", () => {
     const request = actionRequester("unmerged-head-456");
     const services = buildServices(message, request);
 
-    await services.applyDecisionActions({
+    const action = {
       action: "policy_approval",
       decisionId: "decision-1",
       expectedHeadSha: "unmerged-head-456",
       riskTier: "low",
-    });
+      risk: {
+        score: 40,
+        classifierVersion: "risk-v2",
+        components: [
+          { reason: "changed_file_count", score: 10, detail: "10 changed files" },
+          { reason: "high_risk_path:auth", score: 30, detail: "1 file matched src/auth/**" },
+        ],
+      },
+    } as Parameters<typeof services.applyDecisionActions>[0];
+
+    await services.applyDecisionActions(action);
 
     expect(request.mock.calls[0]).toEqual([
       "GET /repos/{owner}/{repo}/pulls/{pull_number}",
@@ -164,6 +174,12 @@ describe("worker routing GitHub reads", () => {
       "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
       expect.objectContaining({ commit_id: "unmerged-head-456" }),
     );
+    expect(request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", {
+      owner: "acme",
+      repo: "api",
+      issue_number: 7,
+      body: "<!-- triagepilot:decision:decision-1 -->\nTriagePilot decision: policy_approval\n\n**Risk score:** 40/100 · **Tier:** low\n**Classifier:** risk-v2\n\n<details>\n<summary>Score breakdown</summary>\n\n- **+10 Changed file count** — 10 changed files\n- **+30 High-risk path: auth** — 1 file matched src/auth/**\n</details>",
+    });
   });
 
   it("syncs the calculated risk label during an enforce action", async () => {
