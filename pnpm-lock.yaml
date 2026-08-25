@@ -90,6 +90,9 @@ importers:
       '@triagepilot/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      minimatch:
+        specifier: ^10.2.5
+        version: 10.2.5
 
   packages/config:
     dependencies:
