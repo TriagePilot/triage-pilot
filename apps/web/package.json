@@ -17,7 +17,7 @@
     "@triagepilot/shared": "workspace:*",
     "@vitejs/plugin-react": "^4.3.4",
     "hono": "^4.12.34",
-    "kysely": "^0.27.4",
+    "kysely": "^0.28.17",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "vite": "^6.0.7",
