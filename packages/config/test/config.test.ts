@@ -40,6 +40,7 @@ ownership:
     expect(result.config.mode).toBe("enforce");
     expect(result.config.routing.highRiskReviewers).toBe(2);
     expect(result.config.routing.excludeTargetBranches).toEqual(["main", "master"]);
+    expect(result.config.routing.includeDrafts).toBe(false);
     expect(result.config.risk.size).toEqual({ highChangedFiles: 120, highChangedLines: 6000 });
     expect(result.config.risk.thresholds).toEqual({ low: 25, high: 70 });
     expect(result.config.risk.paths[0]).toEqual({ pattern: "src/auth/**", weight: 30, tag: "auth" });
@@ -56,8 +57,17 @@ ownership:
     expect(result.config.mode).toBe("shadow");
     expect(result.config.routing.highRiskReviewers).toBe(1);
     expect(result.config.routing.excludeTargetBranches).toEqual([]);
+    expect(result.config.routing.includeDrafts).toBe(false);
     expect(result.config.risk.size).toEqual({ highChangedFiles: 100, highChangedLines: 5000 });
     expect(Object.keys(result.config).sort()).toEqual(["mode", "ownership", "risk", "routing", "version"]);
+  });
+
+  it("allows repositories to opt in to triaging draft pull requests", () => {
+    const result = parseTriagePilotConfig("version: 1\nrouting:\n  include_drafts: true\n");
+
+    expect(result).toMatchObject({ ok: true });
+    if (!result.ok) throw new Error("expected draft configuration to parse");
+    expect(result.config.routing.includeDrafts).toBe(true);
   });
 
   it.each([0, 3])("rejects high_risk_reviewers=%s outside the supported one-or-two range", (count) => {

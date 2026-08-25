@@ -32,6 +32,8 @@ export interface RoutingJobPayload {
   baseSha?: string;
   headSha: string;
   eventName: string;
+  /** Present on newly accepted jobs; absent only on pre-draft-routing payloads. */
+  isDraft?: boolean;
   /** Stable identity for one pull-request state, including its trusted configuration revision. */
   routingKey?: string;
 }
@@ -41,8 +43,9 @@ export function buildRoutingKey(input: {
   pullNumber: number;
   baseSha: string;
   headSha: string;
+  isDraft?: boolean;
 }): string {
-  return `routing:${input.repositoryId}:${input.pullNumber}:${input.baseSha}:${input.headSha}`;
+  return `routing:${input.repositoryId}:${input.pullNumber}:${input.baseSha}:${input.headSha}:${input.isDraft ? "draft" : "ready"}`;
 }
 
 export function legacyRoutingKey(deliveryId: string): string {

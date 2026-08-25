@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { trustedBaseSha, type RoutingJobPayload } from "../src/index";
+import { buildRoutingKey, trustedBaseSha, type RoutingJobPayload } from "../src/index";
 
 const payload: RoutingJobPayload = {
   kind: "process_pull_request",
@@ -13,6 +13,7 @@ const payload: RoutingJobPayload = {
   baseSha: "trusted-base-sha",
   headSha: "unmerged-head-sha",
   eventName: "pull_request.opened",
+  isDraft: false,
 };
 
 describe("routing job trust boundary", () => {
@@ -24,5 +25,17 @@ describe("routing job trust boundary", () => {
     const { baseSha: _baseSha, ...legacyPayload } = payload;
 
     expect(trustedBaseSha(legacyPayload)).toBeUndefined();
+  });
+
+  it("distinguishes draft and ready pull-request states with the same commits", () => {
+    const state = {
+      repositoryId: "101",
+      pullNumber: 7,
+      baseSha: "trusted-base-sha",
+      headSha: "unmerged-head-sha",
+    };
+
+    expect(buildRoutingKey({ ...state, isDraft: true })).toBe("routing:101:7:trusted-base-sha:unmerged-head-sha:draft");
+    expect(buildRoutingKey({ ...state, isDraft: false })).toBe("routing:101:7:trusted-base-sha:unmerged-head-sha:ready");
   });
 });

@@ -87,6 +87,7 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
   await services.updateRepositoryConfigState({ configState: "valid", mode: publicMode });
   const pullRequestMetadata = await services.fetchPullRequestMetadata(message);
   if (configResult.config.routing.excludeTargetBranches.includes(pullRequestMetadata.targetBranchName)) return;
+  if (message.isDraft && !configResult.config.routing.includeDrafts) return;
 
   const [changedFiles, commitMessages] = await Promise.all([
     services.fetchChangedFiles(message),
