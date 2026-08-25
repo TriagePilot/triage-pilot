@@ -3,7 +3,7 @@ import {
   GitHubAdapter,
   type GitHubAppCredentials,
 } from "@triagepilot/github";
-import { trustedBaseSha } from "@triagepilot/shared";
+import { trustedBaseSha, type ScoreComponent } from "@triagepilot/shared";
 import {
   findLatestHumanReviewPolicyDecision,
   markActionFailed as persistActionFailed,
@@ -206,7 +206,7 @@ export function createWorkerRoutingServiceFactory(input: {
           await adapter.upsertRoutingComment({
             pullRequest,
             decisionId: action.decisionId,
-            body: `TriagePilot decision: ${action.action}`,
+            body: formatRoutingComment(action),
           });
           if (route === "human_review" && action.selectedReviewers?.length) {
             await adapter.requestHumanReviewers({
@@ -275,6 +275,52 @@ export function createWorkerRoutingServiceFactory(input: {
       },
     };
   };
+}
+
+function formatRoutingComment(input: {
+  action: string;
+  riskTier: string;
+  risk?: {
+    score: number;
+    classifierVersion: string;
+    components: ScoreComponent[];
+  };
+}): string {
+  if (!input.risk) return `TriagePilot decision: ${input.action}`;
+
+  const components = input.risk.components
+    .map((component) => `- **${formatComponentScore(component)} ${labelForRiskComponent(component.reason)}** — ${component.detail}`)
+    .join("\n");
+
+  return [
+    `TriagePilot decision: ${input.action}`,
+    "",
+    `**Risk score:** ${input.risk.score}/100 · **Tier:** ${input.riskTier}`,
+    `**Classifier:** ${input.risk.classifierVersion}`,
+    "",
+    "<details>",
+    "<summary>Score breakdown</summary>",
+    "",
+    components || "No score components were recorded.",
+    "</details>",
+  ].join("\n");
+}
+
+function formatComponentScore(component: ScoreComponent): string {
+  return component.reason === "docs_or_test_suppressor" ? "cap" : component.score >= 0 ? `+${component.score}` : String(component.score);
+}
+
+function labelForRiskComponent(reason: string): string {
+  const labels: Record<string, string> = {
+    changed_file_count: "Changed file count",
+    large_line_delta: "Large line delta",
+    dependency_lockfile_change: "Dependency lockfile change",
+    migration_or_schema_change: "Migration or schema change",
+    ai_authorship_signal: "AI authorship signal",
+    docs_or_test_suppressor: "Documentation or test-only cap",
+  };
+  if (reason.startsWith("high_risk_path:")) return `High-risk path: ${reason.slice("high_risk_path:".length)}`;
+  return labels[reason] ?? reason.replaceAll("_", " ");
 }
 
 export function createWorkerHumanReviewPolicyServiceFactory(input: {
