@@ -8,6 +8,7 @@ mode: shadow
 routing:
   high_risk_reviewers: 2
   exclude_target_branches: ["main", "master"]
+  include_drafts: true
 risk:
   size:
     high_changed_files: 120
@@ -47,6 +48,8 @@ Routing is intentionally bounded by risk tier:
 In enforce mode, TriagePilot also synchronizes one risk label on each routed pull request: `triagepilot:risk-low`, `triagepilot:risk-medium`, or `triagepilot:risk-high`. It creates these labels with green, amber, and red colors when needed. On a later routing decision it replaces only an older `triagepilot:risk-*` label; labels managed by the repository team are left unchanged. Shadow mode never creates or changes labels.
 
 `exclude_target_branches` accepts exact target branch names and defaults to an empty list. A pull request targeting a listed branch is silently skipped: TriagePilot does not score it, select reviewers, store a decision, or make a GitHub write. For example, set `exclude_target_branches: ["main"]` to skip release pull requests from `develop` into `main`.
+
+`include_drafts` defaults to `false`. When it is `false`, TriagePilot silently skips draft pull requests before scoring, persistence, reviewer selection, or GitHub writes. GitHub's `ready_for_review` event is always routed, so a skipped draft pull request is triaged when it becomes ready for review, even if its commits have not changed. Set `include_drafts: true` to route drafts as well.
 
 The only accepted mode values are `shadow` and `enforce`. This repository file is the sole write control: only an explicit `mode: enforce` in the pull request's trusted base commit permits GitHub actions. TriagePilot never reads this policy from the unmerged head commit, so a pull request cannot enable writes for itself. Missing configuration stays in shadow mode; invalid configuration records a configuration-failure decision and performs no write. Follow the [rollout guide](../operations/shadow-to-enforce.md) before enabling enforce mode.
 

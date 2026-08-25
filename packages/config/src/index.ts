@@ -22,12 +22,14 @@ const routingInputSchema = z
   .object({
     high_risk_reviewers: z.union([z.literal(1), z.literal(2)]).default(1),
     exclude_target_branches: z.array(z.string().min(1)).default([]),
+    include_drafts: z.boolean().default(false),
   })
   .strict()
   .default({})
   .transform((routing) => ({
     highRiskReviewers: routing.high_risk_reviewers,
     excludeTargetBranches: routing.exclude_target_branches,
+    includeDrafts: routing.include_drafts,
   }));
 
 const riskPathSchema = z

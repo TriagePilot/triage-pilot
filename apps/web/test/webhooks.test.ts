@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { HumanReviewPolicyDeliveryInput } from "@triagepilot/db";
+import type { HumanReviewPolicyDeliveryInput, RoutingDeliveryInput } from "@triagepilot/db";
 
 import { createWebApp } from "../src/app";
 import { buildServices } from "./helpers";
@@ -31,7 +31,7 @@ describe("GitHub webhook route", () => {
 
   it("accepts a matching organization pull request with metadata only", async () => {
     const acceptRoutingDelivery = vi.fn(async () => ({ inserted: true, jobId: "job-1" }));
-    const body = pullRequestBody({ owner: { login: "AcMe", type: "Organization" } });
+    const body = pullRequestBody({ owner: { login: "AcMe", type: "Organization" }, isDraft: true });
     const app = createWebApp(buildServices({ githubOrganization: "acme", acceptRoutingDelivery }));
 
     const response = await signedWebhook(app, body);
@@ -56,8 +56,41 @@ describe("GitHub webhook route", () => {
         baseSha: "trusted-base-123",
         headSha: "abc123",
         eventName: "pull_request.opened",
-        routingKey: "routing:101:7:trusted-base-123:abc123",
+        isDraft: true,
+        routingKey: "routing:101:7:trusted-base-123:abc123:draft",
       },
+    });
+  });
+
+  it("queues ready-for-review routing separately after a draft with unchanged commits", async () => {
+    const acceptedDeliveries: RoutingDeliveryInput[] = [];
+    const acceptRoutingDelivery = async (input: RoutingDeliveryInput) => {
+      acceptedDeliveries.push(input);
+      return { inserted: true, jobId: "job-1" };
+    };
+    const app = createWebApp(buildServices({ githubOrganization: "acme", acceptRoutingDelivery }));
+
+    await signedWebhook(
+      app,
+      pullRequestBody({ owner: { login: "acme", type: "Organization" }, action: "opened", isDraft: true }),
+      { deliveryId: "delivery-draft" },
+    );
+    await signedWebhook(
+      app,
+      pullRequestBody({ owner: { login: "acme", type: "Organization" }, action: "ready_for_review", isDraft: false }),
+      { deliveryId: "delivery-ready" },
+    );
+
+    expect(acceptedDeliveries).toHaveLength(2);
+    expect(acceptedDeliveries[0]?.payload).toMatchObject({
+      eventName: "pull_request.opened",
+      isDraft: true,
+      routingKey: "routing:101:7:trusted-base-123:abc123:draft",
+    });
+    expect(acceptedDeliveries[1]?.payload).toMatchObject({
+      eventName: "pull_request.ready_for_review",
+      isDraft: false,
+      routingKey: "routing:101:7:trusted-base-123:abc123:ready",
     });
   });
 
@@ -320,9 +353,11 @@ describe("GitHub webhook route", () => {
 const pullRequestBody = ({
   owner,
   action = "opened",
+  isDraft = false,
 }: {
   owner: { login: string; type: string };
   action?: string;
+  isDraft?: boolean;
 }) =>
   JSON.stringify({
     action,
@@ -330,6 +365,7 @@ const pullRequestBody = ({
     repository: { id: 101, name: "api", owner },
     pull_request: {
       number: 7,
+      draft: isDraft,
       base: { sha: "trusted-base-123" },
       head: { sha: "abc123" },
     },

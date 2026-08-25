@@ -127,6 +127,28 @@ routing:
     expect(services.applyDecisionActions).not.toHaveBeenCalled();
   });
 
+  it("silently skips a draft pull request unless the repository opts in", async () => {
+    const services = buildRoutingServices({ config: "version: 1\nmode: enforce\n" });
+    const draftMessage = { ...message, isDraft: true };
+
+    await processRoutingJob(draftMessage, services);
+
+    expect(services.fetchChangedFiles).not.toHaveBeenCalled();
+    expect(services.fetchCommitMessages).not.toHaveBeenCalled();
+    expect(services.getReviewerLoad).not.toHaveBeenCalled();
+    expect(services.persistDecision).not.toHaveBeenCalled();
+    expect(services.applyDecisionActions).not.toHaveBeenCalled();
+  });
+
+  it("routes a draft pull request when the repository opts in", async () => {
+    const services = buildRoutingServices({ config: "version: 1\nrouting:\n  include_drafts: true\n" });
+    const draftMessage = { ...message, isDraft: true };
+
+    await processRoutingJob(draftMessage, services);
+
+    expect(services.persistDecision).toHaveBeenCalledWith(expect.objectContaining({ pullNumber: 7 }));
+  });
+
   it("records enforce action success", async () => {
     const services = buildRoutingServices({ config: "version: 1\nmode: enforce\n" });
 

@@ -210,6 +210,7 @@ function isRoutingJobMessage(value: unknown): value is RoutingJobMessage {
     (payload.baseSha === undefined || isNonBlankString(payload.baseSha)) &&
     isNonEmptyString(payload.headSha) &&
     isNonEmptyString(payload.eventName) &&
+    (payload.isDraft === undefined || typeof payload.isDraft === "boolean") &&
     (payload.routingKey === undefined || isNonEmptyString(payload.routingKey))
   );
 }
