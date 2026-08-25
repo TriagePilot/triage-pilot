@@ -75,4 +75,23 @@ describe("decideRouting", () => {
       reviewerShortfall: 1,
     });
   });
+
+  it("uses existing current-head approvals when no additional eligible reviewer remains", () => {
+    expect(
+      decideRouting({
+        risk: { score: 95, tier: "high" },
+        author: "@priya",
+        eligibleReviewers: ["@priya"],
+        existingApprovedReviewers: ["@velzepooz", "@zuffik"],
+        load: {},
+        highRiskReviewers: 2,
+        selectionKey: "acme/api#9",
+      }),
+    ).toMatchObject({
+      action: "request_human_review",
+      selectedReviewers: ["@velzepooz", "@zuffik"],
+      reviewersToRequest: [],
+      reviewerShortfall: 0,
+    });
+  });
 });

@@ -28,6 +28,7 @@ function buildRoutingServices({ config }: { config: string }) {
       branchName: "docs/usage",
       targetBranchName: "develop",
     })),
+    fetchCurrentHeadApprovedReviewers: vi.fn(async () => []),
     getReviewerLoad: vi.fn(async ({ reviewers }: { reviewers: string[] }) =>
       Object.fromEntries(reviewers.map((reviewer) => [reviewer, 0])),
     ),
@@ -194,6 +195,42 @@ routing:
     );
     expect(services.persistDecision).toHaveBeenCalledWith(expect.objectContaining({ actionStatus: "pending" }));
     expect(services.markActionSucceeded).toHaveBeenCalledWith("decision-1", expect.any(Date));
+  });
+
+  it("credits current-head approvals that existed before routing and requests nobody else when they fill a high-risk cohort", async () => {
+    const services = buildRoutingServices({
+      config: `
+version: 1
+mode: enforce
+routing:
+  high_risk_reviewers: 2
+risk:
+  paths:
+    - pattern: README.md
+      weight: 100
+      tag: documentation
+ownership:
+  fallback_reviewers: ["@tomas223"]
+`,
+    });
+    const fetchCurrentHeadApprovedReviewers = vi.fn(async () => ["@velzepooz", "@zuffik"]);
+    Object.assign(services, { fetchCurrentHeadApprovedReviewers });
+
+    await processRoutingJob(message, services);
+
+    expect(fetchCurrentHeadApprovedReviewers).toHaveBeenCalledWith(message);
+    expect(services.persistDecision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "request_human_review",
+        selectedReviewers: ["@velzepooz", "@zuffik"],
+      }),
+    );
+    expect(services.applyDecisionActions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selectedReviewers: ["@velzepooz", "@zuffik"],
+        reviewersToRequest: [],
+      }),
+    );
   });
 
   it("does not reapply an enforce action that already succeeded for the delivery", async () => {
