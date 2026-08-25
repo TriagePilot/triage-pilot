@@ -55,10 +55,29 @@ describe("GitHub webhook route", () => {
         pullNumber: 7,
         baseSha: "trusted-base-123",
         headSha: "abc123",
+        isDraft: false,
         eventName: "pull_request.opened",
         routingKey: "routing:101:7:trusted-base-123:abc123",
       },
     });
+  });
+
+  it("passes an opened draft pull request to the worker for configuration-aware routing", async () => {
+    const acceptRoutingDelivery = vi.fn(async () => ({ inserted: true, jobId: "job-1" }));
+    const app = createWebApp(buildServices({ githubOrganization: "acme", acceptRoutingDelivery }));
+
+    const response = await signedWebhook(
+      app,
+      pullRequestBody({ owner: { login: "acme", type: "Organization" }, draft: true }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ ok: true });
+    expect(acceptRoutingDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({ isDraft: true }),
+      }),
+    );
   });
 
   it.each(["edited", "labeled", "review_requested", "converted_to_draft"])(
@@ -320,9 +339,11 @@ describe("GitHub webhook route", () => {
 const pullRequestBody = ({
   owner,
   action = "opened",
+  draft = false,
 }: {
   owner: { login: string; type: string };
   action?: string;
+  draft?: boolean;
 }) =>
   JSON.stringify({
     action,
@@ -330,6 +351,7 @@ const pullRequestBody = ({
     repository: { id: 101, name: "api", owner },
     pull_request: {
       number: 7,
+      draft,
       base: { sha: "trusted-base-123" },
       head: { sha: "abc123" },
     },

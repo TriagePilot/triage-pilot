@@ -42,6 +42,7 @@ ownership:
     expect(result.config.routing.highRiskReviewers).toBe(2);
     expect(result.config.routing.excludeTargetBranches).toEqual(["main", "master"]);
     expect(result.config.routing.excludeSourceBranchPatterns).toEqual(["dependabot/**"]);
+    expect(result.config.routing.includeDraftPullRequests).toBe(false);
     expect(result.config.risk.size).toEqual({ highChangedFiles: 120, highChangedLines: 6000 });
     expect(result.config.risk.thresholds).toEqual({ low: 25, high: 70 });
     expect(result.config.risk.paths[0]).toEqual({ pattern: "src/auth/**", weight: 30, tag: "auth" });
@@ -59,6 +60,7 @@ ownership:
     expect(result.config.routing.highRiskReviewers).toBe(1);
     expect(result.config.routing.excludeTargetBranches).toEqual([]);
     expect(result.config.routing.excludeSourceBranchPatterns).toEqual([]);
+    expect(result.config.routing.includeDraftPullRequests).toBe(false);
     expect(result.config.risk.size).toEqual({ highChangedFiles: 100, highChangedLines: 5000 });
     expect(Object.keys(result.config).sort()).toEqual(["mode", "ownership", "risk", "routing", "version"]);
   });

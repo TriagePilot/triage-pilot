@@ -31,6 +31,8 @@ export interface RoutingJobPayload {
   /** Present on newly accepted jobs; absent only on pre-upgrade queued payloads. */
   baseSha?: string;
   headSha: string;
+  /** Present on newly accepted jobs; absent only on pre-upgrade queued payloads. */
+  isDraft?: boolean;
   eventName: string;
   /** Stable identity for one pull-request state, including its trusted configuration revision. */
   routingKey?: string;
