@@ -127,6 +127,32 @@ routing:
     expect(services.applyDecisionActions).not.toHaveBeenCalled();
   });
 
+  it("silently skips a pull request from a source branch matching an explicit exclusion pattern", async () => {
+    const services = buildRoutingServices({
+      config: `
+version: 1
+mode: enforce
+routing:
+  exclude_source_branch_patterns: ["dependabot/**"]
+`,
+    });
+    services.fetchPullRequestMetadata.mockResolvedValueOnce({
+      authorLogin: "dependabot",
+      authorHandle: "@dependabot",
+      branchName: "dependabot/npm_and_yarn/vitest-2.1.9",
+      targetBranchName: "main",
+    });
+
+    await processRoutingJob(message, services);
+
+    expect(services.updateRepositoryConfigState).toHaveBeenCalledWith({ configState: "valid", mode: "enforce" });
+    expect(services.fetchChangedFiles).not.toHaveBeenCalled();
+    expect(services.fetchCommitMessages).not.toHaveBeenCalled();
+    expect(services.getReviewerLoad).not.toHaveBeenCalled();
+    expect(services.persistDecision).not.toHaveBeenCalled();
+    expect(services.applyDecisionActions).not.toHaveBeenCalled();
+  });
+
   it("records enforce action success", async () => {
     const services = buildRoutingServices({ config: "version: 1\nmode: enforce\n" });
 

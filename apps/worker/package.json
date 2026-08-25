@@ -13,6 +13,7 @@
     "@triagepilot/core": "workspace:*",
     "@triagepilot/db": "workspace:*",
     "@triagepilot/github": "workspace:*",
-    "@triagepilot/shared": "workspace:*"
+    "@triagepilot/shared": "workspace:*",
+    "minimatch": "^10.2.5"
   }
 }

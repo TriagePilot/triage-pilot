@@ -9,6 +9,7 @@ import {
   type RoutingJobPayload,
   type ScoreComponent,
 } from "@triagepilot/shared";
+import { minimatch } from "minimatch";
 
 export type RoutingJobMessage = RoutingJobPayload;
 
@@ -86,7 +87,14 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
   const publicMode: RepositoryMode = configResult.config.mode;
   await services.updateRepositoryConfigState({ configState: "valid", mode: publicMode });
   const pullRequestMetadata = await services.fetchPullRequestMetadata(message);
-  if (configResult.config.routing.excludeTargetBranches.includes(pullRequestMetadata.targetBranchName)) return;
+  if (
+    configResult.config.routing.excludeTargetBranches.includes(pullRequestMetadata.targetBranchName) ||
+    configResult.config.routing.excludeSourceBranchPatterns.some((pattern) =>
+      minimatch(pullRequestMetadata.branchName, pattern, { dot: true }),
+    )
+  ) {
+    return;
+  }
 
   const [changedFiles, commitMessages] = await Promise.all([
     services.fetchChangedFiles(message),
