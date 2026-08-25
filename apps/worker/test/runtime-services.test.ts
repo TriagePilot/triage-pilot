@@ -110,6 +110,7 @@ describe("worker routing GitHub reads", () => {
         action: "policy_approval",
         decisionId: "decision-1",
         expectedHeadSha: "unmerged-head-456",
+        riskTier: "low",
       }),
     ).rejects.toEqual(new PermanentJobError("pull request head changed before enforce actions"));
 
@@ -130,6 +131,7 @@ describe("worker routing GitHub reads", () => {
       action: "policy_approval",
       decisionId: "decision-1",
       expectedHeadSha: "unmerged-head-456",
+      riskTier: "low",
     });
 
     expect(request.mock.calls[0]).toEqual([
@@ -139,6 +141,8 @@ describe("worker routing GitHub reads", () => {
     expect(request.mock.calls.filter(([route]) => route.startsWith("POST ")).map(([route]) => route)).toEqual([
       "POST /repos/{owner}/{repo}/check-runs",
       "POST /repos/{owner}/{repo}/check-runs",
+      "POST /repos/{owner}/{repo}/labels",
+      "POST /repos/{owner}/{repo}/issues/{issue_number}/labels",
       "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
       "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
     ]);
@@ -162,6 +166,26 @@ describe("worker routing GitHub reads", () => {
     );
   });
 
+  it("syncs the calculated risk label during an enforce action", async () => {
+    const request = actionRequester("unmerged-head-456");
+    const services = buildServices(message, request);
+
+    await services.applyDecisionActions({
+      action: "request_human_review",
+      decisionId: "decision-1",
+      expectedHeadSha: "unmerged-head-456",
+      riskTier: "high",
+      selectedReviewers: ["@alice"],
+    });
+
+    expect(request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/labels", {
+      owner: "acme",
+      repo: "api",
+      issue_number: 7,
+      labels: ["triagepilot:risk-high"],
+    });
+  });
+
   it("creates an in-progress policy check before requesting selected reviewers", async () => {
     const request = actionRequester("unmerged-head-456");
     const services = buildServices(message, request);
@@ -170,6 +194,7 @@ describe("worker routing GitHub reads", () => {
       action: "request_human_review",
       decisionId: "decision-1",
       expectedHeadSha: "unmerged-head-456",
+      riskTier: "medium" as const,
       selectedReviewers: ["@alice"],
     });
 
@@ -198,6 +223,7 @@ describe("worker routing GitHub reads", () => {
       action: "no_eligible_reviewer",
       decisionId: "decision-1",
       expectedHeadSha: "unmerged-head-456",
+      riskTier: "medium" as const,
     });
 
     expect(request.mock.calls[0]?.[0]).toBe("GET /repos/{owner}/{repo}/pulls/{pull_number}");
@@ -221,6 +247,7 @@ describe("worker routing GitHub reads", () => {
       action: "request_human_review",
       decisionId: "decision-1",
       expectedHeadSha: "unmerged-head-456",
+      riskTier: "medium",
       selectedReviewers: ["@alice"],
     });
 
@@ -241,6 +268,7 @@ describe("worker routing GitHub reads", () => {
       action: "request_human_review",
       decisionId: "decision-1",
       expectedHeadSha: "unmerged-head-456",
+      riskTier: "medium" as const,
       selectedReviewers: ["@alice"],
     };
 
@@ -323,6 +351,7 @@ describe("worker routing GitHub reads", () => {
         action,
         decisionId: "decision-1",
         expectedHeadSha: "unmerged-head-456",
+        riskTier: action === "policy_approval" ? "low" : "medium",
         ...(action === "request_human_review" ? { selectedReviewers: ["@alice"] } : {}),
       }),
     ).rejects.toMatchObject({ status: 422 });
@@ -346,6 +375,7 @@ describe("worker routing GitHub reads", () => {
       action: "request_human_review",
       decisionId: "decision-1",
       expectedHeadSha: "unmerged-head-456",
+      riskTier: "medium" as const,
       selectedReviewers: ["@alice"],
     };
 
@@ -540,6 +570,7 @@ function actionRequester(currentHeadSha: string) {
     }
     if (
       route === "GET /repos/{owner}/{repo}/issues/{issue_number}/comments" ||
+      route === "GET /repos/{owner}/{repo}/issues/{issue_number}/labels" ||
       route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews"
     ) {
       return { data: [] };
@@ -670,6 +701,7 @@ function recoverablePolicyCheckRequester() {
     }
     if (
       route === "GET /repos/{owner}/{repo}/issues/{issue_number}/comments" ||
+      route === "GET /repos/{owner}/{repo}/issues/{issue_number}/labels" ||
       route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews"
     ) return { data: [] };
     if (route.startsWith("POST ")) return { data: {} };
@@ -781,6 +813,7 @@ function permanentlyFailingActionRequester(failurePoint: "routing_check" | "comm
       if (failurePoint === "comment") throw Object.assign(new Error("comment denied"), { status: 422 });
       return { data: [] };
     }
+    if (route === "GET /repos/{owner}/{repo}/issues/{issue_number}/labels") return { data: [] };
     if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") return { data: [] };
     if (route === "POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers" && failurePoint === "reviewer") {
       throw Object.assign(new Error("reviewer request denied"), { status: 422 });
@@ -800,6 +833,7 @@ function transientlyFailingActionRequester() {
     }
     if (route === "GET /repos/{owner}/{repo}/commits/{ref}/check-runs") return { data: { check_runs: [] } };
     if (route === "GET /repos/{owner}/{repo}/issues/{issue_number}/comments") return { data: [] };
+    if (route === "GET /repos/{owner}/{repo}/issues/{issue_number}/labels") return { data: [] };
     if (route === "POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers") {
       throw Object.assign(new Error("GitHub temporarily unavailable"), { status: 503 });
     }

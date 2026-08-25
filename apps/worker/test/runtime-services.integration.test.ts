@@ -105,6 +105,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
         action: "request_human_review",
         decisionId: decision.decisionId,
         expectedHeadSha: "abc123",
+        riskTier: "medium",
         selectedReviewers: ["@alice"],
       });
 

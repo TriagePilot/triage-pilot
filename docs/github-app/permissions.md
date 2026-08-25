@@ -7,7 +7,7 @@
 | Metadata | Read-only | Identify the installation and selected repositories |
 | Contents | Read-only | Read `.github/triagepilot.yml` from the pull request's trusted base commit |
 | Pull requests | Read and write | Verify the current head, request reviewers, or submit an approval pinned to the signed event head in enforce mode |
-| Issues | Read and write | Upsert the routing comment in enforce mode |
+| Issues | Read and write | Create and synchronize the managed risk label, and upsert the routing comment in enforce mode |
 | Checks | Read and write | Publish or update the routing check in enforce mode |
 | Commit statuses | Read and write (`statuses:write`) | Let rulesets require `triagepilot/human-review-policy` from the expected TriagePilot App source |
 

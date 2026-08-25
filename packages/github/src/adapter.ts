@@ -1,7 +1,12 @@
 import { App } from "@octokit/app";
-import { HUMAN_REVIEW_POLICY_CHECK_NAME } from "@triagepilot/shared";
+import { HUMAN_REVIEW_POLICY_CHECK_NAME, type RiskTier } from "@triagepilot/shared";
 
 const PAGE_SIZE = 100;
+const RISK_LABELS: Record<RiskTier, { name: string; color: string; description: string }> = {
+  low: { name: "triagepilot:risk-low", color: "0e8a16", description: "TriagePilot risk: low" },
+  medium: { name: "triagepilot:risk-medium", color: "fbca04", description: "TriagePilot risk: medium" },
+  high: { name: "triagepilot:risk-high", color: "b60205", description: "TriagePilot risk: high" },
+};
 
 type Requester = {
   request(route: string, parameters: Record<string, unknown>): Promise<{ data: unknown }>;
@@ -80,6 +85,45 @@ export class GitHubAdapter {
       ...toPullParams(input.pullRequest),
       reviewers,
       team_reviewers: teamReviewers,
+    });
+  }
+
+  async syncRiskLabel(input: { pullRequest: PullRequestRef; tier: RiskTier }) {
+    const target = RISK_LABELS[input.tier];
+    try {
+      await this.octokit.request("POST /repos/{owner}/{repo}/labels", {
+        ...toRepositoryParams(input.pullRequest),
+        ...target,
+      });
+    } catch (error) {
+      if (!isGitHubStatus(error, 422)) throw error;
+    }
+
+    const labels: unknown[] = [];
+    for (let page = 1; ; page += 1) {
+      const response = await this.octokit.request("GET /repos/{owner}/{repo}/issues/{issue_number}/labels", {
+        ...toIssueParams(input.pullRequest),
+        page,
+        per_page: PAGE_SIZE,
+      });
+      const records = Array.isArray(response.data) ? response.data : [];
+      labels.push(...records);
+      if (records.length < PAGE_SIZE) break;
+    }
+
+    const managedNames = new Set(Object.values(RISK_LABELS).map((label) => label.name));
+    for (const label of labels) {
+      const name = readLabelName(label);
+      if (name === undefined || name === target.name || !managedNames.has(name)) continue;
+      await this.octokit.request("DELETE /repos/{owner}/{repo}/issues/{issue_number}/labels/{name}", {
+        ...toIssueParams(input.pullRequest),
+        name,
+      });
+    }
+
+    await this.octokit.request("POST /repos/{owner}/{repo}/issues/{issue_number}/labels", {
+      ...toIssueParams(input.pullRequest),
+      labels: [target.name],
     });
   }
 
@@ -258,6 +302,16 @@ function isCommentWithMarker(comment: unknown, marker: string): comment is { bod
 
 function isCommentWithId(comment: unknown): comment is { id: number | string } {
   return typeof comment === "object" && comment !== null && "id" in comment;
+}
+
+function readLabelName(label: unknown): string | undefined {
+  if (typeof label !== "object" || label === null || !("name" in label)) return undefined;
+  const name = String(label.name).trim();
+  return name || undefined;
+}
+
+function isGitHubStatus(error: unknown, status: number): boolean {
+  return typeof error === "object" && error !== null && "status" in error && error.status === status;
 }
 
 function readCheckRuns(data: unknown): unknown[] {

@@ -137,6 +137,7 @@ routing:
         action: "policy_approval",
         decisionId: "decision-1",
         expectedHeadSha: "abc123",
+        riskTier: "low",
       }),
     );
     expect(services.persistDecision).toHaveBeenCalledWith(expect.objectContaining({ actionStatus: "pending" }));

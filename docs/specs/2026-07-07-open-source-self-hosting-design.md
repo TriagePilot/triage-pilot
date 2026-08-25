@@ -143,13 +143,15 @@ There are no administrator records or sessions in PostgreSQL. Registration, invi
 
 TriagePilot authenticates as the configured GitHub App and creates installation tokens for the configured organization's installation. A personal access token or user API key is neither required nor supported.
 
-The GitHub App uses read-only metadata and contents access plus read-write pull-request, issue, check, and commit-status access. **Commit statuses: Read and write** (`statuses:write`) is required so a ruleset can require `triagepilot/human-review-policy` from the expected TriagePilot App source. It subscribes only to pull-request, installation, and installation-repositories events. Shadow mode performs GitHub reads only. In enforce mode, the existing routing rules may upsert one routing comment, publish one routing check, request up to two selected users or GitHub team reviewers in one call, or submit a policy approval. The public permissions document lists each permission and its purpose.
+The GitHub App uses read-only metadata and contents access plus read-write pull-request, issue, check, and commit-status access. **Commit statuses: Read and write** (`statuses:write`) is required so a ruleset can require `triagepilot/human-review-policy` from the expected TriagePilot App source. It subscribes only to pull-request, installation, and installation-repositories events. Shadow mode performs GitHub reads only. In enforce mode, the existing routing rules may synchronize one managed risk label, upsert one routing comment, publish one routing check, request up to two selected users or GitHub team reviewers in one call, or submit a policy approval. The public permissions document lists each permission and its purpose.
 
 ## Repository Configuration
 
 Each repository may provide `.github/triagepilot.yml`. The configuration contains the routing mode, risk rules, and ownership/reviewer rules. Scheduled SLA configuration is not part of the reduced contract.
 
 The routing contract requests zero human reviewers for low risk, one for medium risk, and one for high risk unless `routing.high_risk_reviewers` is explicitly set to `2`. The high-risk value accepts only `1` or `2`, so one pull request never receives more than two selected human reviewers. Equal-load candidates use a deterministic pull-request-specific ordering. Decisions record the requested count, selected reviewers, and any shortfall when too few eligible reviewers exist.
+
+Each enforce-mode routing action also synchronizes the matching `triagepilot:risk-low`, `triagepilot:risk-medium`, or `triagepilot:risk-high` label. TriagePilot creates its labels when needed, replaces only labels in that managed namespace, and leaves all other pull-request labels intact.
 
 The repository file is the only per-repository mode control:
 
@@ -179,7 +181,7 @@ Missing configuration uses the documented safe defaults in shadow mode. Invalid 
 8. Pure domain logic calculates risk, ownership matches, and the routing action.
 9. The worker stores the decision and its intended mode.
 10. Shadow mode stops without a GitHub write. Before an enforce action sequence, the worker fetches the pull request once and compares its current head SHA with the head SHA from the signed event.
-11. A mismatch records a permanent action failure before any check, comment, reviewer, or approval write. A match permits the action sequence; checks target the signed head and policy approvals include it as `commit_id`.
+11. A mismatch records a permanent action failure before any check, label, comment, reviewer, or approval write. A match permits the action sequence; checks target the signed head and policy approvals include it as `commit_id`.
 
 Raw diff contents are not fetched or stored.
 

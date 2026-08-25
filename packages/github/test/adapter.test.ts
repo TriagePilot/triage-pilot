@@ -464,4 +464,48 @@ describe("GitHubAdapter", () => {
     });
     expect(request.mock.calls.map(([route]) => route)).not.toContain("POST /repos/{owner}/{repo}/check-runs");
   });
+
+  it("replaces only an older TriagePilot risk label", async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({ data: { name: "triagepilot:risk-high" } })
+      .mockResolvedValueOnce({
+        data: [{ name: "triagepilot:risk-low" }, { name: "team:release" }],
+      })
+      .mockResolvedValueOnce({ data: {} })
+      .mockResolvedValueOnce({ data: [{ name: "triagepilot:risk-high" }, { name: "team:release" }] });
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await adapter.syncRiskLabel({
+      pullRequest: { owner: "acme", repo: "app", pullNumber: 7 },
+      tier: "high",
+    });
+
+    expect(request).toHaveBeenNthCalledWith(1, "POST /repos/{owner}/{repo}/labels", {
+      owner: "acme",
+      repo: "app",
+      name: "triagepilot:risk-high",
+      color: "b60205",
+      description: "TriagePilot risk: high",
+    });
+    expect(request).toHaveBeenNthCalledWith(2, "GET /repos/{owner}/{repo}/issues/{issue_number}/labels", {
+      owner: "acme",
+      repo: "app",
+      issue_number: 7,
+      per_page: 100,
+      page: 1,
+    });
+    expect(request).toHaveBeenNthCalledWith(3, "DELETE /repos/{owner}/{repo}/issues/{issue_number}/labels/{name}", {
+      owner: "acme",
+      repo: "app",
+      issue_number: 7,
+      name: "triagepilot:risk-low",
+    });
+    expect(request).toHaveBeenNthCalledWith(4, "POST /repos/{owner}/{repo}/issues/{issue_number}/labels", {
+      owner: "acme",
+      repo: "app",
+      issue_number: 7,
+      labels: ["triagepilot:risk-high"],
+    });
+  });
 });

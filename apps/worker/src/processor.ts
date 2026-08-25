@@ -1,6 +1,13 @@
 import { parseTriagePilotConfig } from "@triagepilot/config";
 import { decideRouting, matchOwnership, scorePullRequestRisk, type ChangedFileMetadata } from "@triagepilot/core";
-import { legacyRoutingKey, type ActionStatus, type GitHubId, type RepositoryMode, type RoutingJobPayload } from "@triagepilot/shared";
+import {
+  legacyRoutingKey,
+  type ActionStatus,
+  type GitHubId,
+  type RepositoryMode,
+  type RiskTier,
+  type RoutingJobPayload,
+} from "@triagepilot/shared";
 
 export type RoutingJobMessage = RoutingJobPayload;
 
@@ -40,6 +47,7 @@ export interface RoutingJobServices {
   applyDecisionActions(input: {
     action: string;
     expectedHeadSha: string;
+    riskTier: RiskTier;
     selectedReviewers?: string[];
     noHumanReason?: string;
     decisionId: string;
@@ -126,6 +134,7 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
       action: routing.action,
       decisionId: persisted.decisionId,
       expectedHeadSha: message.headSha,
+      riskTier: risk.tier,
     };
     if (routing.selectedReviewers.length > 0) actionInput.selectedReviewers = routing.selectedReviewers;
     if (routing.noHumanReason) actionInput.noHumanReason = routing.noHumanReason;

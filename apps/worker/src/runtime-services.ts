@@ -199,6 +199,10 @@ export function createWorkerRoutingServiceFactory(input: {
             conclusion: "success",
             summary: action.noHumanReason ?? action.selectedReviewers?.join(", ") ?? action.action,
           });
+          await adapter.syncRiskLabel({
+            pullRequest,
+            tier: action.riskTier,
+          });
           await adapter.upsertRoutingComment({
             pullRequest,
             decisionId: action.decisionId,
