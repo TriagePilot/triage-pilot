@@ -186,6 +186,7 @@ const policyCheckRequester = async (route: string, parameters: Record<string, un
   }
   if (
     route === "GET /repos/{owner}/{repo}/issues/{issue_number}/comments" ||
+    route === "GET /repos/{owner}/{repo}/issues/{issue_number}/labels" ||
     route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews"
   ) return { data: [] };
   if (route.startsWith("POST ")) return { data: {} };
