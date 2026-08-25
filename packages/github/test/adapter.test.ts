@@ -189,7 +189,7 @@ describe("GitHubAdapter", () => {
   it("lists valid pull-request reviews across pages and ignores malformed records", async () => {
     const firstPage: unknown[] = Array.from({ length: 100 }, () => null);
     firstPage[0] = {
-      user: { login: "devon" },
+      user: { login: "devon", type: "User" },
       state: "APPROVED",
       commit_id: "head-1",
       submitted_at: "2026-08-21T09:00:00Z",
@@ -199,7 +199,7 @@ describe("GitHubAdapter", () => {
       .mockResolvedValueOnce({ data: firstPage })
       .mockResolvedValueOnce({
         data: [
-          { user: { login: "jules" }, state: "CHANGES_REQUESTED", commit_id: null, submitted_at: null },
+          { user: { login: "jules", type: "Bot" }, state: "CHANGES_REQUESTED", commit_id: null, submitted_at: null },
           { user: {}, state: "APPROVED" },
           { user: { login: "   " }, state: "APPROVED" },
           { user: { login: "sasha" }, state: "   " },
@@ -211,11 +211,12 @@ describe("GitHubAdapter", () => {
       .toEqual([
         {
           userLogin: "devon",
+          userType: "User",
           state: "APPROVED",
           commitId: "head-1",
           submittedAt: "2026-08-21T09:00:00Z",
         },
-        { userLogin: "jules", state: "CHANGES_REQUESTED", commitId: null, submittedAt: null },
+        { userLogin: "jules", userType: "Bot", state: "CHANGES_REQUESTED", commitId: null, submittedAt: null },
       ]);
 
     expect(request).toHaveBeenNthCalledWith(1, "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews", {

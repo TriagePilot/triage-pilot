@@ -23,6 +23,7 @@ export interface RoutingJobServices {
     branchName: string;
     targetBranchName: string;
   }>;
+  fetchCurrentHeadApprovedReviewers(input: RoutingJobMessage): Promise<string[]>;
   getReviewerLoad(input: { installationId: GitHubId; reviewers: string[] }): Promise<Record<string, number>>;
   updateRepositoryConfigState(input: {
     configState: "valid" | "invalid";
@@ -56,6 +57,7 @@ export interface RoutingJobServices {
       components: ScoreComponent[];
     };
     selectedReviewers?: string[];
+    reviewersToRequest?: string[];
     noHumanReason?: string;
     decisionId: string;
   }): Promise<void>;
@@ -120,10 +122,12 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
     commitMessages,
     config: configResult.config.risk,
   });
+  const existingApprovedReviewers = risk.tier === "low" ? [] : await services.fetchCurrentHeadApprovedReviewers(message);
   const routing = decideRouting({
     risk,
     author: pullRequestMetadata.authorHandle,
     eligibleReviewers: ownership.eligibleReviewers,
+    existingApprovedReviewers,
     load: reviewerLoad,
     highRiskReviewers: configResult.config.routing.highRiskReviewers,
     selectionKey: `${message.owner}/${message.repo}#${message.pullNumber}`,
@@ -155,6 +159,7 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
       risk,
     };
     if (routing.selectedReviewers.length > 0) actionInput.selectedReviewers = routing.selectedReviewers;
+    actionInput.reviewersToRequest = routing.reviewersToRequest;
     if (routing.noHumanReason) actionInput.noHumanReason = routing.noHumanReason;
     try {
       await services.applyDecisionActions(actionInput);

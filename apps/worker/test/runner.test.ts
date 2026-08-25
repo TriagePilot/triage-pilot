@@ -276,6 +276,7 @@ describe("runWorkerOnce", () => {
         branchName: "feature",
         targetBranchName: "develop",
       })),
+      fetchCurrentHeadApprovedReviewers: vi.fn(async () => []),
       getReviewerLoad: vi.fn(async () => ({})),
       updateRepositoryConfigState: vi.fn(async () => {}),
       persistDecision: vi.fn(async () => ({
