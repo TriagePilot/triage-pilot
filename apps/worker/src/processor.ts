@@ -132,12 +132,17 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
     reviewers: ownership.eligibleReviewers,
     endingAfter: availabilityEvaluatedAt,
   });
+  const canonicalEligibleReviewers = availableReviewerHandlesAt({
+    reviewers: ownership.eligibleReviewers,
+    absences: [],
+    now: availabilityEvaluatedAt,
+  });
   const availableEligibleReviewers = availableReviewerHandlesAt({
     reviewers: ownership.eligibleReviewers,
     absences: absenceWindows,
     now: availabilityEvaluatedAt,
   });
-  const excludedReviewers = ownership.eligibleReviewers.filter(
+  const excludedReviewers = canonicalEligibleReviewers.filter(
     (reviewer) => !availableEligibleReviewers.includes(reviewer),
   );
   const reviewerLoad = await services.getReviewerLoad({
