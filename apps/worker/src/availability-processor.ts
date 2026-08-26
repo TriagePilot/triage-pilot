@@ -62,19 +62,33 @@ export async function processReviewerAbsenceActivationJob(
 
   let deferredError: unknown = null;
   for (const candidate of activation.candidates) {
+    let recordedOutcome: ReviewerReplacementOutcome | null;
     try {
-      const recordedOutcome = await services.findRecordedOutcome({
+      recordedOutcome = await services.findRecordedOutcome({
         absenceId: activation.absenceId,
         absenceRevision: activation.revision,
         decisionId: candidate.decisionId,
       });
-      if (recordedOutcome !== null) {
-        if (candidate.mode === "enforce") {
-          await replayPolicyFinalizer(services, candidate, recordedOutcome);
-        }
-        continue;
-      }
+    } catch (error) {
+      if (deferredError === null) deferredError = error;
+      continue;
+    }
 
+    if (recordedOutcome !== null) {
+      if (candidate.mode === "enforce") {
+        try {
+          await replayPolicyFinalizer(services, candidate, recordedOutcome);
+        } catch (error) {
+          if (
+            deferredError === null &&
+            !(classifyWorkerError(error) instanceof PermanentJobError)
+          ) deferredError = error;
+        }
+      }
+      continue;
+    }
+
+    try {
       await processCandidate(services, activation, candidate, activationAt);
     } catch (error) {
       const classified = classifyWorkerError(error);

@@ -355,6 +355,94 @@ describe("processReviewerAbsenceActivationJob", () => {
     }
   });
 
+  it.each(["replaced", "skipped_policy_satisfied"] as const)(
+    "contains a permanent %s replay failure without entering fresh recovery",
+    async (recordedOutcome) => {
+      const recoveryCandidate = {
+        ...candidate,
+        selectedReviewers: ["@user-c91e46"],
+        policyCheckState: "success" as const,
+      };
+      const laterCandidate = { ...candidate, decisionId: "decision-2", pullNumber: 8 };
+      const events: string[] = [];
+      const services = buildServices({
+        loadActivation: vi.fn(async () => ({
+          ...activation,
+          candidates: [recoveryCandidate, laterCandidate],
+        })),
+        findRecordedOutcome: vi.fn(async (input) => (
+          input.decisionId === recoveryCandidate.decisionId ? recordedOutcome : null
+        )),
+        fetchPullRequest: vi.fn(async (input) => ({
+          state: "closed",
+          headSha: input.headSha,
+          authorHandle: "@user-author",
+        })),
+        reevaluatePolicy: vi.fn(async (input) => {
+          events.push(`replay:${input.decisionId}`);
+          throw Object.assign(new Error("check update rejected"), { status: 422 });
+        }),
+        recordOutcome: vi.fn(async (input) => {
+          events.push(`persist:${input.decisionId}:${input.outcome}`);
+          return { inserted: true };
+        }),
+        failPolicyCheck: vi.fn(async (input) => {
+          events.push(`fail:${input.decisionId}`);
+        }),
+      });
+
+      await expect(processReviewerAbsenceActivationJob(message, services)).resolves.toBeUndefined();
+
+      expect(events).toEqual([
+        "replay:decision-1",
+        "persist:decision-2:skipped_closed",
+      ]);
+    },
+  );
+
+  it("defers a transient recorded replay failure until later decisions finish", async () => {
+    const error = Object.assign(new Error("check update unavailable"), { status: 503 });
+    const recoveryCandidate = {
+      ...candidate,
+      selectedReviewers: ["@user-c91e46"],
+      policyCheckState: "success" as const,
+    };
+    const laterCandidate = { ...candidate, decisionId: "decision-2", pullNumber: 8 };
+    const events: string[] = [];
+    const services = buildServices({
+      loadActivation: vi.fn(async () => ({
+        ...activation,
+        candidates: [recoveryCandidate, laterCandidate],
+      })),
+      findRecordedOutcome: vi.fn(async (input) => (
+        input.decisionId === recoveryCandidate.decisionId ? "replaced" : null
+      )),
+      fetchPullRequest: vi.fn(async (input) => ({
+        state: "closed",
+        headSha: input.headSha,
+        authorHandle: "@user-author",
+      })),
+      reevaluatePolicy: vi.fn(async (input) => {
+        events.push(`replay:${input.decisionId}`);
+        throw error;
+      }),
+      recordOutcome: vi.fn(async (input) => {
+        events.push(`persist:${input.decisionId}:${input.outcome}`);
+        return { inserted: true };
+      }),
+      failPolicyCheck: vi.fn(async (input) => {
+        events.push(`fail:${input.decisionId}`);
+      }),
+    });
+
+    await expect(processReviewerAbsenceActivationJob(message, services)).rejects.toBe(error);
+
+    expect(events).toEqual([
+      "replay:decision-1",
+      "persist:decision-2:skipped_closed",
+    ]);
+  });
+
   it("records a permanent GitHub failure, blocks enforce policy, and completes the job", async () => {
     const events: string[] = [];
     const services = buildServices({
