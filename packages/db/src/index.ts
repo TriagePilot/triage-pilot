@@ -29,6 +29,7 @@ export {
   updateReviewerAbsence,
   type AvailabilityOverview,
   type RecordReviewerReplacementInput,
+  type RecordReviewerReplacementResult,
   type ReviewerAbsenceActivation,
   type ReviewerAbsenceMutation,
   type ReviewerAbsenceStatus,

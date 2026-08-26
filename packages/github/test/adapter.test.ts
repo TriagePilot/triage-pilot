@@ -213,6 +213,20 @@ describe("GitHubAdapter", () => {
     expect(request).not.toHaveBeenCalled();
   });
 
+  it.each(["@team-a7f19c/security", "user-d82a5f", "@User-D82A5F"])("rejects non-normalized individual reviewer %s before removal inspection or writes", async (reviewer) => {
+    const request = vi.fn();
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await expect(
+      adapter.removeHumanReviewer({
+        pullRequest: { owner: "acme", repo: "app", pullNumber: 7 },
+        reviewer,
+      }),
+    ).rejects.toThrow("Reviewer must be a normalized individual GitHub handle");
+
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it("submits a low-risk policy approval review", async () => {
     const request = vi.fn().mockResolvedValueOnce({ data: [] }).mockResolvedValueOnce({ data: {} });
     const adapter = new GitHubAdapter({ request } as never);

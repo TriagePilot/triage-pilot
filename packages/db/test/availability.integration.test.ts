@@ -250,6 +250,38 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability", 
     });
   });
 
+  it("treats the start instant as active and the end instant as ended", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const absence = await createReviewerAbsence(db, {
+        reviewerHandle: "@user-boundary",
+        startAt: new Date("2026-09-01T12:00:00.000Z"),
+        endAt: new Date("2026-09-02T12:00:00.000Z"),
+        now: new Date("2026-08-31T12:00:00.000Z"),
+      });
+
+      await expect(readAvailabilityOverview(db, {
+        now: new Date("2026-09-01T12:00:00.000Z"),
+      })).resolves.toMatchObject({
+        absences: [expect.objectContaining({ id: absence.id, status: "active" })],
+      });
+      await expect(readAvailabilityOverview(db, {
+        now: new Date("2026-09-02T12:00:00.000Z"),
+      })).resolves.toMatchObject({
+        absences: [expect.objectContaining({ id: absence.id, status: "ended" })],
+      });
+    });
+  });
+
+  it("rejects invalid organization timezones before persistence", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      await expect(updateOrganizationTimezone(db, {
+        timezone: "Not/A_Timezone",
+        now,
+      })).rejects.toBeInstanceOf(ReviewerAbsenceValidationError);
+      await expect(readAvailabilityOverview(db, { now })).resolves.toMatchObject({ timezone: "UTC" });
+    });
+  });
+
   it("loads only the latest active human-review decisions for an active absence revision", async () => {
     await withPostgresTestDatabase(async (db) => {
       const absence = await createReviewerAbsence(db, {
@@ -574,6 +606,82 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability", 
       ]);
     });
   });
+
+  it.each(["edit", "cancel"] as const)(
+    "does not persist a stale replacement or change the cohort after an in-flight absence %s",
+    async (mutation) => {
+      await withPostgresTestDatabase(async (db) => {
+        const absence = await createReviewerAbsence(db, {
+          reviewerHandle: "@user-race",
+          startAt: new Date("2026-08-31T12:00:00.000Z"),
+          endAt: new Date("2026-09-02T12:00:00.000Z"),
+          now,
+        });
+        const repositoryId = await seedAvailabilityRepository(db);
+        const decisionId = "00000000-0000-0000-0000-000000000031";
+        await seedAvailabilityDecision(db, repositoryId, {
+          id: decisionId,
+          deliveryId: `delivery-race-${mutation}`,
+          routingKey: `routing-race-${mutation}`,
+          pullNumber: mutation === "edit" ? 31 : 32,
+          headSha: "race-head",
+          mode: "enforce",
+          selectedReviewers: ["@user-race", "@user-existing"],
+          details: {
+            ownership: { eligibleReviewers: ["@user-race", "@user-replacement"] },
+            routing: { requestedReviewerCount: 2 },
+          },
+          policyCheckState: "in_progress",
+          createdAt: now,
+        });
+
+        const activation = await loadReviewerAbsenceActivation(db, {
+          absenceId: absence.id,
+          expectedRevision: absence.revision,
+          now,
+        });
+        expect(activation).not.toBeNull();
+
+        if (mutation === "edit") {
+          await updateReviewerAbsence(db, {
+            absenceId: absence.id,
+            expectedRevision: absence.revision,
+            reviewerHandle: absence.reviewerHandle,
+            startAt: new Date("2026-08-30T12:00:00.000Z"),
+            endAt: new Date("2026-09-03T12:00:00.000Z"),
+            now,
+          });
+        } else {
+          await cancelReviewerAbsence(db, {
+            absenceId: absence.id,
+            expectedRevision: absence.revision,
+            now,
+          });
+        }
+
+        await expect(recordReviewerReplacement(db, {
+          absenceId: absence.id,
+          absenceRevision: absence.revision,
+          decisionId,
+          unavailableReviewer: "@user-race",
+          replacementReviewer: "@user-replacement",
+          outcome: "replaced",
+          reason: "stale in-flight replacement",
+          startedAt: now,
+          completedAt: now,
+          replaceCohort: true,
+        })).resolves.toEqual({ inserted: false, activationCurrent: false });
+        await expect(db.selectFrom("reviewer_replacements").select("id").execute()).resolves.toEqual([]);
+        await expect(db.selectFrom("routing_decisions")
+          .select(["selected_reviewer", "selected_reviewers"])
+          .where("id", "=", decisionId)
+          .executeTakeFirstOrThrow()).resolves.toEqual({
+          selected_reviewer: "@user-race",
+          selected_reviewers: ["@user-race", "@user-existing"],
+        });
+      });
+    },
+  );
 });
 
 async function seedAvailabilityRepository(db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0]): Promise<string> {

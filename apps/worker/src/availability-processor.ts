@@ -1,5 +1,6 @@
 import type {
   RecordReviewerReplacementInput,
+  RecordReviewerReplacementResult,
   ReviewerAbsenceActivation,
   ReviewerAbsenceWindow,
   ReviewerReplacementCandidate,
@@ -43,7 +44,7 @@ export interface ReviewerAvailabilityServices {
   }): Promise<Record<string, number>>;
   removeReviewer(candidate: ReviewerReplacementCandidate, reviewer: string): Promise<void>;
   requestReviewer(candidate: ReviewerReplacementCandidate, reviewer: string): Promise<void>;
-  recordOutcome(input: RecordReviewerReplacementInput): Promise<{ inserted: boolean }>;
+  recordOutcome(input: RecordReviewerReplacementInput): Promise<RecordReviewerReplacementResult>;
   reevaluatePolicy(candidate: ReviewerReplacementCandidate): Promise<void>;
   failPolicyCheck(candidate: ReviewerReplacementCandidate, summary: string): Promise<void>;
 }
@@ -79,10 +80,10 @@ export async function processReviewerAbsenceActivationJob(
         try {
           await replayPolicyFinalizer(services, candidate, recordedOutcome);
         } catch (error) {
-          if (
-            deferredError === null &&
-            !(classifyWorkerError(error) instanceof PermanentJobError)
-          ) deferredError = error;
+          if (deferredError === null) {
+            const classified = classifyWorkerError(error);
+            deferredError = classified instanceof PermanentJobError ? classified : error;
+          }
         }
       }
       continue;
@@ -117,12 +118,13 @@ async function recoverPermanentFailure(
   failure: PermanentJobError,
 ): Promise<unknown | null> {
   try {
-    await recordOutcome(services, activation, candidate, activationAt, {
+    const activationCurrent = await recordOutcome(services, activation, candidate, activationAt, {
       outcome: "permanent_failure",
       replacementReviewer: null,
       reason: failure.message,
       replaceCohort: false,
     });
+    if (!activationCurrent) return null;
   } catch (error) {
     return error;
   }
@@ -164,12 +166,13 @@ async function processCandidate(
 
   const approvedReviewers = activeApprovedReviewers(await services.fetchReviews(candidate));
   if (approvedReviewers.length >= candidate.requiredApprovalCount) {
-    await recordOutcome(services, activation, candidate, activationAt, {
+    const activationCurrent = await recordOutcome(services, activation, candidate, activationAt, {
       outcome: "skipped_policy_satisfied",
       replacementReviewer: null,
       reason: "Required human approval count is already satisfied.",
       replaceCohort: false,
     });
+    if (!activationCurrent) return;
     if (candidate.mode === "enforce") await services.reevaluatePolicy(candidate);
     return;
   }
@@ -203,12 +206,13 @@ async function processCandidate(
     selectionKey: `${candidate.owner}/${candidate.repo}#${candidate.pullNumber}`,
   });
   if (selection.replacementReviewer === null) {
-    await recordOutcome(services, activation, candidate, activationAt, {
+    const activationCurrent = await recordOutcome(services, activation, candidate, activationAt, {
       outcome: "no_replacement_available",
       replacementReviewer: null,
       reason: "No available reviewer remains in the original ownership-eligible pool.",
       replaceCohort: false,
     });
+    if (!activationCurrent) return;
     if (candidate.mode === "enforce") {
       await services.failPolicyCheck(candidate, NO_REPLACEMENT_POLICY_SUMMARY);
     }
@@ -217,12 +221,13 @@ async function processCandidate(
   if (candidate.mode === "enforce") {
     await services.removeReviewer(candidate, activation.reviewerHandle);
     await services.requestReviewer(candidate, selection.replacementReviewer);
-    await recordOutcome(services, activation, candidate, activationAt, {
+    const activationCurrent = await recordOutcome(services, activation, candidate, activationAt, {
       outcome: "replaced",
       replacementReviewer: selection.replacementReviewer,
       reason: `Replaced absent reviewer ${activation.reviewerHandle} with ${selection.replacementReviewer}.`,
       replaceCohort: true,
     });
+    if (!activationCurrent) return;
     await services.reevaluatePolicy(candidate);
   } else {
     await recordOutcome(services, activation, candidate, activationAt, {
@@ -257,8 +262,8 @@ async function recordOutcome(
     RecordReviewerReplacementInput,
     "outcome" | "replacementReviewer" | "reason" | "replaceCohort"
   >,
-): Promise<void> {
-  await services.recordOutcome({
+): Promise<boolean> {
+  const result = await services.recordOutcome({
     absenceId: activation.absenceId,
     absenceRevision: activation.revision,
     decisionId: candidate.decisionId,
@@ -267,6 +272,7 @@ async function recordOutcome(
     startedAt,
     completedAt: services.now(),
   });
+  return result.activationCurrent !== false;
 }
 
 function normalizeReviewer(reviewer: string): string {

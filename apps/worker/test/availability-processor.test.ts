@@ -8,6 +8,7 @@ import {
   processReviewerAbsenceActivationJob,
   type ReviewerAvailabilityServices,
 } from "../src/availability-processor";
+import { PermanentJobError } from "../src/errors";
 
 const now = new Date("2026-10-01T08:00:00.000Z");
 const message = {
@@ -325,6 +326,19 @@ describe("processReviewerAbsenceActivationJob", () => {
     expect(services.failPolicyCheck).not.toHaveBeenCalled();
   });
 
+  it("stops policy finalization when replacement persistence finds the activation stale", async () => {
+    const services = buildServices({
+      recordOutcome: vi.fn(async () => ({ inserted: false, activationCurrent: false })),
+    });
+
+    await processReviewerAbsenceActivationJob(message, services);
+
+    expect(services.removeReviewer).toHaveBeenCalledWith(candidate, activation.reviewerHandle);
+    expect(services.requestReviewer).toHaveBeenCalledWith(candidate, "@user-c91e46");
+    expect(services.recordOutcome).toHaveBeenCalledWith(expect.objectContaining({ outcome: "replaced" }));
+    expect(services.reevaluatePolicy).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["replaced", "reevaluate"],
     ["skipped_policy_satisfied", "reevaluate"],
@@ -356,7 +370,7 @@ describe("processReviewerAbsenceActivationJob", () => {
   });
 
   it.each(["replaced", "skipped_policy_satisfied"] as const)(
-    "contains a permanent %s replay failure without entering fresh recovery",
+    "reports a permanent %s replay failure after later decisions finish",
     async (recordedOutcome) => {
       const recoveryCandidate = {
         ...candidate,
@@ -391,7 +405,9 @@ describe("processReviewerAbsenceActivationJob", () => {
         }),
       });
 
-      await expect(processReviewerAbsenceActivationJob(message, services)).resolves.toBeUndefined();
+      await expect(processReviewerAbsenceActivationJob(message, services)).rejects.toEqual(
+        new PermanentJobError("check update rejected"),
+      );
 
       expect(events).toEqual([
         "replay:decision-1",

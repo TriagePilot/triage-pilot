@@ -74,6 +74,11 @@ export interface RecordReviewerReplacementInput {
   replaceCohort: boolean;
 }
 
+export interface RecordReviewerReplacementResult {
+  inserted: boolean;
+  activationCurrent?: boolean;
+}
+
 export interface ReviewerAbsenceMutation {
   reviewerHandle: string;
   startAt: Date;
@@ -194,6 +199,7 @@ export async function updateOrganizationTimezone(
   input: { timezone: string; now: Date },
 ): Promise<void> {
   validateDate(input.now, "now");
+  validateTimezone(input.timezone);
   await db
     .insertInto("organization_settings")
     .values({ id: true, timezone: input.timezone, updated_at: input.now })
@@ -331,8 +337,24 @@ export async function loadReviewerAbsenceActivation(
 export async function recordReviewerReplacement(
   db: Kysely<Database>,
   input: RecordReviewerReplacementInput,
-): Promise<{ inserted: boolean }> {
+): Promise<RecordReviewerReplacementResult> {
   return db.transaction().execute(async (trx) => {
+    const absence = await trx
+      .selectFrom("reviewer_absences")
+      .select(["revision", "status", "start_at", "end_at"])
+      .where("id", "=", input.absenceId)
+      .forUpdate()
+      .executeTakeFirst();
+    if (
+      !absence ||
+      absence.revision !== input.absenceRevision ||
+      absence.status !== "scheduled" ||
+      absence.start_at > input.completedAt ||
+      absence.end_at <= input.completedAt
+    ) {
+      return { inserted: false, activationCurrent: false };
+    }
+
     const inserted = await trx
       .insertInto("reviewer_replacements")
       .values({
@@ -394,6 +416,14 @@ function validateMutation(input: ReviewerAbsenceMutation): ReviewerAbsenceMutati
 
 function validateDate(value: Date, name: string): void {
   if (!Number.isFinite(value.getTime())) throw new ReviewerAbsenceValidationError(`${name} must be a finite date`);
+}
+
+function validateTimezone(value: string): void {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format();
+  } catch {
+    throw new ReviewerAbsenceValidationError("Timezone must be UTC or a valid IANA timezone identifier");
+  }
 }
 
 function validateExpectedRevision(value: number): void {
