@@ -58,6 +58,46 @@ describe("administrator availability", () => {
     });
     expect(inputNamed(container, "absence-start")?.value).toBe("2026-09-01T08:00");
     expect(inputNamed(container, "absence-end")?.value).toBe("2026-09-01T17:00");
+
+    await act(async () => {
+      root?.render(
+        <AvailabilityPanel
+          availability={{ ...availability, timezone: "America/New_York" }}
+          onChange={() => {}}
+        />,
+      );
+    });
+    expect(inputNamed(container, "absence-start")?.value).toBe("2026-09-01T02:00");
+    expect(inputNamed(container, "absence-end")?.value).toBe("2026-09-01T11:00");
+  });
+
+  it("disables every availability control until the current mutation resolves", async () => {
+    let resolveRequest: ((value: Response) => void) | undefined;
+    const request = new Promise<Response>((resolve) => {
+      resolveRequest = resolve;
+    });
+    const fetchMock = vi.fn(() => request);
+    vi.stubGlobal("fetch", fetchMock);
+    const container = document.createElement("div");
+    document.body.append(container);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AvailabilityPanel availability={availability} onChange={() => {}} />);
+    });
+    await act(async () => {
+      inputNamed(container, "availability-timezone")?.closest("form")?.dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(Array.from(container.querySelectorAll<HTMLButtonElement | HTMLInputElement>("button, input")).every((control) => control.disabled)).toBe(true);
+
+    await act(async () => {
+      resolveRequest?.(Response.json(availability));
+      await request;
+    });
   });
 
   it("sends local wall times and revisions for absence mutations", async () => {

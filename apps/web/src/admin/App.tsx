@@ -137,6 +137,7 @@ export function App() {
       overview={overview}
       availability={availability}
       onAvailabilityChange={setAvailability}
+      onAvailabilitySessionExpired={showSignedOut}
       error={error}
       onLogout={handleLogout}
     />
@@ -213,11 +214,12 @@ interface DashboardProps {
   overview: OperationsOverview;
   availability: AvailabilityOverview;
   onAvailabilityChange(availability: AvailabilityOverview): void;
+  onAvailabilitySessionExpired?(message: string): void;
   error?: string | null;
   onLogout(): Promise<void>;
 }
 
-export function Dashboard({ username, overview, availability, onAvailabilityChange, error, onLogout }: DashboardProps) {
+export function Dashboard({ username, overview, availability, onAvailabilityChange, onAvailabilitySessionExpired, error, onLogout }: DashboardProps) {
   return (
     <main className="shell" aria-labelledby="dashboard-title">
       <header className="topbar">
@@ -262,7 +264,7 @@ export function Dashboard({ username, overview, availability, onAvailabilityChan
         />
       </section>
 
-      <AvailabilityPanel availability={availability} onChange={onAvailabilityChange} />
+      <AvailabilityPanel availability={availability} onChange={onAvailabilityChange} onSessionExpired={onAvailabilitySessionExpired} />
 
       <DataSection id="repositories" title="Connected repositories" count={overview.repositories.length}>
         <div

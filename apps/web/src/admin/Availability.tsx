@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { AvailabilityOverview, ReviewerAbsenceView } from "@triagepilot/db";
 
 import {
@@ -13,6 +13,7 @@ import {
 interface AvailabilityPanelProps {
   availability: AvailabilityOverview;
   onChange(availability: AvailabilityOverview): void;
+  onSessionExpired?: ((message: string) => void) | undefined;
 }
 
 const emptyAbsence: AbsenceFormInput = {
@@ -21,15 +22,25 @@ const emptyAbsence: AbsenceFormInput = {
   endLocal: "",
 };
 
-export function AvailabilityPanel({ availability, onChange }: AvailabilityPanelProps) {
+export function AvailabilityPanel({ availability, onChange, onSessionExpired }: AvailabilityPanelProps) {
   const [timezone, setTimezone] = useState(availability.timezone);
   const [form, setForm] = useState<AbsenceFormInput>(emptyAbsence);
   const [editing, setEditing] = useState<ReviewerAbsenceView | null>(null);
   const [pending, setPending] = useState<"timezone" | "absence" | string | null>(null);
   const [cancelling, setCancelling] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const mutationInFlight = useRef(false);
 
-  useEffect(() => setTimezone(availability.timezone), [availability.timezone]);
+  useEffect(() => {
+    setTimezone(availability.timezone);
+    if (editing) {
+      setForm({
+        reviewerHandle: editing.reviewerHandle,
+        startLocal: toLocalDateTime(editing.startAt, availability.timezone),
+        endLocal: toLocalDateTime(editing.endAt, availability.timezone),
+      });
+    }
+  }, [availability.timezone, editing]);
 
   async function submitTimezone(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -55,15 +66,22 @@ export function AvailabilityPanel({ availability, onChange }: AvailabilityPanelP
   }
 
   async function mutate(key: "timezone" | "absence" | string, action: () => Promise<AvailabilityOverview>) {
+    if (mutationInFlight.current) return false;
+    mutationInFlight.current = true;
     setError(null);
     setPending(key);
     try {
       onChange(await action());
       return true;
     } catch (caught) {
+      if (caught instanceof AdminApiError && caught.status === 401) {
+        onSessionExpired?.(caught.message);
+        return false;
+      }
       setError(messageFrom(caught));
       return false;
     } finally {
+      mutationInFlight.current = false;
       setPending(null);
     }
   }
@@ -84,6 +102,8 @@ export function AvailabilityPanel({ availability, onChange }: AvailabilityPanelP
     setForm(emptyAbsence);
   }
 
+  const busy = pending !== null;
+
   return (
     <section className="availability-grid">
       <div className="availability-intro">
@@ -103,10 +123,10 @@ export function AvailabilityPanel({ availability, onChange }: AvailabilityPanelP
           onChange={(event) => setTimezone(event.target.value)}
           aria-describedby="availability-timezone-help"
           required
-          disabled={pending === "timezone"}
+          disabled={busy}
         />
         <small id="availability-timezone-help">Use an IANA timezone, for example Europe/Bratislava.</small>
-        <button type="submit" disabled={pending === "timezone"}>{pending === "timezone" ? "Saving…" : "Save timezone"}</button>
+        <button type="submit" disabled={busy}>{pending === "timezone" ? "Saving…" : "Save timezone"}</button>
       </form>
 
       <form className="availability-form" onSubmit={(event) => void submitAbsence(event)}>
@@ -119,7 +139,7 @@ export function AvailabilityPanel({ availability, onChange }: AvailabilityPanelP
           onChange={(event) => setForm({ ...form, reviewerHandle: event.target.value })}
           placeholder="@user-d82a5f"
           required
-          disabled={pending === "absence"}
+          disabled={busy}
         />
         <label htmlFor="absence-start">Start ({availability.timezone})</label>
         <input
@@ -129,7 +149,7 @@ export function AvailabilityPanel({ availability, onChange }: AvailabilityPanelP
           value={form.startLocal}
           onChange={(event) => setForm({ ...form, startLocal: event.target.value })}
           required
-          disabled={pending === "absence"}
+          disabled={busy}
         />
         <label htmlFor="absence-end">End ({availability.timezone})</label>
         <input
@@ -139,13 +159,13 @@ export function AvailabilityPanel({ availability, onChange }: AvailabilityPanelP
           value={form.endLocal}
           onChange={(event) => setForm({ ...form, endLocal: event.target.value })}
           required
-          disabled={pending === "absence"}
+          disabled={busy}
         />
         <div className="availability-form__actions">
-          <button type="submit" disabled={pending === "absence"}>
+          <button type="submit" disabled={busy}>
             {pending === "absence" ? "Saving…" : editing ? "Save absence" : "Add absence"}
           </button>
-          {editing ? <button className="button--quiet" type="button" onClick={resetAbsenceForm} disabled={pending === "absence"}>Discard edit</button> : null}
+          {editing ? <button className="button--quiet" type="button" onClick={resetAbsenceForm} disabled={busy}>Discard edit</button> : null}
         </div>
       </form>
 
@@ -180,14 +200,14 @@ export function AvailabilityPanel({ availability, onChange }: AvailabilityPanelP
                   <td>
                     {mutable ? (
                       <div className="availability-actions">
-                        <button className="button--quiet" type="button" onClick={() => beginEdit(absence)} disabled={pending !== null}>Edit</button>
+                        <button className="button--quiet" type="button" onClick={() => beginEdit(absence)} disabled={busy}>Edit</button>
                         {isCancelling ? (
                           <>
                             <span className="cell-detail">Cancel this absence?</span>
-                            <button type="button" onClick={() => void confirmCancellation(absence)} disabled={pending === absence.id}>Confirm cancel</button>
-                            <button className="button--quiet" type="button" onClick={() => setCancelling(null)} disabled={pending === absence.id}>Keep</button>
+                            <button type="button" onClick={() => void confirmCancellation(absence)} disabled={busy}>Confirm cancel</button>
+                            <button className="button--quiet" type="button" onClick={() => setCancelling(null)} disabled={busy}>Keep</button>
                           </>
-                        ) : <button type="button" onClick={() => setCancelling(absence.id)} disabled={pending !== null}>Cancel</button>}
+                        ) : <button type="button" onClick={() => setCancelling(absence.id)} disabled={busy}>Cancel</button>}
                       </div>
                     ) : <span className="cell-detail">—</span>}
                   </td>

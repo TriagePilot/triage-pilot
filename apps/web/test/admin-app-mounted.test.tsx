@@ -120,6 +120,42 @@ describe("mounted admin application", () => {
     expect(container.textContent).toContain("The administrator session has expired.");
     expect(container.textContent).not.toContain("The dashboard could not load");
   });
+
+  it("moves a mutation-time availability session expiry to login", async () => {
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      if (input === "/api/auth/session") {
+        return Response.json({ authenticated: true, username: "admin" });
+      }
+      if (input === "/api/operations/overview") {
+        return Response.json(emptyOverview);
+      }
+      if (input === "/api/operations/availability") {
+        return Response.json(emptyAvailability);
+      }
+      if (input === "/api/operations/availability/timezone") {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
+      }
+      throw new Error(`unexpected request to ${String(input)}`);
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<App />);
+      await flushAsyncWork();
+    });
+    await act(async () => {
+      container.querySelector("#availability-timezone")?.closest("form")?.dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      );
+      await flushAsyncWork();
+    });
+
+    expect(container.textContent).toContain("Administrator sign in");
+    expect(container.textContent).toContain("The administrator session has expired.");
+    expect(container.textContent).not.toContain("Reviewer availability");
+  });
 });
 
 function buttonNamed(container: HTMLElement, label: string): HTMLButtonElement | null {
