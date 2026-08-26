@@ -269,8 +269,8 @@ describe("processReviewerAbsenceActivationJob", () => {
     await processReviewerAbsenceActivationJob(message, services);
 
     expect(events).toEqual([
-      "fail:No replacement is available for an absent required reviewer.",
       "persist:no_replacement_available",
+      "fail:No replacement is available for an absent required reviewer.",
     ]);
     expect(services.recordOutcome).toHaveBeenCalledWith(expect.objectContaining({
       outcome: "no_replacement_available",
@@ -372,7 +372,7 @@ describe("processReviewerAbsenceActivationJob", () => {
 
     await expect(processReviewerAbsenceActivationJob(message, services)).resolves.toBeUndefined();
 
-    expect(events).toEqual(["fail-policy", "persist:permanent_failure"]);
+    expect(events).toEqual(["persist:permanent_failure", "fail-policy"]);
     expect(services.recordOutcome).toHaveBeenCalledWith(expect.objectContaining({
       outcome: "permanent_failure",
       replacementReviewer: null,
@@ -395,6 +395,145 @@ describe("processReviewerAbsenceActivationJob", () => {
     expect(services.failPolicyCheck).not.toHaveBeenCalled();
     expect(services.recordOutcome).not.toHaveBeenCalled();
     expect(services.reevaluatePolicy).not.toHaveBeenCalled();
+  });
+
+  it("persists no-replacement history before a transient policy finalizer and continues later decisions", async () => {
+    const error = Object.assign(new Error("policy update unavailable"), { status: 503 });
+    const blockedCandidate = {
+      ...candidate,
+      originalEligibleReviewers: [activation.reviewerHandle],
+    };
+    const laterCandidate = { ...candidate, decisionId: "decision-2", pullNumber: 8 };
+    const events: string[] = [];
+    const services = buildServices({
+      loadActivation: vi.fn(async () => ({
+        ...activation,
+        candidates: [blockedCandidate, laterCandidate],
+      })),
+      fetchPullRequest: vi.fn(async (input) => ({
+        state: input.decisionId === blockedCandidate.decisionId ? "open" : "closed",
+        headSha: input.headSha,
+        authorHandle: "@user-author",
+      })),
+      recordOutcome: vi.fn(async (input) => {
+        events.push(`persist:${input.decisionId}:${input.outcome}`);
+        return { inserted: true };
+      }),
+      failPolicyCheck: vi.fn(async (input) => {
+        events.push(`fail:${input.decisionId}`);
+        throw error;
+      }),
+    });
+
+    await expect(processReviewerAbsenceActivationJob(message, services)).rejects.toBe(error);
+
+    expect(events).toEqual([
+      "persist:decision-1:no_replacement_available",
+      "fail:decision-1",
+      "persist:decision-2:skipped_closed",
+    ]);
+  });
+
+  it("does not make policy terminal when no-replacement history persistence fails", async () => {
+    const error = Object.assign(new Error("database unavailable"), { severity: "FATAL" });
+    const blockedCandidate = {
+      ...candidate,
+      originalEligibleReviewers: [activation.reviewerHandle],
+    };
+    const laterCandidate = { ...candidate, decisionId: "decision-2", pullNumber: 8 };
+    const events: string[] = [];
+    const services = buildServices({
+      loadActivation: vi.fn(async () => ({
+        ...activation,
+        candidates: [blockedCandidate, laterCandidate],
+      })),
+      fetchPullRequest: vi.fn(async (input) => ({
+        state: input.decisionId === blockedCandidate.decisionId ? "open" : "closed",
+        headSha: input.headSha,
+        authorHandle: "@user-author",
+      })),
+      recordOutcome: vi.fn(async (input) => {
+        events.push(`persist:${input.decisionId}:${input.outcome}`);
+        if (input.decisionId === blockedCandidate.decisionId) throw error;
+        return { inserted: true };
+      }),
+      failPolicyCheck: vi.fn(async (input) => {
+        events.push(`fail:${input.decisionId}`);
+      }),
+    });
+
+    await expect(processReviewerAbsenceActivationJob(message, services)).rejects.toBe(error);
+
+    expect(events).toEqual([
+      "persist:decision-1:no_replacement_available",
+      "persist:decision-2:skipped_closed",
+    ]);
+    expect(services.failPolicyCheck).not.toHaveBeenCalled();
+  });
+
+  it("retains permanent-failure history and continues when policy failure finalization is permanently rejected", async () => {
+    const laterCandidate = { ...candidate, decisionId: "decision-2", pullNumber: 8 };
+    const events: string[] = [];
+    const services = buildServices({
+      loadActivation: vi.fn(async () => ({ ...activation, candidates: [candidate, laterCandidate] })),
+      fetchPullRequest: vi.fn(async (input) => ({
+        state: input.decisionId === candidate.decisionId ? "open" : "closed",
+        headSha: input.headSha,
+        authorHandle: "@user-author",
+      })),
+      requestReviewer: vi.fn(async () => {
+        throw Object.assign(new Error("review request rejected"), { status: 422 });
+      }),
+      recordOutcome: vi.fn(async (input) => {
+        events.push(`persist:${input.decisionId}:${input.outcome}`);
+        return { inserted: true };
+      }),
+      failPolicyCheck: vi.fn(async (input) => {
+        events.push(`fail:${input.decisionId}`);
+        throw Object.assign(new Error("check update forbidden"), { status: 403 });
+      }),
+    });
+
+    await expect(processReviewerAbsenceActivationJob(message, services)).resolves.toBeUndefined();
+
+    expect(events).toEqual([
+      "persist:decision-1:permanent_failure",
+      "fail:decision-1",
+      "persist:decision-2:skipped_closed",
+    ]);
+  });
+
+  it("continues later decisions and retries when permanent-failure history persistence is transiently unavailable", async () => {
+    const error = Object.assign(new Error("database unavailable"), { severity: "FATAL" });
+    const laterCandidate = { ...candidate, decisionId: "decision-2", pullNumber: 8 };
+    const events: string[] = [];
+    const services = buildServices({
+      loadActivation: vi.fn(async () => ({ ...activation, candidates: [candidate, laterCandidate] })),
+      fetchPullRequest: vi.fn(async (input) => ({
+        state: input.decisionId === candidate.decisionId ? "open" : "closed",
+        headSha: input.headSha,
+        authorHandle: "@user-author",
+      })),
+      requestReviewer: vi.fn(async () => {
+        throw Object.assign(new Error("review request rejected"), { status: 422 });
+      }),
+      recordOutcome: vi.fn(async (input) => {
+        events.push(`persist:${input.decisionId}:${input.outcome}`);
+        if (input.decisionId === candidate.decisionId) throw error;
+        return { inserted: true };
+      }),
+      failPolicyCheck: vi.fn(async (input) => {
+        events.push(`fail:${input.decisionId}`);
+      }),
+    });
+
+    await expect(processReviewerAbsenceActivationJob(message, services)).rejects.toBe(error);
+
+    expect(events).toEqual([
+      "persist:decision-1:permanent_failure",
+      "persist:decision-2:skipped_closed",
+    ]);
+    expect(services.failPolicyCheck).not.toHaveBeenCalled();
   });
 
   it("processes decision candidates sequentially", async () => {

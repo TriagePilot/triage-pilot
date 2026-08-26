@@ -321,7 +321,10 @@ export async function loadReviewerAbsenceActivation(
     reviewerHandle: absence.reviewer_handle,
     startAt: absence.start_at,
     endAt: absence.end_at,
-    candidates: await findReviewerReplacementCandidates(db, { unavailableReviewer: absence.reviewer_handle }),
+    candidates: await findReviewerReplacementCandidates(db, {
+      unavailableReviewer: absence.reviewer_handle,
+      recordedFor: { absenceId: absence.id, absenceRevision: absence.revision },
+    }),
   };
 }
 

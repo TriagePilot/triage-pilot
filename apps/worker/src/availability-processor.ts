@@ -60,34 +60,65 @@ export async function processReviewerAbsenceActivationJob(
   });
   if (activation === null) return;
 
+  let deferredError: unknown = null;
   for (const candidate of activation.candidates) {
-    const recordedOutcome = await services.findRecordedOutcome({
-      absenceId: activation.absenceId,
-      absenceRevision: activation.revision,
-      decisionId: candidate.decisionId,
-    });
-    if (recordedOutcome !== null) {
-      if (candidate.mode === "enforce") {
-        await replayPolicyFinalizer(services, candidate, recordedOutcome);
-      }
-      continue;
-    }
-
     try {
+      const recordedOutcome = await services.findRecordedOutcome({
+        absenceId: activation.absenceId,
+        absenceRevision: activation.revision,
+        decisionId: candidate.decisionId,
+      });
+      if (recordedOutcome !== null) {
+        if (candidate.mode === "enforce") {
+          await replayPolicyFinalizer(services, candidate, recordedOutcome);
+        }
+        continue;
+      }
+
       await processCandidate(services, activation, candidate, activationAt);
     } catch (error) {
       const classified = classifyWorkerError(error);
-      if (!(classified instanceof PermanentJobError)) throw error;
-      if (candidate.mode === "enforce") {
-        await services.failPolicyCheck(candidate, PERMANENT_FAILURE_POLICY_SUMMARY);
+      if (classified instanceof PermanentJobError) {
+        const recoveryError = await recoverPermanentFailure(
+          services,
+          activation,
+          candidate,
+          activationAt,
+          classified,
+        );
+        if (deferredError === null && recoveryError !== null) deferredError = recoveryError;
+      } else if (deferredError === null) {
+        deferredError = error;
       }
-      await recordOutcome(services, activation, candidate, activationAt, {
-        outcome: "permanent_failure",
-        replacementReviewer: null,
-        reason: classified.message,
-        replaceCohort: false,
-      });
     }
+  }
+  if (deferredError !== null) throw deferredError;
+}
+
+async function recoverPermanentFailure(
+  services: ReviewerAvailabilityServices,
+  activation: ReviewerAbsenceActivation,
+  candidate: ReviewerReplacementCandidate,
+  activationAt: Date,
+  failure: PermanentJobError,
+): Promise<unknown | null> {
+  try {
+    await recordOutcome(services, activation, candidate, activationAt, {
+      outcome: "permanent_failure",
+      replacementReviewer: null,
+      reason: failure.message,
+      replaceCohort: false,
+    });
+  } catch (error) {
+    return error;
+  }
+
+  if (candidate.mode !== "enforce") return null;
+  try {
+    await services.failPolicyCheck(candidate, PERMANENT_FAILURE_POLICY_SUMMARY);
+    return null;
+  } catch (error) {
+    return classifyWorkerError(error) instanceof PermanentJobError ? null : error;
   }
 }
 
@@ -158,15 +189,15 @@ async function processCandidate(
     selectionKey: `${candidate.owner}/${candidate.repo}#${candidate.pullNumber}`,
   });
   if (selection.replacementReviewer === null) {
-    if (candidate.mode === "enforce") {
-      await services.failPolicyCheck(candidate, NO_REPLACEMENT_POLICY_SUMMARY);
-    }
     await recordOutcome(services, activation, candidate, activationAt, {
       outcome: "no_replacement_available",
       replacementReviewer: null,
       reason: "No available reviewer remains in the original ownership-eligible pool.",
       replaceCohort: false,
     });
+    if (candidate.mode === "enforce") {
+      await services.failPolicyCheck(candidate, NO_REPLACEMENT_POLICY_SUMMARY);
+    }
     return;
   }
   if (candidate.mode === "enforce") {

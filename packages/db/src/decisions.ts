@@ -52,7 +52,7 @@ export interface ReviewerReplacementCandidate {
   originalEligibleReviewers: string[];
   requiredApprovalCount: number;
   policyCheckRunId: string | null;
-  policyCheckState: "not_started" | "in_progress";
+  policyCheckState: HumanReviewPolicyDecision["policyCheckState"];
 }
 
 type PolicyCheckState = Exclude<HumanReviewPolicyDecision["policyCheckState"], "not_started">;
@@ -183,7 +183,10 @@ export async function findLatestHumanReviewPolicyDecision(
 
 export async function findReviewerReplacementCandidates(
   db: Kysely<Database>,
-  input: { unavailableReviewer: string },
+  input: {
+    unavailableReviewer: string;
+    recordedFor?: { absenceId: string; absenceRevision: number };
+  },
 ): Promise<ReviewerReplacementCandidate[]> {
   const latestDecisions = db
     .selectFrom("routing_decisions")
@@ -230,7 +233,7 @@ export async function findReviewerReplacementCandidates(
     .orderBy("latest_decisions.id", "desc")
     .execute();
 
-  return decisions.flatMap((decision) => {
+  const freshCandidates = decisions.flatMap((decision) => {
     const selectedReviewers = parseStrictReviewerArray(decision.selectedReviewers);
     const original = parseOriginalReviewerPool(decision.details);
     if (
@@ -241,6 +244,84 @@ export async function findReviewerReplacementCandidates(
       original === null ||
       (decision.mode !== "enforce" && decision.mode !== "shadow") ||
       (decision.policyCheckState !== "in_progress" && decision.policyCheckState !== "not_started")
+    ) return [];
+
+    return [{
+      decisionId: decision.decisionId,
+      installationId: decision.installationId,
+      repositoryId: decision.repositoryId,
+      owner: decision.owner,
+      repo: decision.repo,
+      pullNumber: decision.pullNumber,
+      headSha: decision.headSha,
+      mode: decision.mode,
+      selectedReviewers,
+      originalEligibleReviewers: original.eligibleReviewers,
+      requiredApprovalCount: original.requestedReviewerCount,
+      policyCheckRunId: decision.policyCheckRunId,
+      policyCheckState: decision.policyCheckState,
+    }];
+  });
+
+  if (input.recordedFor === undefined) return freshCandidates;
+
+  const recordedCandidates = await findRecordedReviewerReplacementCandidates(db, {
+    unavailableReviewer: input.unavailableReviewer,
+    ...input.recordedFor,
+  });
+  const recordedDecisionIds = new Set(recordedCandidates.map((candidate) => candidate.decisionId));
+  return [
+    ...recordedCandidates,
+    ...freshCandidates.filter((candidate) => !recordedDecisionIds.has(candidate.decisionId)),
+  ];
+}
+
+async function findRecordedReviewerReplacementCandidates(
+  db: Kysely<Database>,
+  input: { unavailableReviewer: string; absenceId: string; absenceRevision: number },
+): Promise<ReviewerReplacementCandidate[]> {
+  const decisions = await db
+    .selectFrom("reviewer_replacements")
+    .innerJoin("routing_decisions", "routing_decisions.id", "reviewer_replacements.decision_id")
+    .innerJoin("repositories", "repositories.id", "routing_decisions.repository_id")
+    .innerJoin("installations", "installations.id", "repositories.installation_id")
+    .select([
+      "routing_decisions.id as decisionId",
+      "installations.github_installation_id as installationId",
+      "repositories.github_repository_id as repositoryId",
+      "repositories.owner",
+      "repositories.name as repo",
+      "routing_decisions.pull_number as pullNumber",
+      "routing_decisions.head_sha as headSha",
+      "routing_decisions.mode",
+      "routing_decisions.selected_reviewers as selectedReviewers",
+      "routing_decisions.details",
+      "routing_decisions.policy_check_run_id as policyCheckRunId",
+      "routing_decisions.policy_check_state as policyCheckState",
+    ])
+    .where("reviewer_replacements.absence_id", "=", input.absenceId)
+    .where("reviewer_replacements.absence_revision", "=", input.absenceRevision)
+    .where("reviewer_replacements.unavailable_reviewer", "=", input.unavailableReviewer)
+    .where("reviewer_replacements.outcome", "in", [
+      "replaced",
+      "skipped_policy_satisfied",
+      "no_replacement_available",
+      "permanent_failure",
+    ])
+    .where("routing_decisions.mode", "=", "enforce")
+    .orderBy("routing_decisions.created_at", "desc")
+    .orderBy("routing_decisions.id", "desc")
+    .execute();
+
+  return decisions.flatMap((decision) => {
+    const selectedReviewers = parseStrictReviewerArray(decision.selectedReviewers);
+    const original = parseOriginalReviewerPool(decision.details);
+    if (
+      decision.pullNumber === null ||
+      decision.headSha === null ||
+      selectedReviewers === null ||
+      original === null ||
+      decision.mode !== "enforce"
     ) return [];
 
     return [{

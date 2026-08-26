@@ -11,6 +11,8 @@ import {
   loadReviewerAbsenceActivation,
   normalizeReviewerHandle,
   readAvailabilityOverview,
+  recordReviewerReplacement,
+  updatePolicyCheckState,
   updateOrganizationTimezone,
   updateReviewerAbsence,
 } from "../src";
@@ -478,6 +480,98 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability", 
         expectedRevision: cancelled.revision,
         now,
       })).resolves.toBeNull();
+    });
+  });
+
+  it("reloads recorded finalizer work after cohort and policy state transitions", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const absence = await createReviewerAbsence(db, {
+        reviewerHandle: "@user-d82a5f",
+        startAt: new Date("2026-08-31T12:00:00.000Z"),
+        endAt: new Date("2026-09-02T12:00:00.000Z"),
+        now,
+      });
+      const repositoryId = await seedAvailabilityRepository(db);
+      const details = {
+        ownership: { eligibleReviewers: ["@user-d82a5f", "@user-c91e46"] },
+        routing: { requestedReviewerCount: 1 },
+      };
+      const replacedDecisionId = "00000000-0000-0000-0000-000000000021";
+      const blockedDecisionId = "00000000-0000-0000-0000-000000000022";
+      await seedAvailabilityDecision(db, repositoryId, {
+        id: replacedDecisionId,
+        deliveryId: "delivery-recorded-replaced",
+        routingKey: "routing-recorded-replaced",
+        pullNumber: 21,
+        headSha: "replaced-head",
+        mode: "enforce",
+        selectedReviewers: ["@user-d82a5f"],
+        details,
+        policyCheckState: "in_progress",
+        createdAt: new Date("2026-09-01T14:00:00.000Z"),
+      });
+      await seedAvailabilityDecision(db, repositoryId, {
+        id: blockedDecisionId,
+        deliveryId: "delivery-recorded-blocked",
+        routingKey: "routing-recorded-blocked",
+        pullNumber: 22,
+        headSha: "blocked-head",
+        mode: "enforce",
+        selectedReviewers: ["@user-d82a5f"],
+        details,
+        policyCheckState: "in_progress",
+        createdAt: new Date("2026-09-01T14:10:00.000Z"),
+      });
+
+      await recordReviewerReplacement(db, {
+        absenceId: absence.id,
+        absenceRevision: absence.revision,
+        decisionId: replacedDecisionId,
+        unavailableReviewer: "@user-d82a5f",
+        replacementReviewer: "@user-c91e46",
+        outcome: "replaced",
+        reason: "replacement recorded before finalization",
+        startedAt: now,
+        completedAt: now,
+        replaceCohort: true,
+      });
+      await recordReviewerReplacement(db, {
+        absenceId: absence.id,
+        absenceRevision: absence.revision,
+        decisionId: blockedDecisionId,
+        unavailableReviewer: "@user-d82a5f",
+        replacementReviewer: null,
+        outcome: "no_replacement_available",
+        reason: "blocking recorded before finalization",
+        startedAt: now,
+        completedAt: now,
+        replaceCohort: false,
+      });
+      await updatePolicyCheckState(db, { decisionId: replacedDecisionId, state: "success" });
+      await updatePolicyCheckState(db, { decisionId: blockedDecisionId, state: "failure" });
+
+      const activation = await loadReviewerAbsenceActivation(db, {
+        absenceId: absence.id,
+        expectedRevision: absence.revision,
+        now,
+      });
+
+      expect(activation?.candidates.map((candidate) => candidate.decisionId)).toEqual([
+        blockedDecisionId,
+        replacedDecisionId,
+      ]);
+      expect(activation?.candidates).toEqual([
+        expect.objectContaining({
+          decisionId: blockedDecisionId,
+          selectedReviewers: ["@user-d82a5f"],
+          policyCheckState: "failure",
+        }),
+        expect.objectContaining({
+          decisionId: replacedDecisionId,
+          selectedReviewers: ["@user-c91e46"],
+          policyCheckState: "success",
+        }),
+      ]);
     });
   });
 });
