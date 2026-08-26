@@ -35,6 +35,7 @@ The supported public deployment is Docker Compose with `web`, exactly one `worke
 - [Documentation index](docs/README.md)
 - [Architecture](docs/architecture.md)
 - [Repository configuration](docs/github-app/repository-configuration.md)
+- [Reviewer availability](docs/operations/reviewer-availability.md)
 - [Shadow-to-enforce rollout](docs/operations/shadow-to-enforce.md)
 - [Release checklist](docs/self-hosting/release-checklist.md)
 
