@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseTriagePilotConfig } from "../src/index";
+import { parseConfigurationDocument, parseTriagePilotConfig } from "../src/index";
 
 describe("parseTriagePilotConfig", () => {
   it("parses the PRD example with defaults", () => {
@@ -136,5 +136,23 @@ risk:
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected config to parse");
     expect(result.config.risk.thresholds.high).toBe(100);
+  });
+
+  it("parses inheritance as a repository document control", () => {
+    const result = parseConfigurationDocument("inheritance: true\nrisk:\n  thresholds:\n    high: 80\n", { partial: true });
+
+    expect(result).toEqual({
+      ok: true,
+      document: { inheritance: true, risk: { thresholds: { high: 80 } } },
+      diagnostics: [],
+    });
+  });
+
+  it("does not expose inheritance to the execution schema", () => {
+    const result = parseTriagePilotConfig("inheritance: true\nmode: enforce\n");
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected execution parsing to reject document controls");
+    expect(result.diagnostics[0]?.path).toBe("$");
   });
 });
