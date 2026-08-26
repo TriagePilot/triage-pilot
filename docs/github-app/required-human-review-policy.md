@@ -24,7 +24,7 @@ TriagePilot never creates, edits, or manages this ruleset. Self-hosters choose t
 
 - A no-human route completes the check successfully.
 - When TriagePilot first routes a pull request, existing approvals by individual users on its current head fill the required reviewer cohort before TriagePilot requests additional reviewers. Reviews from an earlier head and bot approvals do not count.
-- A route with one or two selected individual reviewers stays in progress until every selected reviewer approves the current pull-request head.
+- A route with one or two selected individual reviewers immediately evaluates GitHub's current review state, then re-evaluates after each later review event. It stays in progress until every selected reviewer approves the current pull-request head.
 - A new pull-request head receives a new policy check; approvals attached to an earlier head do not satisfy it.
 - A human-review route with no eligible individual reviewer completes as a failure. Because the check is required by the ruleset, that failure blocks merge.
 - A permanent configuration, authorization, or GitHub API evaluation failure also completes the check as a failure and blocks merge while it remains required.

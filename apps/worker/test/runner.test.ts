@@ -277,6 +277,7 @@ describe("runWorkerOnce", () => {
         targetBranchName: "develop",
       })),
       fetchCurrentHeadApprovedReviewers: vi.fn(async () => []),
+      enqueueHumanReviewPolicyEvaluation: vi.fn(async () => {}),
       getReviewerLoad: vi.fn(async () => ({})),
       updateRepositoryConfigState: vi.fn(async () => {}),
       persistDecision: vi.fn(async () => ({
