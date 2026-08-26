@@ -26,7 +26,9 @@ body {
 }
 
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
 }
 
@@ -46,7 +48,9 @@ button:disabled {
 }
 
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
   outline: 3px solid var(--signal);
   outline-offset: 3px;
 }
@@ -204,6 +208,96 @@ h2 {
   border: 1px solid var(--ink);
   padding: 24px;
   background: var(--surface);
+}
+
+.availability-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 18px;
+  border: 1px solid var(--rule);
+  padding: 18px;
+  background: var(--surface);
+}
+
+.availability-intro,
+.availability-history,
+.availability-grid > .notice {
+  grid-column: 1 / -1;
+}
+
+.availability-intro p:last-child {
+  max-width: 68ch;
+  margin-bottom: 0;
+  color: color-mix(in srgb, var(--ink) 70%, var(--surface));
+  line-height: 1.45;
+}
+
+.availability-form {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  border: 1px solid var(--rule);
+  padding: 16px;
+}
+
+.availability-form h3,
+.availability-history h3 {
+  margin: 0 0 6px;
+  font-size: 0.9rem;
+}
+
+.availability-form label {
+  margin-top: 6px;
+  font-size: 0.82rem;
+  font-weight: 750;
+}
+
+.availability-form input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  padding: 10px 11px;
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.availability-form small {
+  color: color-mix(in srgb, var(--ink) 60%, var(--surface));
+  line-height: 1.35;
+}
+
+.availability-form__actions,
+.availability-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.availability-actions button {
+  padding: 6px 9px;
+  font-size: 0.75rem;
+}
+
+.availability-history {
+  border-top: 1px solid var(--rule);
+  padding-top: 16px;
+}
+
+.availability-history table {
+  min-width: 760px;
+}
+
+.replacement-list {
+  display: grid;
+  gap: 8px;
+  min-width: 25ch;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .status-ledger::before {
@@ -473,7 +567,8 @@ time,
   }
 
   .status-ledger,
-  .failure-grid {
+  .failure-grid,
+  .availability-grid {
     grid-template-columns: 1fr;
   }
 
@@ -511,6 +606,10 @@ time,
 
   .failure-grid table {
     min-width: 520px;
+  }
+
+  .availability-form {
+    padding: 14px;
   }
 }
 

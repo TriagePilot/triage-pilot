@@ -2,12 +2,15 @@ import { useEffect, useState, type FormEvent } from "react";
 
 import {
   AdminApiError,
+  fetchAvailability,
   fetchOperationsOverview,
   getSession,
   login,
   logout,
+  type AvailabilityOverview,
   type OperationsOverview,
 } from "./api";
+import { AvailabilityPanel } from "./Availability";
 
 type AuthState = "checking" | "signed-out" | "signed-in";
 
@@ -15,6 +18,7 @@ export function App() {
   const [authState, setAuthState] = useState<AuthState>("checking");
   const [username, setUsername] = useState("");
   const [overview, setOverview] = useState<OperationsOverview | null>(null);
+  const [availability, setAvailability] = useState<AvailabilityOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -41,8 +45,25 @@ export function App() {
   async function loadOverview() {
     setError(null);
     setOverview(null);
+    setAvailability(null);
     try {
-      setOverview(await fetchOperationsOverview());
+      const [overviewResult, availabilityResult] = await Promise.allSettled([
+        fetchOperationsOverview(),
+        fetchAvailability(),
+      ]);
+      const failures = [overviewResult, availabilityResult].filter(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      const expired = failures.find(
+        (result) => result.reason instanceof AdminApiError && result.reason.status === 401,
+      );
+      if (expired) throw expired.reason;
+      if (failures[0]) throw failures[0].reason;
+      if (overviewResult.status !== "fulfilled" || availabilityResult.status !== "fulfilled") {
+        throw new Error("Could not load the operations overview.");
+      }
+      setOverview(overviewResult.value);
+      setAvailability(availabilityResult.value);
     } catch (caught) {
       if (caught instanceof AdminApiError && caught.status === 401) {
         showSignedOut(caught.message);
@@ -85,7 +106,7 @@ export function App() {
   if (authState === "signed-out") {
     return <LoginScreen error={error} submitting={false} onSubmit={handleLogin} />;
   }
-  if (!overview) {
+  if (!overview || !availability) {
     if (error) {
       return (
         <main className="center-stage">
@@ -110,7 +131,16 @@ export function App() {
     return <LoadingScreen message="Loading operational data" />;
   }
 
-  return <Dashboard username={username} overview={overview} error={error} onLogout={handleLogout} />;
+  return (
+    <Dashboard
+      username={username}
+      overview={overview}
+      availability={availability}
+      onAvailabilityChange={setAvailability}
+      error={error}
+      onLogout={handleLogout}
+    />
+  );
 }
 
 interface LoginScreenProps {
@@ -181,16 +211,18 @@ export function LoginScreen({ error, submitting, onSubmit }: LoginScreenProps) {
 interface DashboardProps {
   username: string;
   overview: OperationsOverview;
+  availability: AvailabilityOverview;
+  onAvailabilityChange(availability: AvailabilityOverview): void;
   error?: string | null;
   onLogout(): Promise<void>;
 }
 
-export function Dashboard({ username, overview, error, onLogout }: DashboardProps) {
+export function Dashboard({ username, overview, availability, onAvailabilityChange, error, onLogout }: DashboardProps) {
   return (
     <main className="shell" aria-labelledby="dashboard-title">
       <header className="topbar">
         <div>
-          <p className="eyebrow">TriagePilot / read-only</p>
+          <p className="eyebrow">TriagePilot / operations</p>
           <h1 id="dashboard-title">Operations ledger</h1>
         </div>
         <div className="operator">
@@ -229,6 +261,8 @@ export function Dashboard({ username, overview, error, onLogout }: DashboardProp
           state={overview.worker.available ? "healthy" : "failed"}
         />
       </section>
+
+      <AvailabilityPanel availability={availability} onChange={onAvailabilityChange} />
 
       <DataSection id="repositories" title="Connected repositories" count={overview.repositories.length}>
         <div

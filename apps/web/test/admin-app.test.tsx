@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { App, Dashboard, LoginScreen } from "../src/admin/App";
-import type { OperationsOverview } from "../src/admin/api";
+import type { AvailabilityOverview, OperationsOverview } from "../src/admin/api";
 
 describe("admin application", () => {
   it("starts with a useful session loading state", () => {
@@ -30,9 +30,9 @@ describe("admin application", () => {
     expect(html).not.toContain("Webhook secret");
   });
 
-  it("renders the read-only operational chain and semantic data tables", () => {
+  it("renders the operational chain, availability controls, and semantic data tables", () => {
     const html = renderToStaticMarkup(
-      <Dashboard username="admin" overview={overview} onLogout={async () => {}} />,
+      <Dashboard username="admin" overview={overview} availability={availability} onAvailabilityChange={() => {}} onLogout={async () => {}} />,
     );
 
     expect(html).toContain("Operations ledger");
@@ -40,6 +40,7 @@ describe("admin application", () => {
     expect(html).toContain("App 123");
     expect(html).toContain("Installation 9007199254740993");
     expect(html).toContain("Worker available");
+    expect(html).toContain("Reviewer availability");
     expect(html).toContain("Connected repositories");
     expect(html).toContain("Recent routing decisions");
     expect(html).toContain("Permanent job failures");
@@ -55,15 +56,16 @@ describe("admin application", () => {
     expect(html).toContain("@team-a7f19c/reviewers, @user-b4e82d");
     expect(html).toContain("GitHub permission denied");
     expect(html).toContain("Review request rejected");
-    expect(html.match(/<table/g)).toHaveLength(4);
-    expect(html.match(/role="region"/g)).toHaveLength(4);
-    expect(html.match(/tabindex="0"/g)).toHaveLength(4);
+    expect(html.match(/<table/g)).toHaveLength(5);
+    expect(html.match(/role="region"/g)).toHaveLength(5);
+    expect(html.match(/tabindex="0"/g)).toHaveLength(5);
     expect(html).toContain('aria-labelledby="repositories-heading"');
     expect(html).toContain('aria-labelledby="decisions-heading"');
     expect(html).toContain('aria-labelledby="job-failures-heading"');
     expect(html).toContain('aria-labelledby="action-failures-heading"');
-    expect(html.match(/<button/g)).toHaveLength(1);
-    expect(html).not.toContain("<input");
+    expect(html).toContain('aria-labelledby="availability-history-heading"');
+    expect(html.match(/<button/g)).toHaveLength(3);
+    expect(html.match(/<input/g)).toHaveLength(4);
     expect(html).not.toContain("<select");
   });
 
@@ -77,6 +79,8 @@ describe("admin application", () => {
           decisions: [],
           failures: { jobs: [], actions: [] },
         }}
+        availability={availability}
+        onAvailabilityChange={() => {}}
         onLogout={async () => {}}
       />,
     );
@@ -92,6 +96,8 @@ describe("admin application", () => {
       <Dashboard
         username="admin"
         overview={overview}
+        availability={availability}
+        onAvailabilityChange={() => {}}
         error="Could not sign out."
         onLogout={async () => {}}
       />,
@@ -110,6 +116,8 @@ describe("admin application", () => {
           ...overview,
           decisions: [{ ...overview.decisions[0]!, pullNumber: null }],
         }}
+        availability={availability}
+        onAvailabilityChange={() => {}}
         onLogout={async () => {}}
       />,
     );
@@ -129,6 +137,8 @@ describe("admin application", () => {
           ...overview,
           decisions: [{ ...overview.decisions[0]!, policyCheckState }],
         }}
+        availability={availability}
+        onAvailabilityChange={() => {}}
         onLogout={async () => {}}
       />,
     );
@@ -171,6 +181,8 @@ describe("admin application", () => {
             ],
           } as unknown as OperationsOverview
         }
+        availability={availability}
+        onAvailabilityChange={() => {}}
         onLogout={async () => {}}
       />,
     );
@@ -223,3 +235,5 @@ const overview: OperationsOverview = {
   },
   worker: { available: true, workerId: "worker-1", lastHeartbeatAt: "2026-08-18T10:02:00.000Z" },
 };
+
+const availability: AvailabilityOverview = { timezone: "Europe/Bratislava", absences: [] };
