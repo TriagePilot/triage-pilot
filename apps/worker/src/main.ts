@@ -10,14 +10,29 @@ import {
 import { formatLog } from "@triagepilot/shared";
 
 import { readWorkerEnv } from "./env";
+import { processReviewerAbsenceActivationJob } from "./availability-processor";
 import { runWorkerMaintenance, runWorkerStartup } from "./maintenance";
 import { processRoutingJob } from "./processor";
 import { processHumanReviewPolicyJob } from "./review-policy-processor";
 import { runWorkerOnce } from "./runner";
 import {
   createWorkerHumanReviewPolicyServiceFactory,
+  createWorkerReviewerAvailabilityServiceFactory,
   createWorkerRoutingServiceFactory,
 } from "./runtime-services";
+
+export function createWorkerRuntimeProcessors(
+  input: Parameters<typeof createWorkerRoutingServiceFactory>[0],
+) {
+  return {
+    processRoutingJob,
+    buildRoutingServices: createWorkerRoutingServiceFactory(input),
+    processHumanReviewPolicyJob,
+    buildHumanReviewPolicyServices: createWorkerHumanReviewPolicyServiceFactory(input),
+    processReviewerAbsenceActivationJob,
+    buildReviewerAvailabilityServices: createWorkerReviewerAvailabilityServiceFactory(input),
+  };
+}
 
 export async function runWorkerProcess(source: NodeJS.ProcessEnv = process.env): Promise<void> {
   const env = await readWorkerEnv(source);
@@ -25,8 +40,7 @@ export async function runWorkerProcess(source: NodeJS.ProcessEnv = process.env):
 
   try {
     const queue = createJobQueue(db);
-    const buildRoutingServices = createWorkerRoutingServiceFactory({ db, github: env.github });
-    const buildHumanReviewPolicyServices = createWorkerHumanReviewPolicyServiceFactory({ db, github: env.github });
+    const runtimeProcessors = createWorkerRuntimeProcessors({ db, github: env.github });
     const maintenanceServices = {
       async recoverStaleJobs(now: Date) {
         await recoverStaleJobs(db, now);
@@ -49,10 +63,7 @@ export async function runWorkerProcess(source: NodeJS.ProcessEnv = process.env):
           queue,
           workerId: env.workerId,
           now,
-          processRoutingJob,
-          buildRoutingServices,
-          processHumanReviewPolicyJob,
-          buildHumanReviewPolicyServices,
+          ...runtimeProcessors,
         });
       } catch (error) {
         console.error(

@@ -6,22 +6,26 @@ import {
 import { trustedBaseSha, type ScoreComponent } from "@triagepilot/shared";
 import {
   createJobQueue,
+  findReviewerReplacementOutcome,
   findLatestHumanReviewPolicyDecision,
   listReviewerAbsenceWindows,
+  loadReviewerAbsenceActivation,
   markActionFailed as persistActionFailed,
   markActionSucceeded as persistActionSucceeded,
   persistDecision as persistRoutingDecision,
   recordPolicyCheck,
+  recordReviewerReplacement,
   updatePolicyCheckState,
   type createDatabase,
 } from "@triagepilot/db";
 import type { ChangedFileMetadata } from "@triagepilot/core";
-import type { HumanReviewPolicyJobPayload } from "@triagepilot/shared";
+import type { HumanReviewPolicyJobPayload, ReviewerAbsenceActivationJobPayload } from "@triagepilot/shared";
 
+import type { ReviewerAvailabilityServices } from "./availability-processor";
 import type { RoutingJobMessage, RoutingJobServices } from "./processor";
 import { classifyWorkerError, PermanentJobError } from "./errors";
 import { activeApprovedReviewers, evaluateHumanReviewPolicy } from "./review-policy";
-import type { HumanReviewPolicyServices } from "./review-policy-processor";
+import { processHumanReviewPolicyJob, type HumanReviewPolicyServices } from "./review-policy-processor";
 
 type Requester = Awaited<ReturnType<typeof createInstallationRequester>>;
 type DatabaseClient = ReturnType<typeof createDatabase>;
@@ -546,6 +550,174 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
         });
       },
     };
+  };
+}
+
+export function createWorkerReviewerAvailabilityServiceFactory(input: {
+  db: DatabaseClient;
+  github: GitHubAppCredentials;
+  createRequester?: typeof createInstallationRequester;
+}): (message: ReviewerAbsenceActivationJobPayload) => ReviewerAvailabilityServices {
+  const requesterPromises = new Map<string, Promise<Requester>>();
+
+  function requesterFor(installationId: string): Promise<Requester> {
+    let requesterPromise = requesterPromises.get(installationId);
+    if (!requesterPromise) {
+      requesterPromise = (input.createRequester ?? createInstallationRequester)({
+        appId: input.github.appId,
+        privateKey: input.github.privateKey,
+        installationId: toSafeInteger(installationId),
+      });
+      requesterPromises.set(installationId, requesterPromise);
+    }
+    return requesterPromise;
+  }
+
+  const buildHumanReviewPolicyServices = createWorkerHumanReviewPolicyServiceFactory({
+    db: input.db,
+    github: input.github,
+    createRequester: async (credentials) => await requesterFor(String(credentials.installationId)),
+  });
+
+  return (message) => ({
+    now() {
+      return new Date();
+    },
+
+    async loadActivation(activation) {
+      if (
+        activation.absenceId !== message.absenceId ||
+        activation.expectedRevision !== message.expectedRevision
+      ) return null;
+      return await loadReviewerAbsenceActivation(input.db, activation);
+    },
+
+    async findRecordedOutcome(outcome) {
+      return await findReviewerReplacementOutcome(input.db, outcome);
+    },
+
+    async fetchPullRequest(candidate) {
+      const response = await (await requesterFor(candidate.installationId)).request(
+        "GET /repos/{owner}/{repo}/pulls/{pull_number}",
+        {
+          owner: candidate.owner,
+          repo: candidate.repo,
+          pull_number: candidate.pullNumber,
+        },
+      );
+      const authorLogin = readNestedString(response.data, ["user", "login"]);
+      return {
+        state: readString(response.data, "state"),
+        headSha: readNestedString(response.data, ["head", "sha"]),
+        authorHandle: authorLogin ? `@${authorLogin.toLowerCase()}` : "",
+      };
+    },
+
+    async fetchReviews(candidate) {
+      return await new GitHubAdapter(await requesterFor(candidate.installationId)).listPullRequestReviews({
+        pullRequest: availabilityPullRequest(candidate),
+      });
+    },
+
+    async listAbsenceWindows(absences) {
+      return await listReviewerAbsenceWindows(input.db, absences);
+    },
+
+    async getReviewerLoad(load) {
+      return Object.fromEntries(load.reviewers.map((reviewer) => [reviewer, 0]));
+    },
+
+    async removeReviewer(candidate, reviewer) {
+      if (candidate.mode !== "enforce") return;
+      await new GitHubAdapter(await requesterFor(candidate.installationId)).removeHumanReviewer({
+        pullRequest: availabilityPullRequest(candidate),
+        reviewer,
+      });
+    },
+
+    async requestReviewer(candidate, reviewer) {
+      if (candidate.mode !== "enforce") return;
+      await new GitHubAdapter(await requesterFor(candidate.installationId)).ensureHumanReviewerRequested({
+        pullRequest: availabilityPullRequest(candidate),
+        reviewer,
+      });
+    },
+
+    async recordOutcome(outcome) {
+      return await recordReviewerReplacement(input.db, outcome);
+    },
+
+    async reevaluatePolicy(candidate) {
+      if (candidate.mode !== "enforce") return;
+      const policyMessage = availabilityPolicyMessage(message, candidate);
+      await processHumanReviewPolicyJob(
+        policyMessage,
+        buildHumanReviewPolicyServices(policyMessage),
+      );
+    },
+
+    async failPolicyCheck(candidate, summary) {
+      if (candidate.mode !== "enforce") return;
+      const adapter = new GitHubAdapter(await requesterFor(candidate.installationId));
+      const checkRun = {
+        owner: candidate.owner,
+        repo: candidate.repo,
+        headSha: candidate.headSha,
+      };
+      const existing = await adapter.findHumanReviewPolicyCheck({
+        checkRun,
+        decisionId: candidate.decisionId,
+        appId: toSafeInteger(input.github.appId),
+      });
+      if (existing === null) return;
+      if (existing.state !== "failure") {
+        await adapter.updateHumanReviewPolicyCheck({
+          checkRun,
+          checkRunId: existing.checkRunId,
+          state: "failure",
+          summary,
+        });
+      }
+      await recordPolicyCheck(input.db, {
+        decisionId: candidate.decisionId,
+        checkRunId: existing.checkRunId,
+        state: "failure",
+      });
+    },
+  });
+}
+
+function availabilityPullRequest(candidate: {
+  owner: string;
+  repo: string;
+  pullNumber: number;
+}) {
+  return {
+    owner: candidate.owner,
+    repo: candidate.repo,
+    pullNumber: candidate.pullNumber,
+  };
+}
+
+function availabilityPolicyMessage(
+  activation: ReviewerAbsenceActivationJobPayload,
+  candidate: {
+    decisionId: string;
+    installationId: string;
+    repositoryId: string;
+    owner: string;
+    repo: string;
+    pullNumber: number;
+  },
+): HumanReviewPolicyJobPayload {
+  return {
+    kind: "evaluate_human_review_policy",
+    deliveryId: `reviewer-availability:${activation.absenceId}:${activation.expectedRevision}:${candidate.decisionId}`,
+    installationId: candidate.installationId,
+    repositoryId: candidate.repositoryId,
+    owner: candidate.owner,
+    repo: candidate.repo,
+    pullNumber: candidate.pullNumber,
   };
 }
 

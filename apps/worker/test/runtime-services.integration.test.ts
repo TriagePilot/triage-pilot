@@ -1,10 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { withPostgresTestDatabase } from "../../../packages/db/test/postgres";
 import {
   createWorkerHumanReviewPolicyServiceFactory,
+  createWorkerReviewerAvailabilityServiceFactory,
   createWorkerRoutingServiceFactory,
 } from "../src/runtime-services";
+import { processReviewerAbsenceActivationJob } from "../src/availability-processor";
 import type { RoutingJobMessage } from "../src/processor";
 
 const message: RoutingJobMessage = {
@@ -20,6 +22,93 @@ const message: RoutingJobMessage = {
 };
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime services", () => {
+  it("keeps shadow reviewer-availability activation GitHub-read-only while persisting its simulation", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const installation = await db.insertInto("installations").values({
+        github_installation_id: "99",
+        account_login: "acme",
+        account_type: "Organization",
+        status: "active",
+        permissions: {},
+      }).returning("id").executeTakeFirstOrThrow();
+      const repository = await db.insertInto("repositories").values({
+        installation_id: installation.id,
+        github_repository_id: "101",
+        owner: "acme",
+        name: "api",
+        default_branch: "main",
+        config_state: "valid",
+      }).returning("id").executeTakeFirstOrThrow();
+      const absence = await db.insertInto("reviewer_absences").values({
+        reviewer_handle: "@user-d82a5f",
+        start_at: new Date(Date.now() - 86_400_000),
+        end_at: new Date(Date.now() + 86_400_000),
+      }).returning(["id", "revision"]).executeTakeFirstOrThrow();
+      const decision = await db.insertInto("routing_decisions").values({
+        repository_id: repository.id,
+        delivery_id: "delivery-shadow-availability",
+        routing_key: "routing-shadow-availability",
+        pull_number: 7,
+        head_sha: "shadow-head",
+        mode: "shadow",
+        action: "request_human_review",
+        action_status: "not_applied",
+        risk_score: 50,
+        selected_reviewer: "@user-d82a5f",
+        selected_reviewers: JSON.stringify(["@user-d82a5f"]),
+        details: {
+          ownership: { eligibleReviewers: ["@user-d82a5f", "@user-f30c8a"] },
+          routing: { requestedReviewerCount: 1 },
+        },
+        policy_check_state: "not_started",
+      }).returning("id").executeTakeFirstOrThrow();
+      const request = vi.fn(async (route: string) => {
+        if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
+          return { data: { state: "open", head: { sha: "shadow-head" }, user: { login: "user-author" } } };
+        }
+        if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") return { data: [] };
+        throw new Error(`unexpected GitHub route: ${route}`);
+      });
+      const message = {
+        kind: "activate_reviewer_absence" as const,
+        absenceId: absence.id,
+        expectedRevision: absence.revision,
+      };
+      const services = createWorkerReviewerAvailabilityServiceFactory({
+        db,
+        github: {
+          appId: "123",
+          privateKey: "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----",
+        },
+        createRequester: vi.fn(async () => ({ request })) as never,
+      })(message);
+
+      await processReviewerAbsenceActivationJob(message, services);
+
+      expect(request.mock.calls.every(([route]) => route.startsWith("GET "))).toBe(true);
+      expect(request.mock.calls.map(([route]) => route)).toEqual([
+        "GET /repos/{owner}/{repo}/pulls/{pull_number}",
+        "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+      ]);
+      await expect(db.selectFrom("reviewer_replacements").select([
+        "decision_id",
+        "outcome",
+        "replacement_reviewer",
+      ]).execute()).resolves.toEqual([{
+        decision_id: decision.id,
+        outcome: "simulated_replacement",
+        replacement_reviewer: "@user-f30c8a",
+      }]);
+      await expect(db.selectFrom("routing_decisions").select([
+        "selected_reviewer",
+        "selected_reviewers",
+      ]).where("id", "=", decision.id).executeTakeFirstOrThrow()).resolves.toEqual({
+        selected_reviewer: "@user-f30c8a",
+        selected_reviewers: ["@user-f30c8a"],
+      });
+    });
+  });
+
   it("rejects decisions for repositories absent from the configured projection", async () => {
     await withPostgresTestDatabase(async (db) => {
       const buildServices = createWorkerRoutingServiceFactory({
