@@ -27,6 +27,7 @@ export interface CheckRunRef extends RepositoryRef {
 
 export interface PullRequestReview {
   userLogin: string;
+  userType?: string;
   state: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "PENDING" | "DISMISSED" | string;
   commitId: string | null;
   submittedAt: string | null;
@@ -398,6 +399,7 @@ function readPullRequestReview(value: unknown): PullRequestReview | undefined {
 
   return {
     userLogin: value.user.login,
+    ...(typeof value.user.type === "string" ? { userType: value.user.type } : {}),
     state: value.state,
     commitId: typeof value.commit_id === "string" ? value.commit_id : null,
     submittedAt: typeof value.submitted_at === "string" ? value.submitted_at : null,

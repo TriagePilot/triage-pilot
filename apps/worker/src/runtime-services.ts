@@ -5,6 +5,7 @@ import {
 } from "@triagepilot/github";
 import { trustedBaseSha, type ScoreComponent } from "@triagepilot/shared";
 import {
+  createJobQueue,
   findLatestHumanReviewPolicyDecision,
   markActionFailed as persistActionFailed,
   markActionSucceeded as persistActionSucceeded,
@@ -119,6 +120,26 @@ export function createWorkerRoutingServiceFactory(input: {
         };
       },
 
+      async fetchCurrentHeadApprovedReviewers() {
+        const reviews = await new GitHubAdapter(await requester()).listPullRequestReviews({
+          pullRequest: { owner: message.owner, repo: message.repo, pullNumber: message.pullNumber },
+        });
+        return reviews
+          .filter(
+            (review) =>
+              review.userType === "User" && review.state === "APPROVED" && review.commitId === message.headSha,
+          )
+          .map((review) => `@${review.userLogin}`);
+      },
+
+      async enqueueHumanReviewPolicyEvaluation(policy) {
+        await createJobQueue(input.db).enqueue({
+          kind: "evaluate_human_review_policy",
+          payload: { kind: "evaluate_human_review_policy", ...policy },
+          idempotencyKey: `review-policy:${policy.deliveryId}`,
+        });
+      },
+
       async getReviewerLoad(reviewersInput) {
         return Object.fromEntries(reviewersInput.reviewers.map((reviewer) => [reviewer, 0]));
       },
@@ -208,10 +229,11 @@ export function createWorkerRoutingServiceFactory(input: {
             decisionId: action.decisionId,
             body: formatRoutingComment(action),
           });
-          if (route === "human_review" && action.selectedReviewers?.length) {
+          const reviewersToRequest = action.reviewersToRequest ?? action.selectedReviewers ?? [];
+          if (route === "human_review" && reviewersToRequest.length) {
             await adapter.requestHumanReviewers({
               pullRequest,
-              reviewers: action.selectedReviewers,
+              reviewers: reviewersToRequest,
             });
           }
           if (action.action === "policy_approval") {
