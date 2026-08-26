@@ -1,7 +1,7 @@
 import { parse } from "yaml";
 import { z } from "zod";
 
-import type { RepositoryMode } from "@triagepilot/shared";
+import type { RepositoryMode } from "@triagepilot/contracts";
 
 export interface ConfigDiagnostic {
   path: string;

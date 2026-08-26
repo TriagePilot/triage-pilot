@@ -1,5 +1,6 @@
 import { App } from "@octokit/app";
-import { HUMAN_REVIEW_POLICY_CHECK_NAME, type RiskTier } from "@triagepilot/shared";
+import type { RiskTier } from "@triagepilot/contracts";
+import { HUMAN_REVIEW_POLICY_CHECK_NAME } from "@triagepilot/shared";
 
 const PAGE_SIZE = 100;
 const RISK_LABELS: Record<RiskTier, { name: string; color: string; description: string }> = {

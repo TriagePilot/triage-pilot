@@ -1,15 +1,14 @@
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { buildRoutingKey } from "@triagepilot/shared";
+import { buildRoutingKey, type HumanReviewPolicyJobPayload, type RoutingJobPayload } from "@triagepilot/contracts";
 import type {
   GitHubInstallationMetadata,
   GitHubId,
   GitHubRepositoryMetadata,
-  HumanReviewPolicyJobPayload,
-  RoutingJobPayload,
 } from "@triagepilot/shared";
 
 const ROUTING_PULL_REQUEST_ACTIONS = new Set(["opened", "reopened", "synchronize", "ready_for_review"]);
+const SELF_HOSTED_WORKSPACE_ID = "ws_local";
 
 const githubIdSchema = z.number().int().safe().transform((id) => String(id));
 const accountSchema = z.object({ login: z.string(), type: z.string() });
@@ -127,22 +126,31 @@ export function githubWebhookRoutes(services: WebhookServices) {
       }
 
       const routingPayload: RoutingJobPayload = {
-        kind: "process_pull_request",
+        kind: "process_change_request",
         deliveryId,
-        installationId: payload.installation.id,
-        repositoryId: payload.repository.id,
-        owner: account.login,
-        repo: payload.repository.name,
-        pullNumber: payload.pull_request.number,
-        baseSha: payload.pull_request.base.sha,
-        headSha: payload.pull_request.head.sha,
+        eventName: `change_request.${payload.action}`,
+        workspaceId: SELF_HOSTED_WORKSPACE_ID,
+        providerConnectionId: payload.installation.id,
+        changeRequest: {
+          repository: {
+            provider: "github",
+            externalId: payload.repository.id,
+            owner: account.login,
+            name: payload.repository.name,
+          },
+          externalId: String(payload.pull_request.number),
+          number: payload.pull_request.number,
+          baseRevision: payload.pull_request.base.sha,
+          headRevision: payload.pull_request.head.sha,
+        },
         isDraft: payload.pull_request.draft,
-        eventName: `pull_request.${payload.action}`,
         routingKey: buildRoutingKey({
+          workspaceId: SELF_HOSTED_WORKSPACE_ID,
+          provider: "github",
           repositoryId: payload.repository.id,
-          pullNumber: payload.pull_request.number,
-          baseSha: payload.pull_request.base.sha,
-          headSha: payload.pull_request.head.sha,
+          changeRequestId: String(payload.pull_request.number),
+          trustedConfigRevision: payload.pull_request.base.sha,
+          headRevision: payload.pull_request.head.sha,
         }),
       };
       const accepted = await services.acceptRoutingDelivery({
@@ -176,11 +184,18 @@ export function githubWebhookRoutes(services: WebhookServices) {
       const reviewPolicyPayload: HumanReviewPolicyJobPayload = {
         kind: "evaluate_human_review_policy",
         deliveryId,
-        installationId: payload.installation.id,
-        repositoryId: payload.repository.id,
-        owner: account.login,
-        repo: payload.repository.name,
-        pullNumber: payload.pull_request.number,
+        workspaceId: SELF_HOSTED_WORKSPACE_ID,
+        providerConnectionId: payload.installation.id,
+        changeRequest: {
+          repository: {
+            provider: "github",
+            externalId: payload.repository.id,
+            owner: account.login,
+            name: payload.repository.name,
+          },
+          externalId: String(payload.pull_request.number),
+          number: payload.pull_request.number,
+        },
       };
       const accepted = await services.acceptHumanReviewPolicyDelivery({
         deliveryId,

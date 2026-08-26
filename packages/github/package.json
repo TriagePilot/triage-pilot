@@ -11,6 +11,7 @@
     "check": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@triagepilot/contracts": "workspace:*",
     "@triagepilot/shared": "workspace:*",
     "@octokit/app": "^15.1.2",
     "@octokit/request": "^9.1.4",

@@ -32,6 +32,9 @@ importers:
       '@triagepilot/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@triagepilot/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@triagepilot/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -78,6 +81,9 @@ importers:
       '@triagepilot/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@triagepilot/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@triagepilot/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -96,9 +102,9 @@ importers:
 
   packages/config:
     dependencies:
-      '@triagepilot/shared':
+      '@triagepilot/contracts':
         specifier: workspace:*
-        version: link:../shared
+        version: link:../contracts
       yaml:
         specifier: ^2.6.1
         version: 2.9.0
@@ -106,17 +112,22 @@ importers:
         specifier: ^3.24.1
         version: 3.25.76
 
+  packages/contracts: {}
+
   packages/core:
     dependencies:
-      '@triagepilot/shared':
+      '@triagepilot/contracts':
         specifier: workspace:*
-        version: link:../shared
+        version: link:../contracts
       minimatch:
         specifier: ^10.0.1
         version: 10.2.5
 
   packages/db:
     dependencies:
+      '@triagepilot/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@triagepilot/shared':
         specifier: workspace:*
         version: link:../shared
@@ -139,6 +150,9 @@ importers:
       '@octokit/request':
         specifier: ^9.1.4
         version: 9.2.4
+      '@triagepilot/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@triagepilot/shared':
         specifier: workspace:*
         version: link:../shared
@@ -146,7 +160,11 @@ importers:
         specifier: ^3.24.1
         version: 3.25.76
 
-  packages/shared: {}
+  packages/shared:
+    devDependencies:
+      '@triagepilot/contracts':
+        specifier: workspace:*
+        version: link:../contracts
 
 packages:
 

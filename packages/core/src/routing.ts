@@ -1,4 +1,4 @@
-import type { RiskTier, RoutingAction } from "@triagepilot/shared";
+import type { RiskTier, RoutingAction } from "@triagepilot/contracts";
 
 export interface RoutingInput {
   risk: { score: number; tier: RiskTier };

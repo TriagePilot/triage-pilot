@@ -1,5 +1,5 @@
 import { sql, type Kysely } from "kysely";
-import { legacyRoutingKey, type ActionStatus, type RepositoryMode, type RoutingAction } from "@triagepilot/shared";
+import { legacyRoutingKey, type ActionStatus, type RepositoryMode, type RoutingAction } from "@triagepilot/contracts";
 
 import type { Database } from "./kysely";
 

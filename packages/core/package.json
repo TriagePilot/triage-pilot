@@ -11,7 +11,7 @@
     "check": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@triagepilot/shared": "workspace:*",
+    "@triagepilot/contracts": "workspace:*",
     "minimatch": "^10.0.1"
   }
 }

@@ -1,6 +1,6 @@
 import type { HumanReviewPolicyDecision } from "@triagepilot/db";
 import type { PullRequestReview } from "@triagepilot/github";
-import type { HumanReviewPolicyJobPayload } from "@triagepilot/shared";
+import type { HumanReviewPolicyJobPayload } from "@triagepilot/contracts";
 
 import { evaluateHumanReviewPolicy, type HumanReviewPolicyState } from "./review-policy";
 
@@ -26,8 +26,8 @@ export async function processHumanReviewPolicyJob(
   services: HumanReviewPolicyServices,
 ): Promise<void> {
   const decision = await services.findDecision({
-    repositoryId: message.repositoryId,
-    pullNumber: message.pullNumber,
+    repositoryId: message.changeRequest.repository.externalId,
+    pullNumber: message.changeRequest.number,
   });
   if (!decision || decision.mode !== "enforce") return;
   if (decision.policyCheckState === "failure") return;

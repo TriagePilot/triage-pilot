@@ -1,0 +1,94 @@
+import type {
+  ChangeRequestId,
+  ChangeRequestRef,
+  ExternalActorId,
+  ProviderConnectionId,
+  ProviderKind,
+  RepositoryId,
+  WorkspaceId,
+} from "./ids";
+
+export type RiskTier = "low" | "medium" | "high";
+
+export interface ScoreComponent {
+  reason: string;
+  score: number;
+  detail: string;
+}
+
+export type RepositoryMode = "shadow" | "enforce";
+export type RoutingAction =
+  | "policy_approval"
+  | "request_human_review"
+  | "no_eligible_reviewer"
+  | "configuration_failure";
+export type ActionStatus = "not_applied" | "pending" | "succeeded" | "failed";
+
+export interface NormalizedChangeRequestEvent {
+  deliveryId: string;
+  eventName: "change_request" | "change_request_review";
+  eventAction: string;
+  provider: ProviderKind;
+  externalConnectionId: string;
+  changeRequest: ChangeRequestRef;
+  actor: { externalId: ExternalActorId; displayName: string };
+  isDraft: boolean;
+}
+
+export interface RoutingJobPayload {
+  kind: "process_change_request";
+  deliveryId: string;
+  eventName: string;
+  workspaceId: WorkspaceId;
+  providerConnectionId: ProviderConnectionId;
+  changeRequest: ChangeRequestRef;
+  isDraft: boolean;
+  routingKey: string;
+}
+
+export interface HumanReviewPolicyJobPayload {
+  kind: "evaluate_human_review_policy";
+  deliveryId: string;
+  workspaceId: WorkspaceId;
+  providerConnectionId: ProviderConnectionId;
+  changeRequest: Pick<ChangeRequestRef, "repository" | "externalId" | "number">;
+}
+
+export interface DecisionEventV1 {
+  schemaVersion: 1;
+  eventId: string;
+  occurredAt: string;
+  workspaceId: WorkspaceId;
+  provider: ProviderKind;
+  decisionId: string;
+  repositoryId: RepositoryId;
+  changeRequestId: ChangeRequestId;
+  routingKey: string;
+  mode: RepositoryMode;
+  action: RoutingAction;
+  riskScore: number;
+  selectedActors: ExternalActorId[];
+  effectiveConfigurationHash: string;
+}
+
+export type TriagePilotJobPayload = RoutingJobPayload | HumanReviewPolicyJobPayload;
+
+export function buildRoutingKey(input: {
+  workspaceId: WorkspaceId;
+  provider: ProviderKind;
+  repositoryId: RepositoryId;
+  changeRequestId: ChangeRequestId;
+  trustedConfigRevision: string;
+  headRevision: string;
+}): string {
+  return `routing:${input.workspaceId}:${input.provider}:${input.repositoryId}:${input.changeRequestId}:${input.trustedConfigRevision}:${input.headRevision}`;
+}
+
+export function legacyRoutingKey(deliveryId: string): string {
+  return `legacy:${deliveryId}`;
+}
+
+export function trustedBaseSha(payload: Pick<RoutingJobPayload, "changeRequest">): string | undefined {
+  const baseRevision = payload.changeRequest.baseRevision.trim();
+  return baseRevision || undefined;
+}

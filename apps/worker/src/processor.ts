@@ -3,13 +3,13 @@ import { decideRouting, matchOwnership, scorePullRequestRisk, type ChangedFileMe
 import {
   legacyRoutingKey,
   type ActionStatus,
-  type GitHubId,
   type HumanReviewPolicyJobPayload,
+  type ProviderConnectionId,
   type RepositoryMode,
   type RiskTier,
   type RoutingJobPayload,
   type ScoreComponent,
-} from "@triagepilot/shared";
+} from "@triagepilot/contracts";
 import { minimatch } from "minimatch";
 
 export type RoutingJobMessage = RoutingJobPayload;
@@ -28,7 +28,7 @@ export interface RoutingJobServices {
   enqueueHumanReviewPolicyEvaluation(
     input: Omit<HumanReviewPolicyJobPayload, "kind">,
   ): Promise<void>;
-  getReviewerLoad(input: { installationId: GitHubId; reviewers: string[] }): Promise<Record<string, number>>;
+  getReviewerLoad(input: { providerConnectionId: ProviderConnectionId; reviewers: string[] }): Promise<Record<string, number>>;
   updateRepositoryConfigState(input: {
     configState: "valid" | "invalid";
     mode: RepositoryMode;
@@ -78,13 +78,13 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
     await services.persistDecision({
       deliveryId: message.deliveryId,
       routingKey,
-      pullNumber: message.pullNumber,
-      headSha: message.headSha,
+      pullNumber: message.changeRequest.number,
+      headSha: message.changeRequest.headRevision,
       mode: "shadow",
       action: "configuration_failure",
       actionStatus: "not_applied",
       riskScore: 0,
-      details: { pullNumber: message.pullNumber, diagnostics: configResult.diagnostics },
+      details: { pullNumber: message.changeRequest.number, diagnostics: configResult.diagnostics },
     });
     await services.updateRepositoryConfigState({ configState: "invalid", mode: "shadow" });
     return;
@@ -116,7 +116,7 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
     fallbackReviewers: configResult.config.ownership.fallbackReviewers,
   });
   const reviewerLoad = await services.getReviewerLoad({
-    installationId: message.installationId,
+    providerConnectionId: message.providerConnectionId,
     reviewers: ownership.eligibleReviewers,
   });
   const risk = scorePullRequestRisk({
@@ -134,19 +134,19 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
     existingApprovedReviewers,
     load: reviewerLoad,
     highRiskReviewers: configResult.config.routing.highRiskReviewers,
-    selectionKey: `${message.owner}/${message.repo}#${message.pullNumber}`,
+    selectionKey: `${message.changeRequest.repository.owner}/${message.changeRequest.repository.name}#${message.changeRequest.number}`,
   });
 
   const decisionInput: Parameters<RoutingJobServices["persistDecision"]>[0] = {
     deliveryId: message.deliveryId,
     routingKey,
-    pullNumber: message.pullNumber,
-    headSha: message.headSha,
+    pullNumber: message.changeRequest.number,
+    headSha: message.changeRequest.headRevision,
     mode: publicMode,
     action: routing.action,
     actionStatus: publicMode === "enforce" && routing.action !== "no_eligible_reviewer" ? "pending" : "not_applied",
     riskScore: risk.score,
-    details: { pullNumber: message.pullNumber, risk, ownership, routing },
+    details: { pullNumber: message.changeRequest.number, risk, ownership, routing },
   };
   if (routing.selectedReviewers.length > 0) decisionInput.selectedReviewers = routing.selectedReviewers;
   if (routing.noHumanReason) decisionInput.noHumanReason = routing.noHumanReason;
@@ -158,7 +158,7 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
     const actionInput: Parameters<RoutingJobServices["applyDecisionActions"]>[0] = {
       action: routing.action,
       decisionId: persisted.decisionId,
-      expectedHeadSha: message.headSha,
+      expectedHeadSha: message.changeRequest.headRevision,
       riskTier: risk.tier,
       risk,
     };
@@ -170,11 +170,13 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
       if (routing.action === "request_human_review") {
         await services.enqueueHumanReviewPolicyEvaluation({
           deliveryId: `routing-policy:${message.deliveryId}`,
-          installationId: message.installationId,
-          repositoryId: message.repositoryId,
-          owner: message.owner,
-          repo: message.repo,
-          pullNumber: message.pullNumber,
+          workspaceId: message.workspaceId,
+          providerConnectionId: message.providerConnectionId,
+          changeRequest: {
+            repository: message.changeRequest.repository,
+            externalId: message.changeRequest.externalId,
+            number: message.changeRequest.number,
+          },
         });
       }
     } catch (error) {

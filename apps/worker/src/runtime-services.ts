@@ -3,7 +3,7 @@ import {
   GitHubAdapter,
   type GitHubAppCredentials,
 } from "@triagepilot/github";
-import { trustedBaseSha, type ScoreComponent } from "@triagepilot/shared";
+import { trustedBaseSha, type HumanReviewPolicyJobPayload, type ScoreComponent } from "@triagepilot/contracts";
 import {
   createJobQueue,
   findLatestHumanReviewPolicyDecision,
@@ -15,7 +15,6 @@ import {
   type createDatabase,
 } from "@triagepilot/db";
 import type { ChangedFileMetadata } from "@triagepilot/core";
-import type { HumanReviewPolicyJobPayload } from "@triagepilot/shared";
 
 import type { RoutingJobMessage, RoutingJobServices } from "./processor";
 import { classifyWorkerError, PermanentJobError } from "./errors";
@@ -31,6 +30,8 @@ export function createWorkerRoutingServiceFactory(input: {
   createRequester?: typeof createInstallationRequester;
 }): (message: RoutingJobMessage) => RoutingJobServices {
   return (message) => {
+    const { changeRequest } = message;
+    const { repository } = changeRequest;
     let requesterPromise: Promise<Requester> | null = null;
     let repositoryIdPromise: Promise<string> | null = null;
     let pullRequestPromise: Promise<unknown> | null = null;
@@ -41,7 +42,7 @@ export function createWorkerRoutingServiceFactory(input: {
       requesterPromise ??= (input.createRequester ?? createInstallationRequester)({
         appId: input.github.appId,
         privateKey: input.github.privateKey,
-        installationId: toSafeInteger(message.installationId),
+        installationId: toSafeInteger(message.providerConnectionId),
       });
       return requesterPromise;
     }
@@ -54,9 +55,9 @@ export function createWorkerRoutingServiceFactory(input: {
     async function pullRequest(): Promise<unknown> {
       pullRequestPromise ??= (async () => {
         const response = await (await requester()).request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
-          owner: message.owner,
-          repo: message.repo,
-          pull_number: message.pullNumber,
+          owner: repository.owner,
+          repo: repository.name,
+          pull_number: changeRequest.number,
         });
         return response.data;
       })();
@@ -69,8 +70,8 @@ export function createWorkerRoutingServiceFactory(input: {
           const configRef = trustedBaseSha(message) ?? readNestedString(await pullRequest(), ["base", "sha"]);
           if (!configRef) throw new Error("pull request base SHA is unavailable");
           const response = await (await requester()).request("GET /repos/{owner}/{repo}/contents/{path}", {
-            owner: message.owner,
-            repo: message.repo,
+            owner: repository.owner,
+            repo: repository.name,
             path: ".github/triagepilot.yml",
             ref: configRef,
           });
@@ -85,9 +86,9 @@ export function createWorkerRoutingServiceFactory(input: {
         const files: ChangedFileMetadata[] = [];
         for (let page = 1; ; page += 1) {
           const response = await (await requester()).request("GET /repos/{owner}/{repo}/pulls/{pull_number}/files", {
-            owner: message.owner,
-            repo: message.repo,
-            pull_number: message.pullNumber,
+            owner: repository.owner,
+            repo: repository.name,
+            pull_number: changeRequest.number,
             page,
             per_page: 100,
           });
@@ -99,9 +100,9 @@ export function createWorkerRoutingServiceFactory(input: {
 
       async fetchCommitMessages() {
         const response = await (await requester()).request("GET /repos/{owner}/{repo}/pulls/{pull_number}/commits", {
-          owner: message.owner,
-          repo: message.repo,
-          pull_number: message.pullNumber,
+          owner: repository.owner,
+          repo: repository.name,
+          pull_number: changeRequest.number,
           per_page: 100,
         });
         return Array.isArray(response.data)
@@ -122,7 +123,7 @@ export function createWorkerRoutingServiceFactory(input: {
 
       async fetchActiveApprovedReviewers() {
         const reviews = await new GitHubAdapter(await requester()).listPullRequestReviews({
-          pullRequest: { owner: message.owner, repo: message.repo, pullNumber: message.pullNumber },
+          pullRequest: { owner: repository.owner, repo: repository.name, pullNumber: changeRequest.number },
         });
         return activeApprovedReviewers(reviews);
       },
@@ -172,14 +173,14 @@ export function createWorkerRoutingServiceFactory(input: {
         persistedDecisionId = action.decisionId;
         const githubRequester = await requester();
         const pullRequest = {
-          owner: message.owner,
-          repo: message.repo,
-          pullNumber: message.pullNumber,
+          owner: repository.owner,
+          repo: repository.name,
+          pullNumber: changeRequest.number,
         };
         const currentPullRequest = await githubRequester.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
-          owner: message.owner,
-          repo: message.repo,
-          pull_number: message.pullNumber,
+          owner: repository.owner,
+          repo: repository.name,
+          pull_number: changeRequest.number,
         });
         if (readNestedString(currentPullRequest.data, ["head", "sha"]) !== action.expectedHeadSha) {
           throw new PermanentJobError("pull request head changed before enforce actions");
@@ -197,7 +198,7 @@ export function createWorkerRoutingServiceFactory(input: {
           headSha: action.expectedHeadSha,
           reviews: [],
         });
-        const checkRun = { owner: message.owner, repo: message.repo, headSha: action.expectedHeadSha };
+        const checkRun = { owner: repository.owner, repo: repository.name, headSha: action.expectedHeadSha };
         const policyCheckRunId = await ensureInitialPolicyCheck({
           db: input.db,
           adapter,
@@ -259,15 +260,15 @@ export function createWorkerRoutingServiceFactory(input: {
         persistedDecisionId ??= await findDecisionIdForDelivery(
           input.db,
           message.deliveryId,
-          message.headSha,
+          changeRequest.headRevision,
         );
         if (persistedDecisionId === null) return;
         const adapter = new GitHubAdapter(await requester());
-        const checkRun = { owner: message.owner, repo: message.repo, headSha: message.headSha };
+        const checkRun = { owner: repository.owner, repo: repository.name, headSha: changeRequest.headRevision };
         const recordedCheckRunId = await findRecordedPolicyCheckRunId(
           input.db,
           persistedDecisionId,
-          message.headSha,
+          changeRequest.headRevision,
         );
         const recovered = recordedCheckRunId === null
           ? await adapter.findHumanReviewPolicyCheck({
@@ -346,6 +347,8 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
   createRequester?: typeof createInstallationRequester;
 }): (message: HumanReviewPolicyJobPayload) => HumanReviewPolicyServices {
   return (message) => {
+    const { changeRequest } = message;
+    const { repository } = changeRequest;
     let requesterPromise: Promise<Requester> | null = null;
     let repositoryIdPromise: Promise<string> | null = null;
     let evaluatedDecisionId: string | null = null;
@@ -360,19 +363,19 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
       requesterPromise ??= (input.createRequester ?? createInstallationRequester)({
         appId: input.github.appId,
         privateKey: input.github.privateKey,
-        installationId: toSafeInteger(message.installationId),
+        installationId: toSafeInteger(message.providerConnectionId),
       });
       return requesterPromise;
     }
 
     function pullRequestRef() {
-      return { owner: message.owner, repo: message.repo, pullNumber: message.pullNumber };
+      return { owner: repository.owner, repo: repository.name, pullNumber: changeRequest.number };
     }
 
     async function findDecision() {
       const decision = await findLatestHumanReviewPolicyDecision(input.db, {
         repositoryId: await repositoryId(),
-        pullNumber: message.pullNumber,
+        pullNumber: changeRequest.number,
       });
       evaluatedDecisionId = decision?.decisionId ?? null;
       return decision;
@@ -380,15 +383,15 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
 
     return {
       async findDecision(decisionInput) {
-        if (decisionInput.pullNumber !== message.pullNumber) return null;
+        if (decisionInput.pullNumber !== changeRequest.number) return null;
         return await findDecision();
       },
 
       async fetchPullRequest() {
         const response = await (await requester()).request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
-          owner: message.owner,
-          repo: message.repo,
-          pull_number: message.pullNumber,
+          owner: repository.owner,
+          repo: repository.name,
+          pull_number: changeRequest.number,
         });
         return {
           state: readString(response.data, "state"),
@@ -501,9 +504,9 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
           ? await findPolicyCheckDecision(input.db, {
               decisionId,
               repositoryId: await repositoryId(),
-              pullNumber: message.pullNumber,
-              owner: message.owner,
-              repo: message.repo,
+              pullNumber: changeRequest.number,
+              owner: repository.owner,
+              repo: repository.name,
             })
           : await findDecision();
         if (!decision || decision.policyCheckState === "failure") return;
@@ -542,18 +545,18 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
 
 async function findKnownRepository(
   db: DatabaseClient,
-  message: Pick<RoutingJobMessage, "repositoryId" | "installationId">,
+  message: Pick<RoutingJobMessage, "providerConnectionId" | "changeRequest"> | HumanReviewPolicyJobPayload,
 ): Promise<string> {
   const repository = await db
     .selectFrom("repositories")
     .innerJoin("installations", "installations.id", "repositories.installation_id")
     .select("repositories.id")
-    .where("repositories.github_repository_id", "=", message.repositoryId)
-    .where("installations.github_installation_id", "=", message.installationId)
+    .where("repositories.github_repository_id", "=", message.changeRequest.repository.externalId)
+    .where("installations.github_installation_id", "=", message.providerConnectionId)
     .where("installations.status", "=", "active")
     .executeTakeFirst();
   if (!repository) {
-    throw new Error(`repository ${message.repositoryId} is not known`);
+    throw new Error(`repository ${message.changeRequest.repository.externalId} is not known`);
   }
   return repository.id;
 }

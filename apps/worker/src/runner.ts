@@ -1,5 +1,5 @@
 import type { JobLease, JobQueue, JobRecord, JobTransitionResult } from "@triagepilot/db";
-import type { HumanReviewPolicyJobPayload } from "@triagepilot/shared";
+import type { HumanReviewPolicyJobPayload } from "@triagepilot/contracts";
 
 import type { RoutingJobMessage, RoutingJobServices } from "./processor";
 import type { HumanReviewPolicyServices } from "./review-policy-processor";
@@ -199,19 +199,14 @@ function isRoutingJobMessage(value: unknown): value is RoutingJobMessage {
   if (typeof value !== "object" || value === null) return false;
   const payload = value as Record<string, unknown>;
   return (
-    payload.kind === "process_pull_request" &&
+    payload.kind === "process_change_request" &&
     isNonEmptyString(payload.deliveryId) &&
-    isDecimalId(payload.installationId) &&
-    isDecimalId(payload.repositoryId) &&
-    isNonEmptyString(payload.owner) &&
-    isNonEmptyString(payload.repo) &&
-    Number.isSafeInteger(payload.pullNumber) &&
-    Number(payload.pullNumber) > 0 &&
-    (payload.baseSha === undefined || isNonBlankString(payload.baseSha)) &&
-    isNonEmptyString(payload.headSha) &&
-    (payload.isDraft === undefined || typeof payload.isDraft === "boolean") &&
     isNonEmptyString(payload.eventName) &&
-    (payload.routingKey === undefined || isNonEmptyString(payload.routingKey))
+    isNonEmptyString(payload.workspaceId) &&
+    isNonEmptyString(payload.providerConnectionId) &&
+    isChangeRequest(payload.changeRequest, true) &&
+    typeof payload.isDraft === "boolean" &&
+    isNonEmptyString(payload.routingKey)
   );
 }
 
@@ -221,12 +216,9 @@ function isHumanReviewPolicyJobPayload(value: unknown): value is HumanReviewPoli
   return (
     payload.kind === "evaluate_human_review_policy" &&
     isNonEmptyString(payload.deliveryId) &&
-    isDecimalId(payload.installationId) &&
-    isDecimalId(payload.repositoryId) &&
-    isNonEmptyString(payload.owner) &&
-    isNonEmptyString(payload.repo) &&
-    Number.isSafeInteger(payload.pullNumber) &&
-    Number(payload.pullNumber) > 0
+    isNonEmptyString(payload.workspaceId) &&
+    isNonEmptyString(payload.providerConnectionId) &&
+    isChangeRequest(payload.changeRequest, false)
   );
 }
 
@@ -238,8 +230,25 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
-function isDecimalId(value: unknown): value is string {
-  if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) return false;
-  const numeric = Number(value);
-  return Number.isSafeInteger(numeric) && String(numeric) === value;
+function isChangeRequest(value: unknown, includeRevisions: boolean): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const changeRequest = value as Record<string, unknown>;
+  if (
+    !isNonEmptyString(changeRequest.externalId) ||
+    !Number.isSafeInteger(changeRequest.number) ||
+    Number(changeRequest.number) <= 0 ||
+    !isRepository(changeRequest.repository)
+  ) return false;
+  return !includeRevisions || (isNonBlankString(changeRequest.baseRevision) && isNonBlankString(changeRequest.headRevision));
+}
+
+function isRepository(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const repository = value as Record<string, unknown>;
+  return (
+    (repository.provider === "github" || repository.provider === "gitlab" || repository.provider === "bitbucket") &&
+    isNonEmptyString(repository.externalId) &&
+    isNonEmptyString(repository.owner) &&
+    isNonEmptyString(repository.name)
+  );
 }

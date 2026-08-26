@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@triagepilot/config": "workspace:*",
+    "@triagepilot/contracts": "workspace:*",
     "@triagepilot/core": "workspace:*",
     "@triagepilot/db": "workspace:*",
     "@triagepilot/github": "workspace:*",

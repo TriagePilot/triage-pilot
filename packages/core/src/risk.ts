@@ -1,6 +1,6 @@
 import { minimatch } from "minimatch";
 
-import type { RiskTier, ScoreComponent } from "@triagepilot/shared";
+import type { RiskTier, ScoreComponent } from "@triagepilot/contracts";
 
 export const CLASSIFIER_VERSION = "risk-v2";
 

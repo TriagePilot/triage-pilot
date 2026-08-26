@@ -9,6 +9,7 @@
     "migrate": "tsx src/migrate.ts"
   },
   "dependencies": {
+    "@triagepilot/contracts": "workspace:*",
     "@triagepilot/shared": "workspace:*",
     "kysely": "^0.28.17",
     "pg": "^8.13.1"

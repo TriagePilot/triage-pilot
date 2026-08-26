@@ -1,11 +1,9 @@
 import type { Kysely } from "kysely";
+import { legacyRoutingKey, type HumanReviewPolicyJobPayload, type RoutingJobPayload } from "@triagepilot/contracts";
 import type {
   GitHubInstallationMetadata,
   GitHubRepositoryMetadata,
-  HumanReviewPolicyJobPayload,
-  RoutingJobPayload,
 } from "@triagepilot/shared";
-import { legacyRoutingKey } from "@triagepilot/shared";
 
 import { upsertDeliveryRepository } from "./installations";
 import type { Database } from "./kysely";

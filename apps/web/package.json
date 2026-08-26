@@ -11,6 +11,7 @@
   "dependencies": {
     "@hono/node-server": "^1.19.15",
     "@triagepilot/config": "workspace:*",
+    "@triagepilot/contracts": "workspace:*",
     "@triagepilot/core": "workspace:*",
     "@triagepilot/db": "workspace:*",
     "@triagepilot/github": "workspace:*",

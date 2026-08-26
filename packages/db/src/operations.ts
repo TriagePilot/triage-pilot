@@ -1,5 +1,5 @@
 import { sql, type Kysely } from "kysely";
-import type { ActionStatus, RepositoryMode, RiskTier, RoutingAction, ScoreComponent } from "@triagepilot/shared";
+import type { ActionStatus, RepositoryMode, RiskTier, RoutingAction, ScoreComponent } from "@triagepilot/contracts";
 
 import type { Database } from "./kysely";
 

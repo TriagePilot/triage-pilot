@@ -1,18 +1,22 @@
 import { describe, expect, it } from "vitest";
 
-import { trustedBaseSha, type RoutingJobPayload } from "../src/index";
+import { trustedBaseSha, type RoutingJobPayload } from "@triagepilot/contracts";
 
 const payload: RoutingJobPayload = {
-  kind: "process_pull_request",
+  kind: "process_change_request",
   deliveryId: "delivery-1",
-  installationId: "99",
-  repositoryId: "101",
-  owner: "acme",
-  repo: "api",
-  pullNumber: 7,
-  baseSha: "trusted-base-sha",
-  headSha: "unmerged-head-sha",
-  eventName: "pull_request.opened",
+  eventName: "change_request.opened",
+  workspaceId: "ws_local",
+  providerConnectionId: "99",
+  changeRequest: {
+    repository: { provider: "github", externalId: "101", owner: "acme", name: "api" },
+    externalId: "7",
+    number: 7,
+    baseRevision: "trusted-base-sha",
+    headRevision: "unmerged-head-sha",
+  },
+  isDraft: false,
+  routingKey: "routing:ws_local:github:101:7:trusted-base-sha:unmerged-head-sha",
 };
 
 describe("routing job trust boundary", () => {
@@ -20,9 +24,10 @@ describe("routing job trust boundary", () => {
     expect(trustedBaseSha(payload)).toBe("trusted-base-sha");
   });
 
-  it("never substitutes the unmerged head SHA for a legacy payload", () => {
-    const { baseSha: _baseSha, ...legacyPayload } = payload;
-
-    expect(trustedBaseSha(legacyPayload)).toBeUndefined();
+  it("never substitutes the unmerged head SHA for a blank trusted revision", () => {
+    expect(trustedBaseSha({
+      ...payload,
+      changeRequest: { ...payload.changeRequest, baseRevision: "  " },
+    })).toBeUndefined();
   });
 });

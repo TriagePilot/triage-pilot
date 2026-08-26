@@ -1,5 +1,5 @@
 import type { ColumnType, Generated, Insertable, Selectable, Updateable } from "kysely";
-import type { ActionStatus, RepositoryMode } from "@triagepilot/shared";
+import type { ActionStatus, RepositoryMode } from "@triagepilot/contracts";
 
 type Timestamp = ColumnType<Date, Date | string | undefined, Date | string>;
 type NullableTimestamp = ColumnType<Date | null, Date | string | null | undefined, Date | string | null>;
