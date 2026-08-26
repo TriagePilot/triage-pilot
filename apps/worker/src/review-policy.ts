@@ -35,28 +35,12 @@ export function evaluateHumanReviewPolicy(
     };
   }
 
-  const latestReviews = new Map<string, { review: PullRequestReview; submittedAt: number | null; index: number }>();
-  input.reviews.forEach((review, index) => {
-    if (review.userType !== undefined && review.userType !== "User") return;
-    const reviewer = normalizeReviewer(review.userLogin);
-    const submittedAt = parseSubmittedAt(review.submittedAt);
-    const latest = latestReviews.get(reviewer);
-    if (!latest || isLaterReview({ submittedAt, index }, latest)) {
-      latestReviews.set(reviewer, { review, submittedAt, index });
-    }
-  });
-
-  const approvedReviewers = new Set(
-    [...latestReviews.entries()]
-      .filter(([, review]) => review.review.state === "APPROVED")
-      .map(([reviewer]) => reviewer),
-  );
+  const approvedReviewers = new Set(activeApprovedReviewers(input.reviews).map(normalizeReviewer));
   const requiredApprovalCount = input.requiredApprovalCount ?? input.selectedReviewers.length;
   const missingApprovalCount = Math.max(requiredApprovalCount - approvedReviewers.size, 0);
-  const missingReviewers = input.selectedReviewers.filter((reviewer) => {
-    const latest = latestReviews.get(normalizeReviewer(reviewer));
-    return latest?.review.state !== "APPROVED";
-  }).slice(0, missingApprovalCount);
+  const missingReviewers = input.selectedReviewers
+    .filter((reviewer) => !approvedReviewers.has(normalizeReviewer(reviewer)))
+    .slice(0, missingApprovalCount);
 
   if (missingApprovalCount === 0) {
     return {
@@ -74,6 +58,23 @@ export function evaluateHumanReviewPolicy(
         : `Waiting for ${missingApprovalCount} more human approvals.`,
     missingReviewers,
   };
+}
+
+export function activeApprovedReviewers(reviews: PullRequestReview[]): string[] {
+  const latestReviews = new Map<string, { review: PullRequestReview; submittedAt: number | null; index: number }>();
+  reviews.forEach((review, index) => {
+    if (review.userType !== undefined && review.userType !== "User") return;
+    const reviewer = normalizeReviewer(review.userLogin);
+    const submittedAt = parseSubmittedAt(review.submittedAt);
+    const latest = latestReviews.get(reviewer);
+    if (!latest || isLaterReview({ submittedAt, index }, latest)) {
+      latestReviews.set(reviewer, { review, submittedAt, index });
+    }
+  });
+
+  return [...latestReviews.entries()]
+    .filter(([, review]) => review.review.state === "APPROVED")
+    .map(([reviewer]) => `@${reviewer}`);
 }
 
 function normalizeReviewer(reviewer: string): string {

@@ -28,7 +28,7 @@ function buildRoutingServices({ config }: { config: string }) {
       branchName: "docs/usage",
       targetBranchName: "develop",
     })),
-    fetchCurrentHeadApprovedReviewers: vi.fn(async () => []),
+    fetchActiveApprovedReviewers: vi.fn(async () => []),
     getReviewerLoad: vi.fn(async ({ reviewers }: { reviewers: string[] }) =>
       Object.fromEntries(reviewers.map((reviewer) => [reviewer, 0])),
     ),
@@ -225,7 +225,7 @@ ownership:
     });
   });
 
-  it("credits current-head approvals that existed before routing and requests nobody else when they fill a high-risk cohort", async () => {
+  it("credits active approvals that existed before routing and requests nobody else when they fill a high-risk cohort", async () => {
     const services = buildRoutingServices({
       config: `
 version: 1
@@ -241,12 +241,12 @@ ownership:
   fallback_reviewers: ["@user-0c6e8a"]
 `,
     });
-    const fetchCurrentHeadApprovedReviewers = vi.fn(async () => ["@user-4d8a2e", "@user-7c1f9b"]);
-    Object.assign(services, { fetchCurrentHeadApprovedReviewers });
+    const fetchActiveApprovedReviewers = vi.fn(async () => ["@user-4d8a2e", "@user-7c1f9b"]);
+    Object.assign(services, { fetchActiveApprovedReviewers });
 
     await processRoutingJob(message, services);
 
-    expect(fetchCurrentHeadApprovedReviewers).toHaveBeenCalledWith(message);
+    expect(fetchActiveApprovedReviewers).toHaveBeenCalledWith(message);
     expect(services.persistDecision).toHaveBeenCalledWith(
       expect.objectContaining({
         action: "request_human_review",

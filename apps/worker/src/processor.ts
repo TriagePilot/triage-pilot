@@ -24,7 +24,7 @@ export interface RoutingJobServices {
     branchName: string;
     targetBranchName: string;
   }>;
-  fetchCurrentHeadApprovedReviewers(input: RoutingJobMessage): Promise<string[]>;
+  fetchActiveApprovedReviewers(input: RoutingJobMessage): Promise<string[]>;
   enqueueHumanReviewPolicyEvaluation(
     input: Omit<HumanReviewPolicyJobPayload, "kind">,
   ): Promise<void>;
@@ -126,7 +126,7 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
     commitMessages,
     config: configResult.config.risk,
   });
-  const existingApprovedReviewers = risk.tier === "low" ? [] : await services.fetchCurrentHeadApprovedReviewers(message);
+  const existingApprovedReviewers = risk.tier === "low" ? [] : await services.fetchActiveApprovedReviewers(message);
   const routing = decideRouting({
     risk,
     author: pullRequestMetadata.authorHandle,
