@@ -83,24 +83,24 @@ function mergeAtPath(
 function arrayEntryKey(path: string[], entry: unknown): string {
   const pathKey = path.join(".");
   if (pathKey === "risk.paths" && isObject(entry) && typeof entry.pattern === "string") {
-    return normalizeScalar(entry.pattern);
+    return normalizeScalarKey(entry.pattern);
   }
   if (pathKey === "risk.suppressors" && isObject(entry) && Array.isArray(entry.if_all_match)) {
-    return normalizeSet(entry.if_all_match);
+    return normalizeSetKey(entry.if_all_match);
   }
   if (pathKey === "ownership.rules" && isObject(entry) && Array.isArray(entry.paths)) {
-    return normalizeSet(entry.paths);
+    return normalizeSetKey(entry.paths);
   }
-  if (typeof entry === "string") return normalizeScalar(entry);
+  if (typeof entry === "string") return normalizeScalarKey(entry);
   return stableKey(entry);
 }
 
-function normalizeScalar(value: unknown): string {
+export function normalizeScalarKey(value: unknown): string {
   return typeof value === "string" ? value.trim().toLowerCase() : stableKey(value);
 }
 
-function normalizeSet(values: unknown[]): string {
-  return values.map(normalizeScalar).sort().join("\u0000");
+export function normalizeSetKey(values: unknown[]): string {
+  return [...new Set(values.map(normalizeScalarKey))].sort().join("\u0000");
 }
 
 function stableKey(value: unknown): string {

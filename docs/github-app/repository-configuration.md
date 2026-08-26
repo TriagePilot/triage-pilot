@@ -56,7 +56,7 @@ Objects merge recursively. Repository scalar values replace organization values.
 - `ownership.rules` entries are keyed by the sorted, normalized `paths` set;
 - scalar arrays are keyed by their trimmed, lowercase value.
 
-Duplicate keys within one document are invalid and reported at the duplicate entry. Version 1 has no deletion marker: `null` does not remove an inherited value, and empty arrays or objects do not clear inherited entries. Use replacement mode when organization values must be discarded.
+Duplicate keyed entries and normalized duplicate values within one scalar array are invalid and reported at the duplicate entry. Version 1 has no deletion marker: `null` does not remove an inherited value, and empty arrays or objects do not clear inherited entries. Use replacement mode when organization values must be discarded.
 
 Every resolved configuration includes a SHA-256 hash of canonical JSON and leaf-level source attribution (`default`, `organization`, or `repository`). Hashing sorts object keys recursively while retaining effective array order. The dashboard and execution path consume this same resolved result, so the displayed source cannot drift from the value that is executed.
 

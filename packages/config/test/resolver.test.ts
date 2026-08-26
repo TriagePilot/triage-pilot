@@ -141,6 +141,22 @@ describe("resolveConfiguration", () => {
     });
   });
 
+  it("preserves organization provenance when OSS organization mode is already shadow", async () => {
+    const result = await resolveFixture({
+      organization: "mode: shadow",
+      allowOrganizationEnforce: false,
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      config: { mode: "shadow" },
+      provenance: {
+        inheritanceMode: "organization",
+        sources: { "$.mode": "organization" },
+      },
+    });
+  });
+
   it("returns diagnostics and no effective hash for malformed source configuration", async () => {
     const result = await resolveFixture({
       repository: `risk:\n  paths:\n    - { pattern: "src/**", weight: 20, tag: first }\n    - { pattern: " SRC/** ", weight: 30, tag: second }`,

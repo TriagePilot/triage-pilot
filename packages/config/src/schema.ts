@@ -2,6 +2,7 @@ import { parse } from "yaml";
 import { z } from "zod";
 
 import type { RepositoryMode } from "@triagepilot/contracts";
+import { normalizeScalarKey, normalizeSetKey } from "./inheritance";
 
 export interface ConfigDiagnostic {
   path: string;
@@ -129,9 +130,19 @@ const partialConfigurationDocumentSchema = z.object({
   ownership: ownershipDocumentSchema.optional(),
   inheritance: z.boolean().optional(),
 }).strict().superRefine((document, context) => {
-  checkKeyedDuplicates(document.risk?.paths, (entry) => normalizeScalar(entry.pattern), ["risk", "paths"], "pattern", context);
-  checkKeyedDuplicates(document.risk?.suppressors, (entry) => normalizeSet(entry.if_all_match), ["risk", "suppressors"], "if_all_match", context);
-  checkKeyedDuplicates(document.ownership?.rules, (entry) => normalizeSet(entry.paths), ["ownership", "rules"], "paths", context);
+  checkKeyedDuplicates(document.risk?.paths, (entry) => normalizeScalarKey(entry.pattern), ["risk", "paths"], "pattern", context);
+  checkKeyedDuplicates(document.risk?.suppressors, (entry) => normalizeSetKey(entry.if_all_match), ["risk", "suppressors"], "if_all_match", context);
+  checkKeyedDuplicates(document.ownership?.rules, (entry) => normalizeSetKey(entry.paths), ["ownership", "rules"], "paths", context);
+  checkScalarDuplicates(document.routing?.exclude_target_branches, ["routing", "exclude_target_branches"], context);
+  checkScalarDuplicates(document.routing?.exclude_source_branch_patterns, ["routing", "exclude_source_branch_patterns"], context);
+  document.risk?.suppressors?.forEach((entry, index) => {
+    checkScalarDuplicates(entry.if_all_match, ["risk", "suppressors", index, "if_all_match"], context);
+  });
+  document.ownership?.rules?.forEach((entry, index) => {
+    checkScalarDuplicates(entry.paths, ["ownership", "rules", index, "paths"], context);
+    checkScalarDuplicates(entry.reviewers, ["ownership", "rules", index, "reviewers"], context);
+  });
+  checkScalarDuplicates(document.ownership?.fallback_reviewers, ["ownership", "fallback_reviewers"], context);
 });
 
 export const triagePilotConfigInputSchema = z.object({
@@ -203,12 +214,23 @@ function checkKeyedDuplicates<T>(
   });
 }
 
-function normalizeScalar(value: string): string {
-  return value.trim().toLowerCase();
-}
-
-function normalizeSet(values: string[]): string {
-  return values.map(normalizeScalar).sort().join("\u0000");
+function checkScalarDuplicates(
+  entries: string[] | undefined,
+  path: Array<string | number>,
+  context: z.RefinementCtx,
+): void {
+  const seen = new Set<string>();
+  entries?.forEach((entry, index) => {
+    const key = normalizeScalarKey(entry);
+    if (seen.has(key)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [...path, index],
+        message: "duplicate array value",
+      });
+    }
+    seen.add(key);
+  });
 }
 
 function zodFailure(issues: z.ZodIssue[]): { ok: false; diagnostics: ConfigDiagnostic[] } {

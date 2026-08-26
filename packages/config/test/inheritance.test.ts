@@ -78,6 +78,15 @@ describe("mergeConfiguration", () => {
       ownership: { fallback_reviewers: ["@child", "@SHARED", "@Parent"] },
     });
   });
+
+  it("deduplicates normalized set members when matching keyed-array entries", () => {
+    expect(mergeConfiguration(
+      { risk: { suppressors: [{ if_all_match: ["docs/**"], ceiling: 20 }] } },
+      { risk: { suppressors: [{ if_all_match: ["DOCS/**", " docs/** "], ceiling: 10 }] } },
+    )).toEqual({
+      risk: { suppressors: [{ if_all_match: ["DOCS/**", " docs/** "], ceiling: 10 }] },
+    });
+  });
 });
 
 describe("parseConfigurationDocument", () => {
@@ -103,5 +112,28 @@ describe("parseConfigurationDocument", () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected duplicate diagnostics");
     expect(result.diagnostics).toContainEqual(expect.objectContaining({ path }));
+  });
+
+  it("rejects duplicate suppressor keys after normalized set members are deduplicated", () => {
+    const result = parseConfigurationDocument(`risk:\n  suppressors:\n    - { if_all_match: ["docs/**"], ceiling: 20 }\n    - { if_all_match: ["DOCS/**", " docs/** "], ceiling: 30 }`, { partial: true });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected duplicate diagnostics");
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      path: "$.risk.suppressors[1].if_all_match",
+    }));
+  });
+
+  it("rejects normalized duplicate values in scalar arrays", () => {
+    const result = parseConfigurationDocument(
+      `ownership:\n  fallback_reviewers: ["@Alice", "@ALICE"]`,
+      { partial: true },
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected duplicate diagnostics");
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      path: "$.ownership.fallback_reviewers[1]",
+    }));
   });
 });

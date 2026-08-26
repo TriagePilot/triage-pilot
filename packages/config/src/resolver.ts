@@ -101,7 +101,12 @@ export async function resolveConfiguration(
 
   const repositoryExecutionDocument = withoutInheritance(repositoryDocument);
   const merged = mergeDocuments(organizationDocument, repositoryExecutionDocument, inheritanceMode);
-  if (repositorySource === null && !input.allowOrganizationEnforce && isObject(merged.value)) {
+  if (
+    repositorySource === null
+    && !input.allowOrganizationEnforce
+    && isObject(merged.value)
+    && merged.value.mode === "enforce"
+  ) {
     merged.value.mode = "shadow";
     if (isSourceObject(merged.sources)) merged.sources.mode = "default";
   }
