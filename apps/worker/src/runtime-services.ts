@@ -5,6 +5,7 @@ import {
 } from "@triagepilot/github";
 import { trustedBaseSha, type ScoreComponent } from "@triagepilot/shared";
 import {
+  createJobQueue,
   findLatestHumanReviewPolicyDecision,
   markActionFailed as persistActionFailed,
   markActionSucceeded as persistActionSucceeded,
@@ -129,6 +130,14 @@ export function createWorkerRoutingServiceFactory(input: {
               review.userType === "User" && review.state === "APPROVED" && review.commitId === message.headSha,
           )
           .map((review) => `@${review.userLogin}`);
+      },
+
+      async enqueueHumanReviewPolicyEvaluation(policy) {
+        await createJobQueue(input.db).enqueue({
+          kind: "evaluate_human_review_policy",
+          payload: { kind: "evaluate_human_review_policy", ...policy },
+          idempotencyKey: `review-policy:${policy.deliveryId}`,
+        });
       },
 
       async getReviewerLoad(reviewersInput) {

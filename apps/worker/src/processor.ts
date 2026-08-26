@@ -4,6 +4,7 @@ import {
   legacyRoutingKey,
   type ActionStatus,
   type GitHubId,
+  type HumanReviewPolicyJobPayload,
   type RepositoryMode,
   type RiskTier,
   type RoutingJobPayload,
@@ -24,6 +25,9 @@ export interface RoutingJobServices {
     targetBranchName: string;
   }>;
   fetchCurrentHeadApprovedReviewers(input: RoutingJobMessage): Promise<string[]>;
+  enqueueHumanReviewPolicyEvaluation(
+    input: Omit<HumanReviewPolicyJobPayload, "kind">,
+  ): Promise<void>;
   getReviewerLoad(input: { installationId: GitHubId; reviewers: string[] }): Promise<Record<string, number>>;
   updateRepositoryConfigState(input: {
     configState: "valid" | "invalid";
@@ -163,6 +167,16 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
     if (routing.noHumanReason) actionInput.noHumanReason = routing.noHumanReason;
     try {
       await services.applyDecisionActions(actionInput);
+      if (routing.action === "request_human_review") {
+        await services.enqueueHumanReviewPolicyEvaluation({
+          deliveryId: `routing-policy:${message.deliveryId}`,
+          installationId: message.installationId,
+          repositoryId: message.repositoryId,
+          owner: message.owner,
+          repo: message.repo,
+          pullNumber: message.pullNumber,
+        });
+      }
     } catch (error) {
       await services.markActionFailed(
         persisted.decisionId,

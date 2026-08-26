@@ -40,6 +40,7 @@ function buildRoutingServices({ config }: { config: string }) {
       actionAppliedAt: null as Date | null,
     })),
     applyDecisionActions: vi.fn(async () => {}),
+    enqueueHumanReviewPolicyEvaluation: vi.fn(async () => {}),
     markActionSucceeded: vi.fn(async () => {}),
     markActionFailed: vi.fn(async () => {}),
   };
@@ -195,6 +196,33 @@ routing:
     );
     expect(services.persistDecision).toHaveBeenCalledWith(expect.objectContaining({ actionStatus: "pending" }));
     expect(services.markActionSucceeded).toHaveBeenCalledWith("decision-1", expect.any(Date));
+  });
+
+  it("schedules a GitHub review evaluation after routing a human-review policy check", async () => {
+    const services = buildRoutingServices({
+      config: `
+version: 1
+mode: enforce
+risk:
+  paths:
+    - pattern: README.md
+      weight: 30
+      tag: docs
+ownership:
+  fallback_reviewers: ["@sasha"]
+`,
+    });
+
+    await processRoutingJob(message, services);
+
+    expect(services.enqueueHumanReviewPolicyEvaluation).toHaveBeenCalledWith({
+      deliveryId: "routing-policy:delivery-1",
+      installationId: "99",
+      repositoryId: "101",
+      owner: "acme",
+      repo: "api",
+      pullNumber: 7,
+    });
   });
 
   it("credits current-head approvals that existed before routing and requests nobody else when they fill a high-risk cohort", async () => {
