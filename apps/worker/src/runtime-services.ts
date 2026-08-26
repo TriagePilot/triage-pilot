@@ -19,7 +19,7 @@ import type { HumanReviewPolicyJobPayload } from "@triagepilot/shared";
 
 import type { RoutingJobMessage, RoutingJobServices } from "./processor";
 import { classifyWorkerError, PermanentJobError } from "./errors";
-import { evaluateHumanReviewPolicy } from "./review-policy";
+import { activeApprovedReviewers, evaluateHumanReviewPolicy } from "./review-policy";
 import type { HumanReviewPolicyServices } from "./review-policy-processor";
 
 type Requester = Awaited<ReturnType<typeof createInstallationRequester>>;
@@ -120,16 +120,11 @@ export function createWorkerRoutingServiceFactory(input: {
         };
       },
 
-      async fetchCurrentHeadApprovedReviewers() {
+      async fetchActiveApprovedReviewers() {
         const reviews = await new GitHubAdapter(await requester()).listPullRequestReviews({
           pullRequest: { owner: message.owner, repo: message.repo, pullNumber: message.pullNumber },
         });
-        return reviews
-          .filter(
-            (review) =>
-              review.userType === "User" && review.state === "APPROVED" && review.commitId === message.headSha,
-          )
-          .map((review) => `@${review.userLogin}`);
+        return activeApprovedReviewers(reviews);
       },
 
       async enqueueHumanReviewPolicyEvaluation(policy) {

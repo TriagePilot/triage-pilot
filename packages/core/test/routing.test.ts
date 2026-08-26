@@ -76,7 +76,7 @@ describe("decideRouting", () => {
     });
   });
 
-  it("uses existing current-head approvals when no additional eligible reviewer remains", () => {
+  it("uses existing approvals when no additional eligible reviewer remains", () => {
     expect(
       decideRouting({
         risk: { score: 95, tier: "high" },

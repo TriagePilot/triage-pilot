@@ -101,6 +101,45 @@ describe("worker routing GitHub reads", () => {
     ]);
   });
 
+  it("credits active human approvals from earlier heads before routing", async () => {
+    const request = vi.fn(async (route: string) => {
+      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") {
+        return {
+          data: [
+            {
+              user: { login: "user-d82a5f", type: "User" },
+              state: "APPROVED",
+              commit_id: "previous-head-123",
+              submitted_at: "2026-08-26T10:00:00Z",
+            },
+            {
+              user: { login: "user-f30c8a", type: "User" },
+              state: "APPROVED",
+              commit_id: "previous-head-123",
+              submitted_at: "2026-08-26T10:00:00Z",
+            },
+            {
+              user: { login: "user-f30c8a", type: "User" },
+              state: "CHANGES_REQUESTED",
+              commit_id: "unmerged-head-456",
+              submitted_at: "2026-08-26T11:00:00Z",
+            },
+            {
+              user: { login: "automation-bot", type: "Bot" },
+              state: "APPROVED",
+              commit_id: "previous-head-123",
+              submitted_at: "2026-08-26T10:00:00Z",
+            },
+          ],
+        };
+      }
+      throw new Error(`Unexpected request: ${route}`);
+    });
+    const services = buildServices(message, request);
+
+    await expect(services.fetchActiveApprovedReviewers(message)).resolves.toEqual(["@user-d82a5f"]);
+  });
+
   it("blocks every enforce write when a delayed job no longer matches the current PR head", async () => {
     const request = actionRequester("advanced-head-789");
     const services = buildServices(message, request);
