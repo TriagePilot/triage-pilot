@@ -40,6 +40,71 @@ afterEach(() => {
 });
 
 describe("worker reviewer-availability runtime", () => {
+  it("recreates an installation requester after transient requester construction failure", async () => {
+    const candidate = reviewerReplacementCandidate();
+    const request = vi.fn(async () => ({
+      data: {
+        state: "open",
+        head: { sha: candidate.headSha },
+        user: { login: "user-author" },
+      },
+    }));
+    const createRequester = vi.fn()
+      .mockRejectedValueOnce(new Error("installation token unavailable"))
+      .mockResolvedValue({ request });
+    const services = createWorkerReviewerAvailabilityServiceFactory({
+      db: {} as never,
+      github: { appId: "123", privateKey: "test-private-key" },
+      createRequester: createRequester as never,
+    })({
+      kind: "activate_reviewer_absence",
+      absenceId: "018f4f38-63ee-7ced-9af8-c1783f8cf021",
+      expectedRevision: 1,
+    });
+
+    await expect(services.fetchPullRequest(candidate)).rejects.toThrow("installation token unavailable");
+    await expect(services.fetchPullRequest(candidate)).resolves.toEqual({
+      state: "open",
+      headSha: candidate.headSha,
+      authorHandle: "@user-author",
+    });
+    expect(createRequester).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails the stored policy check when decision-scoped GitHub discovery returns no match", async () => {
+    const candidate = reviewerReplacementCandidate();
+    const request = vi.fn(async (route: string, parameters: Record<string, unknown>) => {
+      if (route === "GET /repos/{owner}/{repo}/commits/{ref}/check-runs") {
+        return { data: { check_runs: [] } };
+      }
+      if (route === "PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}") {
+        return { data: parameters };
+      }
+      throw new Error(`unexpected GitHub route: ${route}`);
+    });
+    const services = createWorkerReviewerAvailabilityServiceFactory({
+      db: knownRepositoryDatabase() as never,
+      github: { appId: "123", privateKey: "test-private-key" },
+      createRequester: vi.fn(async () => ({ request })) as never,
+    })({
+      kind: "activate_reviewer_absence",
+      absenceId: "018f4f38-63ee-7ced-9af8-c1783f8cf021",
+      expectedRevision: 1,
+    });
+
+    await services.failPolicyCheck(candidate, "replacement unavailable");
+
+    expect(request).toHaveBeenLastCalledWith(
+      "PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}",
+      expect.objectContaining({
+        owner: candidate.owner,
+        repo: candidate.repo,
+        check_run_id: "71",
+        conclusion: "failure",
+      }),
+    );
+  });
+
   it("reconciles a partially applied reviewer replacement without duplicate writes", async () => {
     const harness = buildAvailabilityRetryHarness({ failFirstRequestResponse: true });
 
@@ -112,21 +177,8 @@ function buildAvailabilityRetryHarness(options: {
   failFirstRecord?: boolean;
   failFirstPolicyEvaluation?: boolean;
 }) {
-  const candidate: ReviewerReplacementCandidate = {
-    decisionId: "decision-1",
-    installationId: "99",
-    repositoryId: "101",
-    owner: "acme",
-    repo: "api",
-    pullNumber: 7,
-    headSha: "unmerged-head-456",
-    mode: "enforce",
-    selectedReviewers: ["@user-d82a5f"],
-    originalEligibleReviewers: ["@user-d82a5f", "@user-f30c8a"],
-    requiredApprovalCount: 1,
-    policyCheckRunId: "71",
-    policyCheckState: "in_progress",
-  };
+  const candidate = reviewerReplacementCandidate();
+
   const activation = {
     kind: "activate_reviewer_absence" as const,
     absenceId: "018f4f38-63ee-7ced-9af8-c1783f8cf021",
@@ -224,6 +276,24 @@ function buildAvailabilityRetryHarness(options: {
         route === `${method} /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers`
       );
     },
+  };
+}
+
+function reviewerReplacementCandidate(): ReviewerReplacementCandidate {
+  return {
+    decisionId: "decision-1",
+    installationId: "99",
+    repositoryId: "101",
+    owner: "acme",
+    repo: "api",
+    pullNumber: 7,
+    headSha: "unmerged-head-456",
+    mode: "enforce",
+    selectedReviewers: ["@user-d82a5f"],
+    originalEligibleReviewers: ["@user-d82a5f", "@user-f30c8a"],
+    requiredApprovalCount: 1,
+    policyCheckRunId: "71",
+    policyCheckState: "in_progress",
   };
 }
 

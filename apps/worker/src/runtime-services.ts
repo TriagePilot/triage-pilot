@@ -563,10 +563,16 @@ export function createWorkerReviewerAvailabilityServiceFactory(input: {
   function requesterFor(installationId: string): Promise<Requester> {
     let requesterPromise = requesterPromises.get(installationId);
     if (!requesterPromise) {
-      requesterPromise = (input.createRequester ?? createInstallationRequester)({
+      const created = (input.createRequester ?? createInstallationRequester)({
         appId: input.github.appId,
         privateKey: input.github.privateKey,
         installationId: toSafeInteger(installationId),
+      });
+      requesterPromise = created.catch((error: unknown) => {
+        if (requesterPromises.get(installationId) === requesterPromise) {
+          requesterPromises.delete(installationId);
+        }
+        throw error;
       });
       requesterPromises.set(installationId, requesterPromise);
     }
@@ -669,18 +675,21 @@ export function createWorkerReviewerAvailabilityServiceFactory(input: {
         decisionId: candidate.decisionId,
         appId: toSafeInteger(input.github.appId),
       });
-      if (existing === null) return;
-      if (existing.state !== "failure") {
+      const checkRunId = existing?.checkRunId ?? candidate.policyCheckRunId;
+      if (checkRunId === null) {
+        throw new Error("human-review policy check run is unavailable");
+      }
+      if (existing?.state !== "failure") {
         await adapter.updateHumanReviewPolicyCheck({
           checkRun,
-          checkRunId: existing.checkRunId,
+          checkRunId,
           state: "failure",
           summary,
         });
       }
       await recordPolicyCheck(input.db, {
         decisionId: candidate.decisionId,
-        checkRunId: existing.checkRunId,
+        checkRunId,
         state: "failure",
       });
     },
