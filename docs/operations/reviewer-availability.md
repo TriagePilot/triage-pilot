@@ -16,15 +16,15 @@ New routing decisions exclude active absences before the normal load-aware revie
 
 At an absence start, TriagePilot evaluates only the latest open routed head whose human-review policy remains unsatisfied. It uses the decision's originally stored ownership-eligible pool, not later repository configuration. It does not replace an absent reviewer who already has an effective GitHub approval. An outstanding review request or a changes-requested review may be replaced.
 
-Replacement selection excludes the pull-request author, people with effective approvals, and people who are currently absent, then applies the existing deterministic, load-aware choice. If no person remains in that original eligible pool, TriagePilot records `no_replacement_available`, leaves the required approval count unchanged, and—in enforce mode—fails the human-review policy check with that reason. It never lowers the required count or selects someone outside the original eligible pool.
+Replacement selection excludes the pull-request author, people with effective approvals, people already in the current reviewer cohort, and people who are currently absent, then applies the existing deterministic, load-aware choice. If no eligible replacement remains after those exclusions within the original pool, TriagePilot records `no_replacement_available`, leaves the required approval count unchanged, and—in enforce mode—fails the human-review policy check with that reason. It never lowers the required count or selects someone outside the original eligible pool.
 
 ## Enforce mode and retries
 
-Availability activation is a delayed PostgreSQL job. Before any enforce-mode mutation, the worker confirms that the pull request is still open and on the routed head. For a valid replacement, it performs this idempotent sequence:
+Availability activation is a delayed PostgreSQL job. Before any enforce-mode mutation, the processor confirms that the pull request is still open and on the routed head, then reads the current GitHub reviews. The GitHub adapter separately inspects requested-reviewer state immediately before removing or requesting a reviewer. For a valid replacement, it performs this idempotent sequence:
 
-1. Read the current GitHub review and review-request state.
-2. Remove the absent reviewer's outstanding request.
-3. Request the replacement reviewer.
+1. Confirm the current pull-request and effective-review state.
+2. Inspect requested-reviewer state and remove the absent reviewer's outstanding request when present.
+3. Inspect requested-reviewer state and request the replacement only when absent.
 4. Persist the replacement outcome and update the decision's active selected cohort.
 5. Re-evaluate `triagepilot/human-review-policy`.
 
