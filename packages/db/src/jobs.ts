@@ -2,7 +2,7 @@ import type { Kysely } from "kysely";
 
 import type { Database, JobRow } from "./kysely";
 
-export type JobKind = "process_pull_request" | "evaluate_human_review_policy";
+export type JobKind = "process_pull_request" | "evaluate_human_review_policy" | "activate_reviewer_absence";
 export type JobStatus = "queued" | "running" | "succeeded" | "failed";
 
 export interface JobRecord {
