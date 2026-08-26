@@ -87,7 +87,7 @@ function normalizeReviewer(reviewer: string): string {
   return normalized ? `@${normalized}` : "";
 }
 
-function selectLowestLoadReviewers(
+export function selectLowestLoadReviewers(
   candidates: string[],
   load: Record<string, number>,
   selectionKey: string,

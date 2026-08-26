@@ -7,6 +7,7 @@ import { trustedBaseSha, type ScoreComponent } from "@triagepilot/shared";
 import {
   createJobQueue,
   findLatestHumanReviewPolicyDecision,
+  listReviewerAbsenceWindows,
   markActionFailed as persistActionFailed,
   markActionSucceeded as persistActionSucceeded,
   persistDecision as persistRoutingDecision,
@@ -64,6 +65,10 @@ export function createWorkerRoutingServiceFactory(input: {
     }
 
     return {
+      now() {
+        return new Date();
+      },
+
       async fetchConfig() {
         try {
           const configRef = trustedBaseSha(message) ?? readNestedString(await pullRequest(), ["base", "sha"]);
@@ -125,6 +130,10 @@ export function createWorkerRoutingServiceFactory(input: {
           pullRequest: { owner: message.owner, repo: message.repo, pullNumber: message.pullNumber },
         });
         return activeApprovedReviewers(reviews);
+      },
+
+      async listReviewerAbsences(absenceInput) {
+        return await listReviewerAbsenceWindows(input.db, absenceInput);
       },
 
       async enqueueHumanReviewPolicyEvaluation(policy) {

@@ -277,6 +277,8 @@ describe("runWorkerOnce", () => {
         targetBranchName: "develop",
       })),
       fetchActiveApprovedReviewers: vi.fn(async () => []),
+      now: vi.fn(() => new Date("2026-10-01T08:00:00.000Z")),
+      listReviewerAbsences: vi.fn(async () => []),
       enqueueHumanReviewPolicyEvaluation: vi.fn(async () => {}),
       getReviewerLoad: vi.fn(async () => ({})),
       updateRepositoryConfigState: vi.fn(async () => {}),

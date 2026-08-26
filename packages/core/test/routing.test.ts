@@ -1,8 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { decideRouting } from "../src/routing";
+import { decideRouting, selectLowestLoadReviewers } from "../src/routing";
 
 describe("decideRouting", () => {
+  it("exports the stable load selector used by routing", () => {
+    expect(selectLowestLoadReviewers(
+      ["@user-a91f5c", "@user-2e7d4b", "@user-c63a18"],
+      { "@user-a91f5c": 0, "@user-2e7d4b": 0, "@user-c63a18": 0 },
+      "acme/api#8",
+      1,
+    )).toEqual(["@user-c63a18"]);
+  });
+
   it("returns the intended policy approval for a low-risk pull request", () => {
     expect(
       decideRouting({

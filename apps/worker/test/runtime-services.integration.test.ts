@@ -52,6 +52,52 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
     });
   });
 
+  it("reads scheduled absence windows through the routing service", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const installation = await db
+        .insertInto("installations")
+        .values({
+          github_installation_id: "99",
+          account_login: "acme",
+          account_type: "Organization",
+          status: "active",
+          permissions: {},
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      await db.insertInto("repositories").values({
+        installation_id: installation.id,
+        github_repository_id: "101",
+        owner: "acme",
+        name: "api",
+        default_branch: "main",
+        config_state: "unknown",
+      }).execute();
+      await db.insertInto("reviewer_absences").values({
+        reviewer_handle: "@user-d82a5f",
+        start_at: new Date("2026-10-01T08:00:00.000Z"),
+        end_at: new Date("2026-10-08T08:00:00.000Z"),
+      }).execute();
+      const services = createWorkerRoutingServiceFactory({
+        db,
+        github: {
+          appId: "123",
+          privateKey: "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----",
+        },
+      })(message);
+
+      expect(services.now()).toEqual(expect.any(Date));
+      await expect(services.listReviewerAbsences({
+        reviewers: ["@user-d82a5f", "@user-b4e82d"],
+        endingAfter: new Date("2026-10-01T08:00:00.000Z"),
+      })).resolves.toEqual([{
+        reviewerHandle: "@user-d82a5f",
+        startAt: new Date("2026-10-01T08:00:00.000Z"),
+        endAt: new Date("2026-10-08T08:00:00.000Z"),
+      }]);
+    });
+  });
+
   it("projects configuration and persists policy-check lifecycle for a known repository", async () => {
     await withPostgresTestDatabase(async (db) => {
       const installation = await db
