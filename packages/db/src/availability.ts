@@ -348,7 +348,7 @@ export async function recordReviewerReplacement(
       .executeTakeFirst();
     if (!inserted) return { inserted: false };
 
-    if (input.replaceCohort && input.replacementReviewer !== null) {
+    if (replacesReviewerCohort(input.outcome) && input.replacementReviewer !== null) {
       await replaceDecisionReviewerCohort(trx, {
         decisionId: input.decisionId,
         unavailableReviewer: input.unavailableReviewer,
@@ -371,6 +371,10 @@ export async function findReviewerReplacementOutcome(
     .where("decision_id", "=", input.decisionId)
     .executeTakeFirst();
   return replacement ? replacement.outcome as ReviewerReplacementOutcome : null;
+}
+
+function replacesReviewerCohort(outcome: ReviewerReplacementOutcome): boolean {
+  return outcome === "replaced" || outcome === "simulated_replacement";
 }
 
 function validateMutation(input: ReviewerAbsenceMutation): ReviewerAbsenceMutation & { reviewerHandle: string } {

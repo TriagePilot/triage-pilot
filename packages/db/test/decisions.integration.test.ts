@@ -460,6 +460,55 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       })).resolves.toBe("replaced");
     });
   });
+
+  it("does not replace a cohort for a skipped outcome when a caller requests it", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const repositoryId = await seedRepository(db);
+      const absence = await db
+        .insertInto("reviewer_absences")
+        .values({
+          reviewer_handle: "@user-d82a5f",
+          start_at: new Date("2026-08-31T12:00:00.000Z"),
+          end_at: new Date("2026-09-02T12:00:00.000Z"),
+        })
+        .returning(["id", "revision"])
+        .executeTakeFirstOrThrow();
+      const decision = await persistDecision(db, {
+        repositoryId,
+        deliveryId: "delivery-skipped-replacement",
+        pullNumber: 7,
+        headSha: "head-1",
+        mode: "enforce",
+        action: "request_human_review",
+        actionStatus: "pending",
+        riskScore: 35,
+        selectedReviewers: ["@user-d82a5f", "@user-b4e82d"],
+        details: {},
+      });
+
+      await expect(recordReviewerReplacement(db, {
+        absenceId: absence.id,
+        absenceRevision: absence.revision,
+        decisionId: decision.decisionId,
+        unavailableReviewer: "@user-d82a5f",
+        replacementReviewer: "@user-c91e46",
+        outcome: "skipped_approved",
+        reason: "already approved",
+        startedAt: new Date("2026-09-01T12:00:00.000Z"),
+        completedAt: new Date("2026-09-01T12:01:00.000Z"),
+        replaceCohort: true,
+      })).resolves.toEqual({ inserted: true });
+      await expect(
+        db.selectFrom("routing_decisions")
+          .select(["selected_reviewer", "selected_reviewers"])
+          .where("id", "=", decision.decisionId)
+          .executeTakeFirstOrThrow(),
+      ).resolves.toEqual({
+        selected_reviewer: "@user-d82a5f",
+        selected_reviewers: ["@user-d82a5f", "@user-b4e82d"],
+      });
+    });
+  });
 });
 
 async function readOutcome(db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0], decisionId: string) {

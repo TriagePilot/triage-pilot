@@ -436,6 +436,50 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability", 
       })).resolves.toBeNull();
     });
   });
+
+  it("does not load activation work for future, ended, or cancelled absences", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const future = await createReviewerAbsence(db, {
+        reviewerHandle: "@user-future",
+        startAt: new Date("2026-09-02T12:00:00.000Z"),
+        endAt: new Date("2026-09-03T12:00:00.000Z"),
+        now,
+      });
+      const ended = await createReviewerAbsence(db, {
+        reviewerHandle: "@user-ended-noop",
+        startAt: new Date("2026-08-30T12:00:00.000Z"),
+        endAt: new Date("2026-08-31T12:00:00.000Z"),
+        now,
+      });
+      const scheduled = await createReviewerAbsence(db, {
+        reviewerHandle: "@user-cancelled-noop",
+        startAt: new Date("2026-09-02T12:00:00.000Z"),
+        endAt: new Date("2026-09-03T12:00:00.000Z"),
+        now,
+      });
+      const cancelled = await cancelReviewerAbsence(db, {
+        absenceId: scheduled.id,
+        expectedRevision: scheduled.revision,
+        now,
+      });
+
+      await expect(loadReviewerAbsenceActivation(db, {
+        absenceId: future.id,
+        expectedRevision: future.revision,
+        now,
+      })).resolves.toBeNull();
+      await expect(loadReviewerAbsenceActivation(db, {
+        absenceId: ended.id,
+        expectedRevision: ended.revision,
+        now,
+      })).resolves.toBeNull();
+      await expect(loadReviewerAbsenceActivation(db, {
+        absenceId: cancelled.id,
+        expectedRevision: cancelled.revision,
+        now,
+      })).resolves.toBeNull();
+    });
+  });
 });
 
 async function seedAvailabilityRepository(db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0]): Promise<string> {
