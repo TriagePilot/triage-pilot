@@ -3,7 +3,54 @@ import { describe, expect, it } from "vitest";
 import { evaluateHumanReviewPolicy } from "../src/review-policy";
 
 describe("evaluateHumanReviewPolicy", () => {
-  it("keeps a reviewer with only a prior-head approval outstanding", () => {
+  it("accepts existing approvals from any human reviewers before TriagePilot routes the pull request", () => {
+    expect(
+      evaluateHumanReviewPolicy({
+        route: "human_review",
+        selectedReviewers: ["@user-e64b19", "@user-f30c8a"],
+        headSha: "head-3",
+        reviews: [
+          {
+            userLogin: "user-d82a5f",
+            state: "APPROVED",
+            commitId: "head-1",
+            submittedAt: "2026-08-21T10:00:00Z",
+          },
+          {
+            userLogin: "user-a7f19c",
+            state: "APPROVED",
+            commitId: "head-2",
+            submittedAt: "2026-08-21T11:00:00Z",
+          },
+        ],
+      }),
+    ).toEqual({
+      state: "success",
+      summary: "Required human approval count met.",
+      missingReviewers: [],
+    });
+  });
+
+  it("uses the configured high-risk approval requirement when fewer reviewers were available to request", () => {
+    expect(
+      evaluateHumanReviewPolicy({
+        route: "human_review",
+        selectedReviewers: ["@user-e64b19"],
+        requiredApprovalCount: 2,
+        headSha: "head-3",
+        reviews: [
+          {
+            userLogin: "user-d82a5f",
+            state: "APPROVED",
+            commitId: "head-1",
+            submittedAt: "2026-08-21T10:00:00Z",
+          },
+        ],
+      }),
+    ).toMatchObject({ state: "in_progress", summary: "Waiting for 1 more human approval." });
+  });
+
+  it("counts approvals from prior heads toward the required total", () => {
     expect(
       evaluateHumanReviewPolicy({
         route: "human_review",
@@ -25,9 +72,9 @@ describe("evaluateHumanReviewPolicy", () => {
         ],
       }),
     ).toEqual({
-      state: "in_progress",
-      summary: "Waiting for approval from @user-e64b19.",
-      missingReviewers: ["@user-e64b19"],
+      state: "success",
+      summary: "Required human approval count met.",
+      missingReviewers: [],
     });
   });
 
@@ -61,7 +108,7 @@ describe("evaluateHumanReviewPolicy", () => {
     });
   });
 
-  it("succeeds only after both selected reviewers approve the current head", () => {
+  it("succeeds when the required number of human approvals is present", () => {
     expect(
       evaluateHumanReviewPolicy({
         route: "human_review",
@@ -84,7 +131,7 @@ describe("evaluateHumanReviewPolicy", () => {
       }),
     ).toEqual({
       state: "success",
-      summary: "All required human reviewers approved the current head.",
+      summary: "Required human approval count met.",
       missingReviewers: [],
     });
   });

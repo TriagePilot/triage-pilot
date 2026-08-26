@@ -5,6 +5,7 @@ export type HumanReviewPolicyState = "in_progress" | "success" | "failure";
 export interface HumanReviewPolicyEvaluationInput {
   route: "no_human" | "human_review" | "no_eligible_reviewer";
   selectedReviewers: string[];
+  requiredApprovalCount?: number;
   headSha: string;
   reviews: PullRequestReview[];
 }
@@ -36,7 +37,7 @@ export function evaluateHumanReviewPolicy(
 
   const latestReviews = new Map<string, { review: PullRequestReview; submittedAt: number | null; index: number }>();
   input.reviews.forEach((review, index) => {
-    if (review.commitId !== input.headSha) return;
+    if (review.userType !== undefined && review.userType !== "User") return;
     const reviewer = normalizeReviewer(review.userLogin);
     const submittedAt = parseSubmittedAt(review.submittedAt);
     const latest = latestReviews.get(reviewer);
@@ -45,25 +46,32 @@ export function evaluateHumanReviewPolicy(
     }
   });
 
+  const approvedReviewers = new Set(
+    [...latestReviews.entries()]
+      .filter(([, review]) => review.review.state === "APPROVED")
+      .map(([reviewer]) => reviewer),
+  );
+  const requiredApprovalCount = input.requiredApprovalCount ?? input.selectedReviewers.length;
+  const missingApprovalCount = Math.max(requiredApprovalCount - approvedReviewers.size, 0);
   const missingReviewers = input.selectedReviewers.filter((reviewer) => {
     const latest = latestReviews.get(normalizeReviewer(reviewer));
     return latest?.review.state !== "APPROVED";
-  });
+  }).slice(0, missingApprovalCount);
 
-  if (missingReviewers.length === 0) {
+  if (missingApprovalCount === 0) {
     return {
       state: "success",
-      summary: "All required human reviewers approved the current head.",
-      missingReviewers,
+      summary: "Required human approval count met.",
+      missingReviewers: [],
     };
   }
 
   return {
     state: "in_progress",
     summary:
-      missingReviewers.length === 1
-        ? `Waiting for approval from ${missingReviewers[0]}.`
-        : `Waiting for approvals from ${missingReviewers.join(", ")}.`,
+      missingApprovalCount === 1
+        ? "Waiting for 1 more human approval."
+        : `Waiting for ${missingApprovalCount} more human approvals.`,
     missingReviewers,
   };
 }

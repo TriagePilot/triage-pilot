@@ -316,7 +316,7 @@ describe("worker routing GitHub reads", () => {
       expect.objectContaining({
         external_id: "decision-1",
         status: "in_progress",
-        output: expect.objectContaining({ summary: "Waiting for approval from @user-d82a5f." }),
+        output: expect.objectContaining({ summary: "Waiting for 1 more human approval." }),
       }),
     );
     expect(db.policyCheck()).toEqual({ checkRunId: "72", state: "in_progress" });
