@@ -13,6 +13,26 @@ export {
 } from "./jobs";
 export { createDatabase } from "./database";
 export {
+  ReviewerAbsenceConflictError,
+  ReviewerAbsenceNotFoundError,
+  ReviewerAbsenceRevisionError,
+  ReviewerAbsenceValidationError,
+  cancelReviewerAbsence,
+  createReviewerAbsence,
+  listReviewerAbsenceWindows,
+  normalizeReviewerHandle,
+  readAvailabilityOverview,
+  updateOrganizationTimezone,
+  updateReviewerAbsence,
+  type AvailabilityOverview,
+  type ReviewerAbsenceMutation,
+  type ReviewerAbsenceStatus,
+  type ReviewerAbsenceView,
+  type ReviewerAbsenceWindow,
+  type ReviewerReplacementOutcome,
+  type ReviewerReplacementView,
+} from "./availability";
+export {
   markActionFailed,
   markActionSucceeded,
   findLatestHumanReviewPolicyDecision,
