@@ -2,11 +2,21 @@ import { describe, expect, it, vi } from "vitest";
 
 const dbMocks = vi.hoisted(() => ({
   acceptHumanReviewPolicyDelivery: vi.fn(),
+  cancelReviewerAbsence: vi.fn(),
+  createReviewerAbsence: vi.fn(),
+  readAvailabilityOverview: vi.fn(),
+  updateOrganizationTimezone: vi.fn(),
+  updateReviewerAbsence: vi.fn(),
 }));
 
 vi.mock("@triagepilot/db", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@triagepilot/db")>()),
   acceptHumanReviewPolicyDelivery: dbMocks.acceptHumanReviewPolicyDelivery,
+  cancelReviewerAbsence: dbMocks.cancelReviewerAbsence,
+  createReviewerAbsence: dbMocks.createReviewerAbsence,
+  readAvailabilityOverview: dbMocks.readAvailabilityOverview,
+  updateOrganizationTimezone: dbMocks.updateOrganizationTimezone,
+  updateReviewerAbsence: dbMocks.updateReviewerAbsence,
 }));
 
 import { createWebRuntimeServices } from "../src/runtime-services";
@@ -47,6 +57,40 @@ describe("web runtime services", () => {
     expect(await services.getWebhookSecret()).toBe("hook-secret");
     expect(services.githubOrganization).toBe("acme");
     expect(db.accessedTables).toEqual([]);
+  });
+
+  it("delegates reviewer availability reads and mutations to the database service", async () => {
+    const db = new NoAccessDb();
+    const services = createWebRuntimeServices(runtimeInput(db as never, () => new Date()));
+    const now = new Date("2026-08-18T10:00:00.000Z");
+    const overview = { timezone: "UTC", absences: [] };
+    const absence = {
+      reviewerHandle: "@user-d82a5f",
+      startAt: new Date("2026-08-19T08:00:00.000Z"),
+      endAt: new Date("2026-08-19T16:00:00.000Z"),
+      now,
+    };
+    dbMocks.readAvailabilityOverview.mockResolvedValueOnce(overview);
+    dbMocks.updateOrganizationTimezone.mockResolvedValueOnce(undefined);
+    dbMocks.createReviewerAbsence.mockResolvedValueOnce(undefined);
+    dbMocks.updateReviewerAbsence.mockResolvedValueOnce(undefined);
+    dbMocks.cancelReviewerAbsence.mockResolvedValueOnce(undefined);
+
+    await expect(services.readAvailabilityOverview({ now })).resolves.toEqual(overview);
+    await services.updateOrganizationTimezone({ timezone: "Europe/Bratislava", now });
+    await services.createReviewerAbsence(absence);
+    await services.updateReviewerAbsence({ ...absence, absenceId: "absence-1", expectedRevision: 2 });
+    await services.cancelReviewerAbsence({ absenceId: "absence-1", expectedRevision: 2, now });
+
+    expect(dbMocks.readAvailabilityOverview).toHaveBeenCalledWith(db, { now });
+    expect(dbMocks.updateOrganizationTimezone).toHaveBeenCalledWith(db, { timezone: "Europe/Bratislava", now });
+    expect(dbMocks.createReviewerAbsence).toHaveBeenCalledWith(db, absence);
+    expect(dbMocks.updateReviewerAbsence).toHaveBeenCalledWith(db, {
+      ...absence,
+      absenceId: "absence-1",
+      expectedRevision: 2,
+    });
+    expect(dbMocks.cancelReviewerAbsence).toHaveBeenCalledWith(db, { absenceId: "absence-1", expectedRevision: 2, now });
   });
 
   it.runIf(Boolean(process.env.TEST_DATABASE_URL))(
