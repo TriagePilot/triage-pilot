@@ -348,7 +348,7 @@ export async function recordReviewerReplacement(
       .executeTakeFirst();
     if (!inserted) return { inserted: false };
 
-    if (replacesReviewerCohort(input.outcome) && input.replacementReviewer !== null) {
+    if (input.replaceCohort && replacesReviewerCohort(input.outcome) && input.replacementReviewer !== null) {
       await replaceDecisionReviewerCohort(trx, {
         decisionId: input.decisionId,
         unavailableReviewer: input.unavailableReviewer,
