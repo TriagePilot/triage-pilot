@@ -8,6 +8,7 @@ import {
   cancelReviewerAbsence,
   createReviewerAbsence,
   listReviewerAbsenceWindows,
+  loadReviewerAbsenceActivation,
   normalizeReviewerHandle,
   readAvailabilityOverview,
   updateOrganizationTimezone,
@@ -246,4 +247,256 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability", 
       ]);
     });
   });
+
+  it("loads only the latest active human-review decisions for an active absence revision", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const absence = await createReviewerAbsence(db, {
+        reviewerHandle: "@user-d82a5f",
+        startAt: new Date("2026-08-31T12:00:00.000Z"),
+        endAt: new Date("2026-09-02T12:00:00.000Z"),
+        now,
+      });
+      const repositoryId = await seedAvailabilityRepository(db);
+      const eligibleReviewers = ["@user-d82a5f", "@user-b4e82d", "@user-c91e46"];
+      const details = {
+        ownership: { eligibleReviewers },
+        routing: { requestedReviewerCount: 2 },
+      };
+
+      await seedAvailabilityDecision(db, repositoryId, {
+        id: "00000000-0000-0000-0000-000000000001",
+        deliveryId: "delivery-old",
+        routingKey: "routing-old",
+        pullNumber: 7,
+        headSha: "old-head",
+        mode: "enforce",
+        selectedReviewers: ["@user-d82a5f"],
+        details,
+        policyCheckState: "in_progress",
+        createdAt: new Date("2026-09-01T12:00:00.000Z"),
+      });
+      await seedAvailabilityDecision(db, repositoryId, {
+        id: "00000000-0000-0000-0000-000000000002",
+        deliveryId: "delivery-shadow",
+        routingKey: "routing-shadow",
+        pullNumber: 8,
+        headSha: "shadow-head",
+        mode: "shadow",
+        selectedReviewers: ["@user-d82a5f"],
+        details,
+        policyCheckState: "not_started",
+        createdAt: new Date("2026-09-01T12:10:00.000Z"),
+      });
+      await seedAvailabilityDecision(db, repositoryId, {
+        id: "00000000-0000-0000-0000-000000000003",
+        deliveryId: "delivery-current",
+        routingKey: "routing-current",
+        pullNumber: 7,
+        headSha: "current-head",
+        mode: "enforce",
+        selectedReviewers: ["@user-d82a5f", "@user-b4e82d"],
+        details,
+        policyCheckState: "in_progress",
+        createdAt: new Date("2026-09-01T12:20:00.000Z"),
+      });
+      await seedAvailabilityDecision(db, repositoryId, {
+        id: "00000000-0000-0000-0000-000000000004",
+        deliveryId: "delivery-succeeded",
+        routingKey: "routing-succeeded",
+        pullNumber: 9,
+        headSha: "succeeded-head",
+        mode: "enforce",
+        selectedReviewers: ["@user-d82a5f"],
+        details,
+        policyCheckState: "success",
+        createdAt: new Date("2026-09-01T12:30:00.000Z"),
+      });
+      await seedAvailabilityDecision(db, repositoryId, {
+        id: "00000000-0000-0000-0000-000000000005",
+        deliveryId: "delivery-no-human",
+        routingKey: "routing-no-human",
+        pullNumber: 10,
+        headSha: "no-human-head",
+        mode: "enforce",
+        action: "no_eligible_reviewer",
+        selectedReviewers: ["@user-d82a5f"],
+        details,
+        policyCheckState: "in_progress",
+        createdAt: new Date("2026-09-01T12:40:00.000Z"),
+      });
+      await seedAvailabilityDecision(db, repositoryId, {
+        id: "00000000-0000-0000-0000-000000000006",
+        deliveryId: "delivery-no-absent",
+        routingKey: "routing-no-absent",
+        pullNumber: 11,
+        headSha: "no-absent-head",
+        mode: "enforce",
+        selectedReviewers: ["@user-b4e82d"],
+        details,
+        policyCheckState: "in_progress",
+        createdAt: new Date("2026-09-01T12:50:00.000Z"),
+      });
+      await seedAvailabilityDecision(db, repositoryId, {
+        id: "00000000-0000-0000-0000-000000000007",
+        deliveryId: "delivery-malformed",
+        routingKey: "routing-malformed",
+        pullNumber: 12,
+        headSha: "malformed-head",
+        mode: "enforce",
+        selectedReviewers: ["@user-d82a5f"],
+        details: { ownership: { eligibleReviewers: "@user-d82a5f" }, routing: { requestedReviewerCount: 2 } },
+        policyCheckState: "in_progress",
+        createdAt: new Date("2026-09-01T13:00:00.000Z"),
+      });
+      await seedAvailabilityDecision(db, repositoryId, {
+        id: "00000000-0000-0000-0000-000000000008",
+        deliveryId: "delivery-failed",
+        routingKey: "routing-failed",
+        pullNumber: 13,
+        headSha: "failed-head",
+        mode: "enforce",
+        selectedReviewers: ["@user-d82a5f"],
+        details,
+        policyCheckState: "failure",
+        createdAt: new Date("2026-09-01T13:10:00.000Z"),
+      });
+      await seedAvailabilityDecision(db, repositoryId, {
+        id: "00000000-0000-0000-0000-000000000009",
+        deliveryId: "delivery-null-head",
+        routingKey: "routing-null-head",
+        pullNumber: 14,
+        headSha: null,
+        mode: "enforce",
+        selectedReviewers: ["@user-d82a5f"],
+        details,
+        policyCheckState: "in_progress",
+        createdAt: new Date("2026-09-01T13:20:00.000Z"),
+      });
+      await seedAvailabilityDecision(db, repositoryId, {
+        id: "00000000-0000-0000-0000-000000000010",
+        deliveryId: "delivery-superseded-active",
+        routingKey: "routing-superseded-active",
+        pullNumber: 15,
+        headSha: "superseded-active-head",
+        mode: "enforce",
+        selectedReviewers: ["@user-d82a5f"],
+        details,
+        policyCheckState: "in_progress",
+        createdAt: new Date("2026-09-01T13:30:00.000Z"),
+      });
+      await seedAvailabilityDecision(db, repositoryId, {
+        id: "00000000-0000-0000-0000-000000000011",
+        deliveryId: "delivery-superseding-success",
+        routingKey: "routing-superseding-success",
+        pullNumber: 15,
+        headSha: "superseding-success-head",
+        mode: "enforce",
+        selectedReviewers: ["@user-d82a5f"],
+        details,
+        policyCheckState: "success",
+        createdAt: new Date("2026-09-01T13:40:00.000Z"),
+      });
+
+      const activation = await loadReviewerAbsenceActivation(db, {
+        absenceId: absence.id,
+        expectedRevision: absence.revision,
+        now,
+      });
+
+      expect(activation).toMatchObject({
+        absenceId: absence.id,
+        revision: 1,
+        reviewerHandle: "@user-d82a5f",
+        candidates: [
+          {
+            decisionId: "00000000-0000-0000-0000-000000000003",
+            installationId: "99",
+            repositoryId: "101",
+            owner: "acme",
+            repo: "api",
+            pullNumber: 7,
+            headSha: "current-head",
+            mode: "enforce",
+            selectedReviewers: ["@user-d82a5f", "@user-b4e82d"],
+            originalEligibleReviewers: ["@user-d82a5f", "@user-b4e82d", "@user-c91e46"],
+            requiredApprovalCount: 2,
+          },
+          expect.objectContaining({
+            decisionId: "00000000-0000-0000-0000-000000000002",
+            mode: "shadow",
+            policyCheckState: "not_started",
+          }),
+        ],
+      });
+      expect(activation?.candidates).toHaveLength(2);
+      await expect(loadReviewerAbsenceActivation(db, {
+        absenceId: absence.id,
+        expectedRevision: absence.revision + 1,
+        now,
+      })).resolves.toBeNull();
+    });
+  });
 });
+
+async function seedAvailabilityRepository(db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0]): Promise<string> {
+  const installation = await db
+    .insertInto("installations")
+    .values({
+      github_installation_id: "99",
+      account_login: "acme",
+      account_type: "Organization",
+      status: "active",
+      permissions: {},
+    })
+    .returning("id")
+    .executeTakeFirstOrThrow();
+  const repository = await db
+    .insertInto("repositories")
+    .values({
+      installation_id: installation.id,
+      github_repository_id: "101",
+      owner: "acme",
+      name: "api",
+      default_branch: "main",
+      config_state: "valid",
+    })
+    .returning("id")
+    .executeTakeFirstOrThrow();
+  return repository.id;
+}
+
+async function seedAvailabilityDecision(
+  db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0],
+  repositoryId: string,
+  input: {
+    id: string;
+    deliveryId: string;
+    routingKey: string;
+    pullNumber: number;
+    headSha: string | null;
+    mode: "shadow" | "enforce";
+    selectedReviewers: string[];
+    details: unknown;
+    policyCheckState: "not_started" | "in_progress" | "success" | "failure";
+    createdAt: Date;
+    action?: string;
+  },
+): Promise<void> {
+  await db.insertInto("routing_decisions").values({
+    id: input.id,
+    repository_id: repositoryId,
+    delivery_id: input.deliveryId,
+    routing_key: input.routingKey,
+    pull_number: input.pullNumber,
+    head_sha: input.headSha,
+    mode: input.mode,
+    action: input.action ?? "request_human_review",
+    action_status: input.mode === "enforce" ? "pending" : "not_applied",
+    risk_score: 50,
+    selected_reviewer: input.selectedReviewers[0] ?? null,
+    selected_reviewers: JSON.stringify(input.selectedReviewers),
+    details: input.details,
+    policy_check_state: input.policyCheckState,
+    created_at: input.createdAt,
+  }).execute();
+}

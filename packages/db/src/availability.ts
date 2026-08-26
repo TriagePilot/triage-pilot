@@ -2,6 +2,11 @@ import { sql, type Kysely } from "kysely";
 import type { ReviewerAbsenceActivationJobPayload } from "@triagepilot/shared";
 
 import { createJobQueue } from "./jobs";
+import {
+  findReviewerReplacementCandidates,
+  replaceDecisionReviewerCohort,
+  type ReviewerReplacementCandidate,
+} from "./decisions";
 import type { Database } from "./kysely";
 
 export type ReviewerAbsenceStatus = "upcoming" | "active" | "ended" | "cancelled";
@@ -45,6 +50,28 @@ export interface ReviewerAbsenceWindow {
   reviewerHandle: string;
   startAt: Date;
   endAt: Date;
+}
+
+export interface ReviewerAbsenceActivation {
+  absenceId: string;
+  revision: number;
+  reviewerHandle: string;
+  startAt: Date;
+  endAt: Date;
+  candidates: ReviewerReplacementCandidate[];
+}
+
+export interface RecordReviewerReplacementInput {
+  absenceId: string;
+  absenceRevision: number;
+  decisionId: string;
+  unavailableReviewer: string;
+  replacementReviewer: string | null;
+  outcome: ReviewerReplacementOutcome;
+  reason: string;
+  startedAt: Date;
+  completedAt: Date;
+  replaceCohort: boolean;
 }
 
 export interface ReviewerAbsenceMutation {
@@ -268,6 +295,82 @@ export async function listReviewerAbsenceWindows(
     .orderBy("start_at", "asc")
     .execute();
   return rows.map((row) => ({ reviewerHandle: row.reviewer_handle, startAt: row.start_at, endAt: row.end_at }));
+}
+
+export async function loadReviewerAbsenceActivation(
+  db: Kysely<Database>,
+  input: { absenceId: string; expectedRevision: number; now: Date },
+): Promise<ReviewerAbsenceActivation | null> {
+  validateDate(input.now, "now");
+  const absence = await db
+    .selectFrom("reviewer_absences")
+    .select(["id", "revision", "reviewer_handle", "start_at", "end_at", "status"])
+    .where("id", "=", input.absenceId)
+    .executeTakeFirst();
+  if (
+    !absence ||
+    absence.revision !== input.expectedRevision ||
+    absence.status !== "scheduled" ||
+    absence.start_at > input.now ||
+    absence.end_at <= input.now
+  ) return null;
+
+  return {
+    absenceId: absence.id,
+    revision: absence.revision,
+    reviewerHandle: absence.reviewer_handle,
+    startAt: absence.start_at,
+    endAt: absence.end_at,
+    candidates: await findReviewerReplacementCandidates(db, { unavailableReviewer: absence.reviewer_handle }),
+  };
+}
+
+export async function recordReviewerReplacement(
+  db: Kysely<Database>,
+  input: RecordReviewerReplacementInput,
+): Promise<{ inserted: boolean }> {
+  return db.transaction().execute(async (trx) => {
+    const inserted = await trx
+      .insertInto("reviewer_replacements")
+      .values({
+        absence_id: input.absenceId,
+        absence_revision: input.absenceRevision,
+        decision_id: input.decisionId,
+        unavailable_reviewer: input.unavailableReviewer,
+        replacement_reviewer: input.replacementReviewer,
+        outcome: input.outcome,
+        reason: input.reason,
+        started_at: input.startedAt,
+        completed_at: input.completedAt,
+      })
+      .onConflict((conflict) => conflict.columns(["absence_id", "absence_revision", "decision_id"]).doNothing())
+      .returning("id")
+      .executeTakeFirst();
+    if (!inserted) return { inserted: false };
+
+    if (input.replaceCohort && input.replacementReviewer !== null) {
+      await replaceDecisionReviewerCohort(trx, {
+        decisionId: input.decisionId,
+        unavailableReviewer: input.unavailableReviewer,
+        replacementReviewer: input.replacementReviewer,
+      });
+    }
+    return { inserted: true };
+  });
+}
+
+export async function findReviewerReplacementOutcome(
+  db: Kysely<Database>,
+  input: { absenceId: string; absenceRevision: number; decisionId: string },
+): Promise<ReviewerReplacementOutcome | null> {
+  const replacement = await db
+    .selectFrom("reviewer_replacements")
+    .select("outcome")
+    .where("absence_id", "=", input.absenceId)
+    .where("absence_revision", "=", input.absenceRevision)
+    .where("decision_id", "=", input.decisionId)
+    .executeTakeFirst();
+  return replacement ? replacement.outcome as ReviewerReplacementOutcome : null;
 }
 
 function validateMutation(input: ReviewerAbsenceMutation): ReviewerAbsenceMutation & { reviewerHandle: string } {

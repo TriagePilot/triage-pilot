@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   findLatestHumanReviewPolicyDecision,
+  findReviewerReplacementOutcome,
   markActionFailed,
   markActionSucceeded,
   persistDecision,
+  recordReviewerReplacement,
   recordPolicyCheck,
   updatePolicyCheckState,
 } from "../src";
@@ -390,6 +392,72 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       await expect(
         findLatestHumanReviewPolicyDecision(db, { repositoryId, pullNumber: 7 }),
       ).resolves.toBeNull();
+    });
+  });
+
+  it("records a replacement once and changes the persisted reviewer cohort atomically", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const repositoryId = await seedRepository(db);
+      const absence = await db
+        .insertInto("reviewer_absences")
+        .values({
+          reviewer_handle: "@user-d82a5f",
+          start_at: new Date("2026-08-31T12:00:00.000Z"),
+          end_at: new Date("2026-09-02T12:00:00.000Z"),
+        })
+        .returning(["id", "revision"])
+        .executeTakeFirstOrThrow();
+      const decision = await persistDecision(db, {
+        repositoryId,
+        deliveryId: "delivery-replacement",
+        pullNumber: 7,
+        headSha: "head-1",
+        mode: "enforce",
+        action: "request_human_review",
+        actionStatus: "pending",
+        riskScore: 35,
+        selectedReviewers: ["@user-d82a5f", "@user-b4e82d"],
+        details: {},
+      });
+      const input = {
+        absenceId: absence.id,
+        absenceRevision: absence.revision,
+        decisionId: decision.decisionId,
+        unavailableReviewer: "@user-d82a5f",
+        replacementReviewer: "@user-c91e46",
+        outcome: "replaced" as const,
+        reason: "reviewer absence",
+        startedAt: new Date("2026-09-01T12:00:00.000Z"),
+        completedAt: new Date("2026-09-01T12:01:00.000Z"),
+        replaceCohort: true,
+      };
+
+      await expect(recordReviewerReplacement(db, input)).resolves.toEqual({ inserted: true });
+      await expect(recordReviewerReplacement(db, input)).resolves.toEqual({ inserted: false });
+      await expect(db.selectFrom("reviewer_replacements").selectAll().execute()).resolves.toEqual([
+        expect.objectContaining({
+          absence_id: absence.id,
+          absence_revision: absence.revision,
+          decision_id: decision.decisionId,
+          unavailable_reviewer: "@user-d82a5f",
+          replacement_reviewer: "@user-c91e46",
+          outcome: "replaced",
+        }),
+      ]);
+      await expect(
+        db.selectFrom("routing_decisions")
+          .select(["selected_reviewer", "selected_reviewers"])
+          .where("id", "=", decision.decisionId)
+          .executeTakeFirstOrThrow(),
+      ).resolves.toEqual({
+        selected_reviewer: "@user-c91e46",
+        selected_reviewers: ["@user-c91e46", "@user-b4e82d"],
+      });
+      await expect(findReviewerReplacementOutcome(db, {
+        absenceId: absence.id,
+        absenceRevision: absence.revision,
+        decisionId: decision.decisionId,
+      })).resolves.toBe("replaced");
     });
   });
 });
