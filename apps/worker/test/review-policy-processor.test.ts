@@ -25,6 +25,7 @@ const decision: HumanReviewPolicyDecision = {
   mode: "enforce",
   action: "request_human_review",
   selectedReviewers: ["@user-d82a5f", "@user-e64b19"],
+  requiredApprovalCount: 2,
   policyCheckRunId: "71",
   policyCheckState: "in_progress",
 };
@@ -68,7 +69,7 @@ describe("processHumanReviewPolicyJob", () => {
     expect(services.updateCheck).toHaveBeenCalledWith({
       decision,
       state: "in_progress",
-      summary: "Waiting for approval from @user-e64b19.",
+      summary: "Waiting for 1 more human approval.",
     });
     expect(services.persistState).toHaveBeenCalledWith({
       decisionId: "decision-1",
@@ -127,7 +128,7 @@ describe("processHumanReviewPolicyJob", () => {
     expect(services.updateCheck).toHaveBeenCalledWith({
       decision,
       state: "success",
-      summary: "All required human reviewers approved the current head.",
+      summary: "Required human approval count met.",
     });
     expect(services.persistState).toHaveBeenCalledWith({
       decisionId: "decision-1",

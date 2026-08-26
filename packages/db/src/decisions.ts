@@ -34,6 +34,7 @@ export interface HumanReviewPolicyDecision {
   mode: RepositoryMode;
   action: RoutingAction;
   selectedReviewers: string[];
+  requiredApprovalCount?: number;
   policyCheckRunId: string | null;
   policyCheckState: "not_started" | "in_progress" | "success" | "failure";
 }
@@ -133,6 +134,7 @@ export async function findLatestHumanReviewPolicyDecision(
       "routing_decisions.mode",
       "routing_decisions.action",
       "routing_decisions.selected_reviewers as selectedReviewers",
+      "routing_decisions.details as details",
       "routing_decisions.policy_check_run_id as policyCheckRunId",
       "routing_decisions.policy_check_state as policyCheckState",
     ])
@@ -157,9 +159,24 @@ export async function findLatestHumanReviewPolicyDecision(
     mode: decision.mode,
     action: decision.action as RoutingAction,
     selectedReviewers: parseSelectedReviewers(decision.selectedReviewers),
+    requiredApprovalCount: parseRequiredApprovalCount(decision.details, parseSelectedReviewers(decision.selectedReviewers)),
     policyCheckRunId: decision.policyCheckRunId,
     policyCheckState: decision.policyCheckState,
   };
+}
+
+function parseRequiredApprovalCount(details: unknown, selectedReviewers: string[]): number {
+  if (
+    typeof details === "object" &&
+    details !== null &&
+    "routing" in details &&
+    typeof details.routing === "object" &&
+    details.routing !== null &&
+    "requestedReviewerCount" in details.routing &&
+    (details.routing.requestedReviewerCount === 1 || details.routing.requestedReviewerCount === 2)
+  ) return details.routing.requestedReviewerCount;
+
+  return selectedReviewers.length;
 }
 
 export async function updatePolicyCheckState(

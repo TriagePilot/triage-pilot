@@ -42,6 +42,7 @@ export async function processHumanReviewPolicyJob(
   const evaluation = evaluateHumanReviewPolicy({
     route,
     selectedReviewers: decision.selectedReviewers,
+    ...(decision.requiredApprovalCount === undefined ? {} : { requiredApprovalCount: decision.requiredApprovalCount }),
     headSha: decision.headSha,
     reviews,
   });

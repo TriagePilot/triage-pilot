@@ -298,8 +298,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         action: "request_human_review",
         actionStatus: "pending",
         riskScore: 35,
-        selectedReviewers: ["@user-d82a5f", "@user-e64b19"],
-        details: {},
+        selectedReviewers: ["@user-d82a5f"],
+        details: { routing: { requestedReviewerCount: 2 } },
       });
       await recordPolicyCheck(db, {
         decisionId: first.decisionId,
@@ -317,7 +317,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         headSha: "head-1",
         mode: "enforce",
         action: "request_human_review",
-        selectedReviewers: ["@user-d82a5f", "@user-e64b19"],
+        selectedReviewers: ["@user-d82a5f"],
+        requiredApprovalCount: 2,
         policyCheckRunId: "42",
         policyCheckState: "in_progress",
       });
@@ -352,6 +353,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         mode: "enforce",
         action: "no_eligible_reviewer",
         selectedReviewers: [],
+        requiredApprovalCount: 0,
         policyCheckRunId: null,
         policyCheckState: "failure",
       });
