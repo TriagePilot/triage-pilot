@@ -31,6 +31,7 @@ const absenceInputSchema = absenceBodySchema.extend({
 const timezoneInputSchema = z.object({ timezone: z.string().min(1) }).strict();
 
 const cancellationInputSchema = z.object({ expectedRevision: z.number().int().positive() }).strict();
+const canonicalIanaTimezones = new Set(Intl.supportedValuesOf("timeZone"));
 
 export type LocalAbsenceInput = z.infer<typeof absenceInputSchema>;
 
@@ -94,7 +95,7 @@ function parseLocalDateTime(
   try {
     const instant = Temporal.ZonedDateTime.from(
       { timeZone: timezone, year, month, day, hour, minute },
-      { disambiguation: "reject" },
+      { disambiguation: "reject", overflow: "reject" },
     ).toInstant();
     return new Date(instant.epochMilliseconds);
   } catch {
@@ -104,12 +105,7 @@ function parseLocalDateTime(
 }
 
 function isValidTimezone(timezone: string): boolean {
-  try {
-    Temporal.ZonedDateTime.from({ timeZone: timezone, year: 2000, month: 1, day: 1, hour: 0, minute: 0 });
-    return true;
-  } catch {
-    return false;
-  }
+  return timezone === "UTC" || canonicalIanaTimezones.has(timezone);
 }
 
 function parseSchema<T>(schema: z.ZodType<T>, input: unknown): T {

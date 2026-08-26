@@ -70,4 +70,28 @@ describe("availability input", () => {
       expect.objectContaining({ issues: [{ field: "extra", message: "Unexpected field." }] }),
     );
   });
+
+  it("rejects fixed-offset timezone input", () => {
+    expect(() => parseTimezoneInput({ timezone: "+01:00" })).toThrow(
+      expect.objectContaining({ issues: [{ field: "timezone", message: "Enter a valid IANA timezone." }] }),
+    );
+  });
+
+  it.each(["2026-02-30T09:00", "2026-03-28T25:00"])(
+    "rejects regex-valid invalid local components: %s",
+    (startLocal) => {
+      expect(() =>
+        parseLocalAbsenceInput({
+          reviewerHandle: "@user-d82a5f",
+          startLocal,
+          endLocal: "2026-03-28T17:00",
+          timezone: "Europe/Bratislava",
+        }),
+      ).toThrow(
+        expect.objectContaining({
+          issues: [{ field: "startLocal", message: "Enter a valid, unambiguous local date and time." }],
+        }),
+      );
+    },
+  );
 });
