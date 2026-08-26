@@ -191,7 +191,7 @@ describe("worker routing GitHub reads", () => {
       decisionId: "decision-1",
       expectedHeadSha: "unmerged-head-456",
       riskTier: "high",
-      selectedReviewers: ["@alice"],
+      selectedReviewers: ["@user-d82a5f"],
     });
 
     expect(request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/labels", {
@@ -211,7 +211,7 @@ describe("worker routing GitHub reads", () => {
       decisionId: "decision-1",
       expectedHeadSha: "unmerged-head-456",
       riskTier: "medium" as const,
-      selectedReviewers: ["@alice"],
+      selectedReviewers: ["@user-d82a5f"],
     });
 
     const policyCheckCall = request.mock.calls.findIndex(
@@ -226,7 +226,7 @@ describe("worker routing GitHub reads", () => {
     expect(request.mock.calls[policyCheckCall]?.[1]).not.toHaveProperty("conclusion");
     expect(request).toHaveBeenCalledWith(
       "POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
-      expect.objectContaining({ reviewers: ["alice"], team_reviewers: [] }),
+      expect.objectContaining({ reviewers: ["user-d82a5f"], team_reviewers: [] }),
     );
     expect(request.mock.calls.filter(([route]) => route.includes("requested_reviewers"))).toHaveLength(1);
   });
@@ -264,7 +264,7 @@ describe("worker routing GitHub reads", () => {
       decisionId: "decision-1",
       expectedHeadSha: "unmerged-head-456",
       riskTier: "medium",
-      selectedReviewers: ["@alice"],
+      selectedReviewers: ["@user-d82a5f"],
     });
 
     expect(
@@ -285,7 +285,7 @@ describe("worker routing GitHub reads", () => {
       decisionId: "decision-1",
       expectedHeadSha: "unmerged-head-456",
       riskTier: "medium" as const,
-      selectedReviewers: ["@alice"],
+      selectedReviewers: ["@user-d82a5f"],
     };
 
     await expect(services.applyDecisionActions(action)).rejects.toThrow("database record failed");
@@ -316,7 +316,7 @@ describe("worker routing GitHub reads", () => {
       expect.objectContaining({
         external_id: "decision-1",
         status: "in_progress",
-        output: expect.objectContaining({ summary: "Waiting for approval from @alice." }),
+        output: expect.objectContaining({ summary: "Waiting for approval from @user-d82a5f." }),
       }),
     );
     expect(db.policyCheck()).toEqual({ checkRunId: "72", state: "in_progress" });
@@ -368,7 +368,7 @@ describe("worker routing GitHub reads", () => {
         decisionId: "decision-1",
         expectedHeadSha: "unmerged-head-456",
         riskTier: action === "policy_approval" ? "low" : "medium",
-        ...(action === "request_human_review" ? { selectedReviewers: ["@alice"] } : {}),
+        ...(action === "request_human_review" ? { selectedReviewers: ["@user-d82a5f"] } : {}),
       }),
     ).rejects.toMatchObject({ status: 422 });
 
@@ -392,7 +392,7 @@ describe("worker routing GitHub reads", () => {
       decisionId: "decision-1",
       expectedHeadSha: "unmerged-head-456",
       riskTier: "medium" as const,
-      selectedReviewers: ["@alice"],
+      selectedReviewers: ["@user-d82a5f"],
     };
 
     await expect(services.applyDecisionActions(action)).rejects.toMatchObject({ status: 503 });
@@ -451,7 +451,7 @@ describe("worker routing GitHub reads", () => {
       headSha: "unmerged-head-456",
       mode: "enforce",
       action: "request_human_review",
-      selectedReviewers: ["@alice"],
+      selectedReviewers: ["@user-d82a5f"],
       policyCheckRunId: "71",
       policyCheckState: "in_progress",
     };
@@ -462,7 +462,7 @@ describe("worker routing GitHub reads", () => {
     });
     await expect(services.fetchReviews({} as never)).resolves.toEqual([
       {
-        userLogin: "alice",
+        userLogin: "user-d82a5f",
         state: "APPROVED",
         commitId: "unmerged-head-456",
         submittedAt: "2026-08-21T10:00:00Z",
@@ -556,7 +556,7 @@ function configRequester() {
         data: {
           base: { sha: "trusted-base-123" },
           head: { sha: "unmerged-head-456", ref: "unsafe-policy-change" },
-          user: { login: "priya" },
+          user: { login: "user-c91e46" },
         },
       };
     }
@@ -577,7 +577,7 @@ function actionRequester(currentHeadSha: string) {
         data: {
           base: { sha: "trusted-base-123" },
           head: { sha: currentHeadSha, ref: "feature" },
-          user: { login: "priya" },
+          user: { login: "user-c91e46" },
         },
       };
     }
@@ -607,7 +607,7 @@ function policyRequester() {
     if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") {
       return {
         data: [{
-          user: { login: "alice" },
+          user: { login: "user-d82a5f" },
           state: "APPROVED",
           commit_id: "unmerged-head-456",
           submitted_at: "2026-08-21T10:00:00Z",
@@ -648,7 +648,7 @@ function partialStateRaceRequester(input: {
     if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") {
       return {
         data: [{
-          user: { login: "alice" },
+          user: { login: "user-d82a5f" },
           state: input.reviewState,
           commit_id: "unmerged-head-456",
           submitted_at: "2026-08-21T11:00:00Z",
@@ -733,7 +733,7 @@ function replacementPolicyRequester() {
     if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") {
       return {
         data: [{
-          user: { login: "alice" },
+          user: { login: "user-d82a5f" },
           state: "CHANGES_REQUESTED",
           commit_id: "unmerged-head-456",
           submitted_at: "2026-08-21T11:00:00Z",
@@ -771,7 +771,7 @@ function stalePersistencePolicyRequester() {
     if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") {
       return {
         data: [{
-          user: { login: "alice" },
+          user: { login: "user-d82a5f" },
           state: approvalWithdrawn ? "CHANGES_REQUESTED" : "APPROVED",
           commit_id: "unmerged-head-456",
           submitted_at: approvalWithdrawn ? "2026-08-21T12:00:00Z" : "2026-08-21T11:00:00Z",
@@ -869,7 +869,7 @@ function humanReviewDecision(
     headSha: "unmerged-head-456",
     mode: "enforce",
     action: "request_human_review",
-    selectedReviewers: ["@alice"],
+    selectedReviewers: ["@user-d82a5f"],
     policyCheckRunId: "71",
     policyCheckState: "in_progress",
     ...overrides,
@@ -1016,7 +1016,7 @@ function evaluationPolicyDatabase(input: {
                       headSha: "unmerged-head-456",
                       mode: "enforce",
                       action: "request_human_review",
-                      selectedReviewers: ["@alice"],
+                      selectedReviewers: ["@user-d82a5f"],
                       policyCheckRunId: policyCheck.checkRunId,
                       policyCheckState: policyCheck.state,
                     }),

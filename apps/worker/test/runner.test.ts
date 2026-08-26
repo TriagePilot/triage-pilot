@@ -271,8 +271,8 @@ describe("runWorkerOnce", () => {
       fetchChangedFiles: vi.fn(async () => []),
       fetchCommitMessages: vi.fn(async () => []),
       fetchPullRequestMetadata: vi.fn(async () => ({
-        authorLogin: "priya",
-        authorHandle: "@priya",
+        authorLogin: "user-c91e46",
+        authorHandle: "@user-c91e46",
         branchName: "feature",
         targetBranchName: "develop",
       })),

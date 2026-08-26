@@ -23,8 +23,8 @@ function buildRoutingServices({ config }: { config: string }) {
     fetchChangedFiles: vi.fn(async () => [{ path: "README.md", additions: 1, deletions: 0 }]),
     fetchCommitMessages: vi.fn(async () => ["docs: clarify usage"]),
     fetchPullRequestMetadata: vi.fn(async () => ({
-      authorLogin: "priya",
-      authorHandle: "@priya",
+      authorLogin: "user-c91e46",
+      authorHandle: "@user-c91e46",
       branchName: "docs/usage",
       targetBranchName: "develop",
     })),
@@ -83,7 +83,7 @@ risk:
   ai_authorship: { enabled: false, modifier: 0 }
 ownership:
   rules: []
-  fallback_reviewers: ["@sasha"]
+  fallback_reviewers: ["@user-f37a82"]
 `,
     });
 
@@ -113,8 +113,8 @@ routing:
 `,
     });
     services.fetchPullRequestMetadata.mockResolvedValueOnce({
-      authorLogin: "priya",
-      authorHandle: "@priya",
+      authorLogin: "user-c91e46",
+      authorHandle: "@user-c91e46",
       branchName: "develop",
       targetBranchName: "main",
     });
@@ -135,13 +135,13 @@ routing:
 version: 1
 mode: enforce
 routing:
-  exclude_source_branch_patterns: ["dependabot/**"]
+  exclude_source_branch_patterns: ["automated-updates/**"]
 `,
     });
     services.fetchPullRequestMetadata.mockResolvedValueOnce({
-      authorLogin: "dependabot",
-      authorHandle: "@dependabot",
-      branchName: "dependabot/npm_and_yarn/vitest-2.1.9",
+      authorLogin: "user-6d3e1a",
+      authorHandle: "@user-6d3e1a",
+      branchName: "automated-updates/npm_and_yarn/vitest-2.1.9",
       targetBranchName: "main",
     });
 
@@ -209,7 +209,7 @@ risk:
       weight: 30
       tag: docs
 ownership:
-  fallback_reviewers: ["@sasha"]
+  fallback_reviewers: ["@user-f37a82"]
 `,
     });
 
@@ -238,10 +238,10 @@ risk:
       weight: 100
       tag: documentation
 ownership:
-  fallback_reviewers: ["@tomas223"]
+  fallback_reviewers: ["@user-0c6e8a"]
 `,
     });
-    const fetchCurrentHeadApprovedReviewers = vi.fn(async () => ["@velzepooz", "@zuffik"]);
+    const fetchCurrentHeadApprovedReviewers = vi.fn(async () => ["@user-4d8a2e", "@user-7c1f9b"]);
     Object.assign(services, { fetchCurrentHeadApprovedReviewers });
 
     await processRoutingJob(message, services);
@@ -250,12 +250,12 @@ ownership:
     expect(services.persistDecision).toHaveBeenCalledWith(
       expect.objectContaining({
         action: "request_human_review",
-        selectedReviewers: ["@velzepooz", "@zuffik"],
+        selectedReviewers: ["@user-4d8a2e", "@user-7c1f9b"],
       }),
     );
     expect(services.applyDecisionActions).toHaveBeenCalledWith(
       expect.objectContaining({
-        selectedReviewers: ["@velzepooz", "@zuffik"],
+        selectedReviewers: ["@user-4d8a2e", "@user-7c1f9b"],
         reviewersToRequest: [],
       }),
     );
@@ -289,7 +289,7 @@ risk:
       weight: 30
       tag: docs
 ownership:
-  fallback_reviewers: ["@sasha"]
+  fallback_reviewers: ["@user-f37a82"]
 `,
     });
     services.persistDecision.mockResolvedValueOnce({
@@ -374,7 +374,7 @@ risk:
     expect(services.markActionSucceeded).not.toHaveBeenCalled();
   });
 
-  it("uses a bare author login for AI risk and a handle for reviewer exclusion", async () => {
+  it("uses an AI branch signal and excludes the author's handle from reviewers", async () => {
     const services = buildRoutingServices({
       config: `
 version: 1
@@ -384,13 +384,13 @@ risk:
     enabled: true
     modifier: 30
 ownership:
-  fallback_reviewers: ["@copilot", "@devon"]
+  fallback_reviewers: ["@user-8b4c20", "@user-b4e82d"]
 `,
     });
     services.fetchPullRequestMetadata.mockResolvedValueOnce({
-      authorLogin: "copilot",
-      authorHandle: "@copilot",
-      branchName: "feature/docs",
+      authorLogin: "user-8b4c20",
+      authorHandle: "@user-8b4c20",
+      branchName: "codex/fixture-update",
       targetBranchName: "develop",
     });
 
@@ -400,7 +400,7 @@ ownership:
       expect.objectContaining({
         action: "request_human_review",
         riskScore: 35,
-        selectedReviewers: ["@devon"],
+        selectedReviewers: ["@user-b4e82d"],
         details: expect.objectContaining({
           risk: expect.objectContaining({
             components: expect.arrayContaining([expect.objectContaining({ reason: "ai_authorship_signal" })]),
@@ -424,7 +424,7 @@ risk:
       weight: 100
       tag: critical
 ownership:
-  fallback_reviewers: ["@alpha", "@bravo", "@charlie"]
+  fallback_reviewers: ["@user-a91f5c", "@user-2e7d4b", "@user-c63a18"]
 `,
     });
 
@@ -435,11 +435,11 @@ ownership:
         mode: "shadow",
         action: "request_human_review",
         actionStatus: "not_applied",
-        selectedReviewers: ["@alpha", "@bravo"],
+        selectedReviewers: ["@user-2e7d4b", "@user-a91f5c"],
         details: expect.objectContaining({
           routing: expect.objectContaining({
             requestedReviewerCount: 2,
-            selectedReviewers: ["@alpha", "@bravo"],
+            selectedReviewers: ["@user-2e7d4b", "@user-a91f5c"],
             reviewerShortfall: 0,
           }),
         }),
@@ -462,7 +462,7 @@ risk:
   suppressors: []
   ai_authorship: { enabled: false, modifier: 0 }
 ownership:
-  fallback_reviewers: ["@alpha", "@bravo"]
+  fallback_reviewers: ["@user-a91f5c", "@user-2e7d4b"]
 `,
     });
     services.fetchChangedFiles.mockResolvedValueOnce(
@@ -475,7 +475,7 @@ ownership:
       expect.objectContaining({
         riskScore: 91,
         action: "request_human_review",
-        selectedReviewers: ["@alpha", "@bravo"],
+        selectedReviewers: ["@user-2e7d4b", "@user-a91f5c"],
       }),
     );
     expect(services.applyDecisionActions).not.toHaveBeenCalled();

@@ -24,7 +24,7 @@ const decision: HumanReviewPolicyDecision = {
   headSha: "head-2",
   mode: "enforce",
   action: "request_human_review",
-  selectedReviewers: ["@alice", "@bob"],
+  selectedReviewers: ["@user-d82a5f", "@user-e64b19"],
   policyCheckRunId: "71",
   policyCheckState: "in_progress",
 };
@@ -56,7 +56,7 @@ describe("processHumanReviewPolicyJob", () => {
     const services = buildServices();
     vi.mocked(services.fetchReviews).mockResolvedValueOnce([
       {
-        userLogin: "alice",
+        userLogin: "user-d82a5f",
         state: "APPROVED",
         commitId: "head-2",
         submittedAt: "2026-08-21T10:00:00Z",
@@ -68,7 +68,7 @@ describe("processHumanReviewPolicyJob", () => {
     expect(services.updateCheck).toHaveBeenCalledWith({
       decision,
       state: "in_progress",
-      summary: "Waiting for approval from @bob.",
+      summary: "Waiting for approval from @user-e64b19.",
     });
     expect(services.persistState).toHaveBeenCalledWith({
       decisionId: "decision-1",
@@ -84,13 +84,13 @@ describe("processHumanReviewPolicyJob", () => {
       .mockResolvedValueOnce({ state: "open", headSha: "head-3" });
     vi.mocked(services.fetchReviews).mockResolvedValueOnce([
       {
-        userLogin: "alice",
+        userLogin: "user-d82a5f",
         state: "APPROVED",
         commitId: "head-2",
         submittedAt: "2026-08-21T10:00:00Z",
       },
       {
-        userLogin: "bob",
+        userLogin: "user-e64b19",
         state: "APPROVED",
         commitId: "head-2",
         submittedAt: "2026-08-21T11:00:00Z",
@@ -108,13 +108,13 @@ describe("processHumanReviewPolicyJob", () => {
     const services = buildServices();
     vi.mocked(services.fetchReviews).mockResolvedValueOnce([
       {
-        userLogin: "alice",
+        userLogin: "user-d82a5f",
         state: "APPROVED",
         commitId: "head-2",
         submittedAt: "2026-08-21T10:00:00Z",
       },
       {
-        userLogin: "bob",
+        userLogin: "user-e64b19",
         state: "APPROVED",
         commitId: "head-2",
         submittedAt: "2026-08-21T11:00:00Z",
@@ -146,13 +146,13 @@ describe("processHumanReviewPolicyJob", () => {
     vi.mocked(services.findDecision).mockResolvedValueOnce({ ...decision, policyCheckState: "failure" });
     vi.mocked(services.fetchReviews).mockResolvedValueOnce([
       {
-        userLogin: "alice",
+        userLogin: "user-d82a5f",
         state: "APPROVED",
         commitId: "head-2",
         submittedAt: "2026-08-21T10:00:00Z",
       },
       {
-        userLogin: "bob",
+        userLogin: "user-e64b19",
         state: "APPROVED",
         commitId: "head-2",
         submittedAt: "2026-08-21T11:00:00Z",

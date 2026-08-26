@@ -35,7 +35,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         action: "request_human_review",
         actionStatus: "pending",
         riskScore: 35,
-        selectedReviewers: ["@devon", "@sam"],
+        selectedReviewers: ["@user-b4e82d", "@user-9e3c71"],
         details: { attempt: 2 },
       });
 
@@ -50,8 +50,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
           action: "request_human_review",
           action_status: "pending",
           risk_score: 35,
-          selected_reviewer: "@devon",
-          selected_reviewers: ["@devon", "@sam"],
+          selected_reviewer: "@user-b4e82d",
+          selected_reviewers: ["@user-b4e82d", "@user-9e3c71"],
           no_human_reason: null,
           details: { attempt: 2 },
         }),
@@ -154,7 +154,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         action: "request_human_review",
         actionStatus: "not_applied",
         riskScore: 35,
-        selectedReviewers: ["@devon", "@sam"],
+        selectedReviewers: ["@user-b4e82d", "@user-9e3c71"],
         details: { routing: "retry" },
       });
 
@@ -298,7 +298,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         action: "request_human_review",
         actionStatus: "pending",
         riskScore: 35,
-        selectedReviewers: ["@alice", "@bob"],
+        selectedReviewers: ["@user-d82a5f", "@user-e64b19"],
         details: {},
       });
       await recordPolicyCheck(db, {
@@ -317,7 +317,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         headSha: "head-1",
         mode: "enforce",
         action: "request_human_review",
-        selectedReviewers: ["@alice", "@bob"],
+        selectedReviewers: ["@user-d82a5f", "@user-e64b19"],
         policyCheckRunId: "42",
         policyCheckState: "in_progress",
       });
@@ -370,7 +370,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         action: "request_human_review",
         actionStatus: "pending",
         riskScore: 35,
-        selectedReviewers: ["@alice"],
+        selectedReviewers: ["@user-d82a5f"],
         details: {},
       });
       await persistDecision(db, {

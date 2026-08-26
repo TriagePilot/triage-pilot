@@ -29,7 +29,7 @@ describe("scorePullRequestRisk", () => {
   it("marks auth path plus AI branch as medium risk", () => {
     const result = scorePullRequestRisk({
       files: [{ path: "src/auth/session.ts", additions: 20, deletions: 4 }],
-      author: "devon",
+      author: "user-b4e82d",
       branchName: "codex/fix-session",
       commitMessages: ["feat: update session handling"],
       config: baseConfig,
@@ -101,8 +101,8 @@ risk:
         { path: "src/schema/user.ts", additions: 1, deletions: 0 },
         { path: "pnpm-lock.yaml", additions: 1, deletions: 0 },
       ],
-      author: "copilot",
-      branchName: "copilot/update-session",
+      author: "user-8b4c20",
+      branchName: "user-8b4c20/update-session",
       commitMessages: ["feat: update session"],
       config: {
         size: { highChangedFiles: 100, highChangedLines: 5_000 },

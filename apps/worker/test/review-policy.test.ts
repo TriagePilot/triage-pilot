@@ -7,17 +7,17 @@ describe("evaluateHumanReviewPolicy", () => {
     expect(
       evaluateHumanReviewPolicy({
         route: "human_review",
-        selectedReviewers: ["@alice", "@bob"],
+        selectedReviewers: ["@user-d82a5f", "@user-e64b19"],
         headSha: "head-2",
         reviews: [
           {
-            userLogin: "alice",
+            userLogin: "user-d82a5f",
             state: "APPROVED",
             commitId: "head-2",
             submittedAt: "2026-08-21T10:00:00Z",
           },
           {
-            userLogin: "bob",
+            userLogin: "user-e64b19",
             state: "APPROVED",
             commitId: "head-1",
             submittedAt: "2026-08-21T11:00:00Z",
@@ -26,8 +26,8 @@ describe("evaluateHumanReviewPolicy", () => {
       }),
     ).toEqual({
       state: "in_progress",
-      summary: "Waiting for approval from @bob.",
-      missingReviewers: ["@bob"],
+      summary: "Waiting for approval from @user-e64b19.",
+      missingReviewers: ["@user-e64b19"],
     });
   });
 
@@ -65,17 +65,17 @@ describe("evaluateHumanReviewPolicy", () => {
     expect(
       evaluateHumanReviewPolicy({
         route: "human_review",
-        selectedReviewers: ["@alice", "@bob"],
+        selectedReviewers: ["@user-d82a5f", "@user-e64b19"],
         headSha: "head-2",
         reviews: [
           {
-            userLogin: "alice",
+            userLogin: "user-d82a5f",
             state: "APPROVED",
             commitId: "head-2",
             submittedAt: "2026-08-21T10:00:00Z",
           },
           {
-            userLogin: "bob",
+            userLogin: "user-e64b19",
             state: "APPROVED",
             commitId: "head-2",
             submittedAt: "2026-08-21T11:00:00Z",
@@ -97,41 +97,41 @@ describe("evaluateHumanReviewPolicy", () => {
     expect(
       evaluateHumanReviewPolicy({
         route: "human_review",
-        selectedReviewers: ["@alice"],
+        selectedReviewers: ["@user-d82a5f"],
         headSha: "head-2",
         reviews: [
           {
-            userLogin: "alice",
+            userLogin: "user-d82a5f",
             state: "APPROVED",
             commitId: "head-2",
             submittedAt: "2026-08-21T10:00:00Z",
           },
           {
-            userLogin: "alice",
+            userLogin: "user-d82a5f",
             state,
             commitId: "head-2",
             submittedAt: "2026-08-21T11:00:00Z",
           },
         ],
       }),
-    ).toMatchObject({ state: "in_progress", missingReviewers: ["@alice"] });
+    ).toMatchObject({ state: "in_progress", missingReviewers: ["@user-d82a5f"] });
   });
 
   it("uses the newest duplicate review for a selected reviewer", () => {
     expect(
       evaluateHumanReviewPolicy({
         route: "human_review",
-        selectedReviewers: ["@alice"],
+        selectedReviewers: ["@user-d82a5f"],
         headSha: "head-2",
         reviews: [
           {
-            userLogin: "alice",
+            userLogin: "user-d82a5f",
             state: "CHANGES_REQUESTED",
             commitId: "head-2",
             submittedAt: "2026-08-21T09:00:00Z",
           },
           {
-            userLogin: "alice",
+            userLogin: "user-d82a5f",
             state: "APPROVED",
             commitId: "head-2",
             submittedAt: "2026-08-21T10:00:00Z",
@@ -145,59 +145,59 @@ describe("evaluateHumanReviewPolicy", () => {
     expect(
       evaluateHumanReviewPolicy({
         route: "human_review",
-        selectedReviewers: ["@alice"],
+        selectedReviewers: ["@user-d82a5f"],
         headSha: "head-2",
         reviews: [
           {
-            userLogin: "alice",
+            userLogin: "user-d82a5f",
             state: "APPROVED",
             commitId: "head-2",
             submittedAt: "2026-08-21T10:00:00Z",
           },
           {
-            userLogin: "alice",
+            userLogin: "user-d82a5f",
             state: "CHANGES_REQUESTED",
             commitId: "head-2",
             submittedAt: "2026-08-21T10:00:00Z",
           },
         ],
       }),
-    ).toMatchObject({ state: "in_progress", missingReviewers: ["@alice"] });
+    ).toMatchObject({ state: "in_progress", missingReviewers: ["@user-d82a5f"] });
   });
 
   it("uses response order when a later pending review has no submitted timestamp", () => {
     expect(
       evaluateHumanReviewPolicy({
         route: "human_review",
-        selectedReviewers: ["@alice"],
+        selectedReviewers: ["@user-d82a5f"],
         headSha: "head-2",
         reviews: [
           {
-            userLogin: "alice",
+            userLogin: "user-d82a5f",
             state: "APPROVED",
             commitId: "head-2",
             submittedAt: "2026-08-21T10:00:00Z",
           },
           {
-            userLogin: "alice",
+            userLogin: "user-d82a5f",
             state: "PENDING",
             commitId: "head-2",
             submittedAt: null,
           },
         ],
       }),
-    ).toMatchObject({ state: "in_progress", missingReviewers: ["@alice"] });
+    ).toMatchObject({ state: "in_progress", missingReviewers: ["@user-d82a5f"] });
   });
 
   it("matches selected reviewer handles to GitHub logins case-insensitively", () => {
     expect(
       evaluateHumanReviewPolicy({
         route: "human_review",
-        selectedReviewers: ["@Alice"],
+        selectedReviewers: ["@User-D82A5F"],
         headSha: "head-2",
         reviews: [
           {
-            userLogin: "aLiCe",
+            userLogin: "UsEr-D82A5F",
             state: "APPROVED",
             commitId: "head-2",
             submittedAt: "2026-08-21T10:00:00Z",
