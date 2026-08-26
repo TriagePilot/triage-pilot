@@ -8,15 +8,20 @@ import {
 import type { RoutingJobMessage } from "../src/processor";
 
 const message: RoutingJobMessage = {
-  kind: "process_pull_request",
+  kind: "process_change_request",
   deliveryId: "delivery-1",
-  installationId: "99",
-  repositoryId: "101",
-  owner: "acme",
-  repo: "api",
-  pullNumber: 7,
-  headSha: "abc123",
-  eventName: "pull_request.opened",
+  eventName: "change_request.opened",
+  workspaceId: "ws_local",
+  providerConnectionId: "99",
+  changeRequest: {
+    repository: { provider: "github", externalId: "101", owner: "acme", name: "api" },
+    externalId: "7",
+    number: 7,
+    baseRevision: "base-123",
+    headRevision: "abc123",
+  },
+  isDraft: false,
+  routingKey: "routing:ws_local:github:101:7:base-123:abc123",
 };
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime services", () => {
@@ -119,11 +124,13 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
       })({
         kind: "evaluate_human_review_policy",
         deliveryId: "review-delivery-1",
-        installationId: "99",
-        repositoryId: "101",
-        owner: "acme",
-        repo: "api",
-        pullNumber: 7,
+        workspaceId: "ws_local",
+        providerConnectionId: "99",
+        changeRequest: {
+          repository: { provider: "github", externalId: "101", owner: "acme", name: "api" },
+          externalId: "7",
+          number: 7,
+        },
       });
       await expect(policyServices.findDecision({ repositoryId: "101", pullNumber: 7 })).resolves.toEqual(
         expect.objectContaining({

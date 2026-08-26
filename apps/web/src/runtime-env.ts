@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { loadGitHubCredentials, type GitHubAppCredentialShape } from "@triagepilot/github";
+import { loadGitHubCredentials, type GitHubAppCredentialShape } from "@triagepilot/provider-github";
 import { z } from "zod";
 
 const runtimeEnvSchema = z.object({

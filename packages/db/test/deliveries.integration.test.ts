@@ -240,17 +240,20 @@ function deliveryInput() {
     installation: { githubInstallationId: "99", accountLogin: "acme" },
     repository: repository("101", "api"),
     payload: {
-      kind: "process_pull_request" as const,
+      kind: "process_change_request" as const,
       deliveryId: "delivery-1",
-      installationId: "99",
-      repositoryId: "101",
-      owner: "acme",
-      repo: "api",
-      pullNumber: 7,
-      baseSha: "base-123",
-      headSha: "abc123",
-      eventName: "pull_request.opened",
-      routingKey: "routing:101:7:base-123:abc123",
+      eventName: "change_request.opened",
+      workspaceId: "ws_local",
+      providerConnectionId: "99",
+      changeRequest: {
+        repository: { provider: "github" as const, externalId: "101", owner: "acme", name: "api" },
+        externalId: "7",
+        number: 7,
+        baseRevision: "base-123",
+        headRevision: "abc123",
+      },
+      isDraft: false,
+      routingKey: "routing:ws_local:github:101:7:base-123:abc123",
     },
   };
 }
@@ -264,11 +267,13 @@ function humanReviewPolicyDeliveryInput() {
     payload: {
       kind: "evaluate_human_review_policy" as const,
       deliveryId: "delivery-review-1",
-      installationId: "99",
-      repositoryId: "101",
-      owner: "acme",
-      repo: "api",
-      pullNumber: 7,
+      workspaceId: "ws_local",
+      providerConnectionId: "99",
+      changeRequest: {
+        repository: { provider: "github" as const, externalId: "101", owner: "acme", name: "api" },
+        externalId: "7",
+        number: 7,
+      },
     },
   };
 }

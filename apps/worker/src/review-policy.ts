@@ -1,4 +1,4 @@
-import type { PullRequestReview } from "@triagepilot/github";
+import type { PullRequestReview } from "@triagepilot/provider-github";
 
 export type HumanReviewPolicyState = "in_progress" | "success" | "failure";
 

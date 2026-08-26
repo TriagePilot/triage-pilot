@@ -6,21 +6,28 @@ import { runWorkerOnce } from "../src/runner";
 import { processRoutingJob, type RoutingJobServices } from "../src/processor";
 import type { HumanReviewPolicyServices } from "../src/review-policy-processor";
 
+const routingJobPayload = {
+  kind: "process_change_request" as const,
+  deliveryId: "delivery-1",
+  eventName: "change_request.opened",
+  workspaceId: "ws_local",
+  providerConnectionId: "99",
+  changeRequest: {
+    repository: { provider: "github" as const, externalId: "101", owner: "acme", name: "api" },
+    externalId: "7",
+    number: 7,
+    baseRevision: "trusted-base",
+    headRevision: "abc123",
+  },
+  isDraft: false,
+  routingKey: "routing:ws_local:github:101:7:trusted-base:abc123",
+};
+
 const jobRecord: JobRecord = {
   id: "job-1",
   kind: "process_pull_request",
   status: "queued",
-  payload: {
-    kind: "process_pull_request",
-    deliveryId: "delivery-1",
-    installationId: "99",
-    repositoryId: "101",
-    owner: "acme",
-    repo: "api",
-    pullNumber: 7,
-    headSha: "abc123",
-    eventName: "pull_request.opened",
-  },
+  payload: routingJobPayload,
   idempotencyKey: "routing:delivery-1",
   attemptCount: 1,
   maxAttempts: 5,
@@ -33,11 +40,13 @@ const jobLease = { jobId: "job-1", lockedBy: "worker-1", attemptCount: 1, maxAtt
 const policyJobPayload = {
   kind: "evaluate_human_review_policy" as const,
   deliveryId: "review-delivery-1",
-  installationId: "123",
-  repositoryId: "456",
-  owner: "acme",
-  repo: "app",
-  pullNumber: 7,
+  workspaceId: "ws_local",
+  providerConnectionId: "123",
+  changeRequest: {
+    repository: { provider: "github" as const, externalId: "456", owner: "acme", name: "app" },
+    externalId: "7",
+    number: 7,
+  },
 };
 
 function buildQueueWithJob() {
@@ -59,16 +68,18 @@ describe("runWorkerOnce", () => {
         kind: "process_pull_request",
         status: "running",
         payload: {
-          kind: "process_pull_request",
-          deliveryId: "delivery-1",
-          installationId: "123",
-          repositoryId: "456",
-          owner: "acme",
-          repo: "app",
-          pullNumber: 7,
-          baseSha: "trusted-base",
-          headSha: "abc",
-          eventName: "pull_request.opened",
+          ...routingJobPayload,
+          providerConnectionId: "123",
+          changeRequest: {
+            ...routingJobPayload.changeRequest,
+            repository: {
+              ...routingJobPayload.changeRequest.repository,
+              externalId: "456",
+              name: "app",
+            },
+            headRevision: "abc",
+          },
+          routingKey: "routing:ws_local:github:456:7:trusted-base:abc",
         },
         idempotencyKey: "routing:delivery-1",
         attemptCount: 1,
@@ -92,10 +103,12 @@ describe("runWorkerOnce", () => {
 
     expect(processRoutingJob).toHaveBeenCalledWith(
       expect.objectContaining({
-        kind: "process_pull_request",
+        kind: "process_change_request",
         deliveryId: "delivery-1",
-        baseSha: "trusted-base",
-        headSha: "abc",
+        changeRequest: expect.objectContaining({
+          baseRevision: "trusted-base",
+          headRevision: "abc",
+        }),
       }),
       {},
     );
@@ -130,19 +143,15 @@ describe("runWorkerOnce", () => {
     });
 
     expect(processHumanReviewPolicyJob).toHaveBeenCalledWith(
-      {
-        kind: "evaluate_human_review_policy",
-        deliveryId: "review-delivery-1",
-        installationId: "123",
-        repositoryId: "456",
-        owner: "acme",
-        repo: "app",
-        pullNumber: 7,
-      },
+      policyJobPayload,
       policyServices,
     );
     expect(buildHumanReviewPolicyServices).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "evaluate_human_review_policy", repositoryId: "456", pullNumber: 7 }),
+      expect.objectContaining({
+        kind: "evaluate_human_review_policy",
+        providerConnectionId: "123",
+        changeRequest: expect.objectContaining({ number: 7 }),
+      }),
     );
     expect(processRoutingJob).not.toHaveBeenCalled();
     expect(queue.markSucceeded).toHaveBeenCalledWith(jobLease, expect.any(Date));
@@ -477,7 +486,7 @@ describe("runWorkerOnce", () => {
     queue.claimNext.mockResolvedValue({
       ...jobRecord,
       status: "running",
-      payload: { ...(jobRecord.payload as object), installationId: 99 },
+      payload: { ...(jobRecord.payload as object), providerConnectionId: 99 },
     });
     const processRoutingJob = vi.fn(async () => {});
 
@@ -505,13 +514,11 @@ describe("runWorkerOnce", () => {
       kind: "evaluate_human_review_policy",
       status: "running",
       payload: {
-        kind: "evaluate_human_review_policy",
-        deliveryId: "review-delivery-1",
-        installationId: "123",
-        repositoryId: "456",
-        owner: "",
-        repo: "app",
-        pullNumber: 7,
+        ...policyJobPayload,
+        changeRequest: {
+          ...policyJobPayload.changeRequest,
+          repository: { ...policyJobPayload.changeRequest.repository, owner: "" },
+        },
       },
     });
     const processHumanReviewPolicyJob = vi.fn(async () => {});
@@ -536,10 +543,16 @@ describe("runWorkerOnce", () => {
   });
 
   it.each([
-    ["installation ID", { installationId: "9007199254740992" }],
-    ["repository ID", { repositoryId: "9007199254740992" }],
-    ["pull number", { pullNumber: Number.MAX_SAFE_INTEGER + 1 }],
-  ])("rejects an unsafe %s permanently", async (_field, unsafeValue) => {
+    ["provider connection ID", { providerConnectionId: 99 }],
+    ["repository ID", { changeRequest: {
+      ...routingJobPayload.changeRequest,
+      repository: { ...routingJobPayload.changeRequest.repository, externalId: "" },
+    } }],
+    ["pull number", { changeRequest: {
+      ...routingJobPayload.changeRequest,
+      number: Number.MAX_SAFE_INTEGER + 1,
+    } }],
+  ])("rejects an invalid %s permanently", async (_field, unsafeValue) => {
     const queue = buildQueueWithJob();
     queue.claimNext.mockResolvedValue({
       ...jobRecord,

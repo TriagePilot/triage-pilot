@@ -41,9 +41,9 @@ importers:
       '@triagepilot/db':
         specifier: workspace:*
         version: link:../../packages/db
-      '@triagepilot/github':
+      '@triagepilot/provider-github':
         specifier: workspace:*
-        version: link:../../packages/github
+        version: link:../../packages/provider-github
       '@triagepilot/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -90,9 +90,9 @@ importers:
       '@triagepilot/db':
         specifier: workspace:*
         version: link:../../packages/db
-      '@triagepilot/github':
+      '@triagepilot/provider-github':
         specifier: workspace:*
-        version: link:../../packages/github
+        version: link:../../packages/provider-github
       '@triagepilot/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -142,7 +142,7 @@ importers:
         specifier: ^8.11.10
         version: 8.20.0
 
-  packages/github:
+  packages/provider-github:
     dependencies:
       '@octokit/app':
         specifier: ^15.1.2

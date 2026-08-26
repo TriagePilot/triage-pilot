@@ -5,16 +5,20 @@ import { processRoutingJob } from "../src/processor";
 import { PermanentJobError } from "../src/errors";
 
 const message: RoutingJobMessage = {
-  kind: "process_pull_request",
+  kind: "process_change_request",
   deliveryId: "delivery-1",
-  installationId: "99",
-  repositoryId: "101",
-  owner: "acme",
-  repo: "api",
-  pullNumber: 7,
-  baseSha: "trusted-base-123",
-  headSha: "abc123",
-  eventName: "pull_request.opened",
+  eventName: "change_request.opened",
+  workspaceId: "ws_local",
+  providerConnectionId: "99",
+  changeRequest: {
+    repository: { provider: "github", externalId: "101", owner: "acme", name: "api" },
+    externalId: "7",
+    number: 7,
+    baseRevision: "trusted-base-123",
+    headRevision: "abc123",
+  },
+  isDraft: false,
+  routingKey: "routing:ws_local:github:101:7:trusted-base-123:abc123",
 };
 
 function buildRoutingServices({ config }: { config: string }) {
@@ -54,7 +58,7 @@ describe("processRoutingJob", () => {
     } as const;
     const services = buildRoutingServices({ config: configByRef.abc123 });
     services.fetchConfig.mockImplementationOnce(async (input) =>
-      configByRef[input.baseSha as keyof typeof configByRef],
+      configByRef[input.changeRequest.baseRevision as keyof typeof configByRef],
     );
 
     await processRoutingJob(message, services);
@@ -217,11 +221,13 @@ ownership:
 
     expect(services.enqueueHumanReviewPolicyEvaluation).toHaveBeenCalledWith({
       deliveryId: "routing-policy:delivery-1",
-      installationId: "99",
-      repositoryId: "101",
-      owner: "acme",
-      repo: "api",
-      pullNumber: 7,
+      workspaceId: "ws_local",
+      providerConnectionId: "99",
+      changeRequest: {
+        repository: { provider: "github", externalId: "101", owner: "acme", name: "api" },
+        externalId: "7",
+        number: 7,
+      },
     });
   });
 

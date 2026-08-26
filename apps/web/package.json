@@ -14,7 +14,7 @@
     "@triagepilot/contracts": "workspace:*",
     "@triagepilot/core": "workspace:*",
     "@triagepilot/db": "workspace:*",
-    "@triagepilot/github": "workspace:*",
+    "@triagepilot/provider-github": "workspace:*",
     "@triagepilot/shared": "workspace:*",
     "@vitejs/plugin-react": "^4.3.4",
     "hono": "^4.12.34",

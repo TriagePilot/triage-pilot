@@ -1,8 +1,9 @@
 import {
   createInstallationRequester,
   GitHubAdapter,
+  GitHubConfigurationSource,
   type GitHubAppCredentials,
-} from "@triagepilot/github";
+} from "@triagepilot/provider-github";
 import { trustedBaseSha, type HumanReviewPolicyJobPayload, type ScoreComponent } from "@triagepilot/contracts";
 import {
   createJobQueue,
@@ -66,20 +67,14 @@ export function createWorkerRoutingServiceFactory(input: {
 
     return {
       async fetchConfig() {
-        try {
-          const configRef = trustedBaseSha(message) ?? readNestedString(await pullRequest(), ["base", "sha"]);
-          if (!configRef) throw new Error("pull request base SHA is unavailable");
-          const response = await (await requester()).request("GET /repos/{owner}/{repo}/contents/{path}", {
-            owner: repository.owner,
-            repo: repository.name,
-            path: ".github/triagepilot.yml",
-            ref: configRef,
-          });
-          return decodeGitHubContent(response.data);
-        } catch (error) {
-          if (isGitHubNotFound(error)) return "";
-          throw error;
-        }
+        const trustedRevision = trustedBaseSha(message) ?? readNestedString(await pullRequest(), ["base", "sha"]);
+        if (!trustedRevision) throw new Error("pull request base SHA is unavailable");
+        const document = await new GitHubConfigurationSource(await requester()).loadRepository({
+          workspaceId: message.workspaceId,
+          repository,
+          trustedRevision,
+        });
+        return document?.content ?? "";
       },
 
       async fetchChangedFiles() {
@@ -679,12 +674,6 @@ async function ensureInitialPolicyCheck(input: {
   return created.checkRunId;
 }
 
-function decodeGitHubContent(data: unknown): string {
-  if (typeof data !== "object" || data === null || !("content" in data)) return "";
-  const content = String(data.content).replace(/\s/g, "");
-  return Buffer.from(content, "base64").toString("utf8");
-}
-
 function toChangedFile(file: unknown): ChangedFileMetadata {
   return {
     path: readString(file, "filename"),
@@ -711,10 +700,6 @@ function readNestedString(value: unknown, path: string[]): string {
     current = current[part as keyof typeof current];
   }
   return typeof current === "string" ? current : "";
-}
-
-function isGitHubNotFound(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "status" in error && error.status === 404;
 }
 
 function toSafeInteger(value: string): number {

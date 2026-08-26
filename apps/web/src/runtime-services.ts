@@ -9,7 +9,7 @@ import {
   updateInstallationRepositories,
   type createDatabase,
 } from "@triagepilot/db";
-import type { GitHubAppCredentialShape } from "@triagepilot/github";
+import type { GitHubAppCredentialShape } from "@triagepilot/provider-github";
 import { sql } from "kysely";
 
 import type { WebServices } from "./app";

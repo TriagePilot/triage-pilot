@@ -46,18 +46,20 @@ describe("GitHub webhook route", () => {
       installation: { githubInstallationId: "99", accountLogin: "AcMe" },
       repository: { githubRepositoryId: "101", owner: "AcMe", name: "api" },
       payload: {
-        kind: "process_pull_request",
+        kind: "process_change_request",
         deliveryId: "delivery-1",
-        installationId: "99",
-        repositoryId: "101",
-        owner: "AcMe",
-        repo: "api",
-        pullNumber: 7,
-        baseSha: "trusted-base-123",
-        headSha: "abc123",
+        eventName: "change_request.opened",
+        workspaceId: "ws_local",
+        providerConnectionId: "99",
+        changeRequest: {
+          repository: { provider: "github", externalId: "101", owner: "AcMe", name: "api" },
+          externalId: "7",
+          number: 7,
+          baseRevision: "trusted-base-123",
+          headRevision: "abc123",
+        },
         isDraft: false,
-        eventName: "pull_request.opened",
-        routingKey: "routing:101:7:trusted-base-123:abc123",
+        routingKey: "routing:ws_local:github:101:7:trusted-base-123:abc123",
       },
     });
   });
@@ -133,18 +135,20 @@ describe("GitHub webhook route", () => {
         eventName: "pull_request_review",
         payload: expect.objectContaining({
           kind: "evaluate_human_review_policy",
-          pullNumber: 7,
+          changeRequest: expect.objectContaining({ number: 7 }),
         }),
       }),
     );
     expect(acceptHumanReviewPolicyDelivery.mock.calls[0]?.[0]?.payload).toEqual({
       kind: "evaluate_human_review_policy",
       deliveryId: "delivery-review-1",
-      installationId: "99",
-      repositoryId: "101",
-      owner: "AcMe",
-      repo: "api",
-      pullNumber: 7,
+      workspaceId: "ws_local",
+      providerConnectionId: "99",
+      changeRequest: {
+        repository: { provider: "github", externalId: "101", owner: "AcMe", name: "api" },
+        externalId: "7",
+        number: 7,
+      },
     });
   });
 

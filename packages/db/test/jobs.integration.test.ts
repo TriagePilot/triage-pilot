@@ -6,15 +6,20 @@ import { applyFixedRetention } from "../src/retention";
 import { withPostgresTestDatabase } from "./postgres";
 
 const payload = {
-  kind: "process_pull_request" as const,
+  kind: "process_change_request" as const,
   deliveryId: "delivery-1",
-  installationId: "99",
-  repositoryId: "101",
-  owner: "acme",
-  repo: "api",
-  pullNumber: 7,
-  headSha: "abc123",
-  eventName: "pull_request.opened",
+  eventName: "change_request.opened",
+  workspaceId: "ws_local",
+  providerConnectionId: "99",
+  changeRequest: {
+    repository: { provider: "github" as const, externalId: "101", owner: "acme", name: "api" },
+    externalId: "7",
+    number: 7,
+    baseRevision: "base-123",
+    headRevision: "abc123",
+  },
+  isDraft: false,
+  routingKey: "routing:ws_local:github:101:7:base-123:abc123",
 };
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL job operations", () => {

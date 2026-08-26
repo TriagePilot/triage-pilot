@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import type { CredentialProvider, ProviderConnectionId, WorkspaceId } from "@triagepilot/contracts";
 
 export interface GitHubAppCredentials {
   appId: string;
@@ -7,6 +8,19 @@ export interface GitHubAppCredentials {
 
 export interface GitHubAppCredentialShape extends GitHubAppCredentials {
   webhookSecret: string;
+}
+
+export class GitHubCredentialProvider implements CredentialProvider<GitHubAppCredentials> {
+  constructor(private readonly credential: GitHubAppCredentials) {
+    validateGitHubAppCredentials(credential);
+  }
+
+  async getCredential(_input: {
+    workspaceId: WorkspaceId;
+    providerConnectionId: ProviderConnectionId;
+  }): Promise<GitHubAppCredentials> {
+    return { ...this.credential };
+  }
 }
 
 async function readSecret(source: NodeJS.ProcessEnv, directName: string, fileName: string): Promise<string> {

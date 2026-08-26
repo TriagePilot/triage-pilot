@@ -1,5 +1,11 @@
 import { App } from "@octokit/app";
-import type { RiskTier } from "@triagepilot/contracts";
+import type {
+  ConfigurationDocument,
+  ConfigurationSource,
+  RepositoryRef as ContractRepositoryRef,
+  RiskTier,
+  WorkspaceId,
+} from "@triagepilot/contracts";
 import { HUMAN_REVIEW_POLICY_CHECK_NAME } from "@triagepilot/shared";
 
 const PAGE_SIZE = 100;
@@ -12,6 +18,42 @@ const RISK_LABELS: Record<RiskTier, { name: string; color: string; description: 
 type Requester = {
   request(route: string, parameters: Record<string, unknown>): Promise<{ data: unknown }>;
 };
+
+const CONFIGURATION_PATHS = [".triagepilot.yml", ".github/triagepilot.yml"] as const;
+
+export class GitHubConfigurationSource implements ConfigurationSource {
+  constructor(private readonly octokit: Requester) {}
+
+  async loadOrganization(_workspaceId: WorkspaceId): Promise<null> {
+    return null;
+  }
+
+  async loadRepository(input: {
+    workspaceId: WorkspaceId;
+    repository: ContractRepositoryRef;
+    trustedRevision: string;
+  }): Promise<ConfigurationDocument | null> {
+    for (const path of CONFIGURATION_PATHS) {
+      try {
+        const response = await this.octokit.request("GET /repos/{owner}/{repo}/contents/{path}", {
+          owner: input.repository.owner,
+          repo: input.repository.name,
+          path,
+          ref: input.trustedRevision,
+        });
+        return {
+          content: decodeGitHubContent(response.data),
+          revision: input.trustedRevision,
+          path,
+        };
+      } catch (error) {
+        if (!isGitHubStatus(error, 404)) throw error;
+      }
+    }
+
+    return null;
+  }
+}
 
 export interface RepositoryRef {
   owner: string;
@@ -310,6 +352,11 @@ function readLabelName(label: unknown): string | undefined {
   if (typeof label !== "object" || label === null || !("name" in label)) return undefined;
   const name = String(label.name).trim();
   return name || undefined;
+}
+
+function decodeGitHubContent(data: unknown): string {
+  if (!isRecord(data) || typeof data.content !== "string") return "";
+  return Buffer.from(data.content.replace(/\s/g, ""), "base64").toString("utf8");
 }
 
 function isGitHubStatus(error: unknown, status: number): boolean {

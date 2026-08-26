@@ -1,5 +1,5 @@
 import type { HumanReviewPolicyDecision } from "@triagepilot/db";
-import type { PullRequestReview } from "@triagepilot/github";
+import type { PullRequestReview } from "@triagepilot/provider-github";
 import type { HumanReviewPolicyJobPayload } from "@triagepilot/contracts";
 
 import { evaluateHumanReviewPolicy, type HumanReviewPolicyState } from "./review-policy";

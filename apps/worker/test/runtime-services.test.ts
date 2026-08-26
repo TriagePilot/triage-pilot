@@ -10,26 +10,32 @@ import type { RoutingJobMessage } from "../src/processor";
 import { processHumanReviewPolicyJob } from "../src/review-policy-processor";
 
 const message: RoutingJobMessage = {
-  kind: "process_pull_request",
+  kind: "process_change_request",
   deliveryId: "delivery-1",
-  installationId: "99",
-  repositoryId: "101",
-  owner: "acme",
-  repo: "api",
-  pullNumber: 7,
-  baseSha: "trusted-base-123",
-  headSha: "unmerged-head-456",
-  eventName: "pull_request.opened",
+  eventName: "change_request.opened",
+  workspaceId: "ws_local",
+  providerConnectionId: "99",
+  changeRequest: {
+    repository: { provider: "github", externalId: "101", owner: "acme", name: "api" },
+    externalId: "7",
+    number: 7,
+    baseRevision: "trusted-base-123",
+    headRevision: "unmerged-head-456",
+  },
+  isDraft: false,
+  routingKey: "routing:ws_local:github:101:7:trusted-base-123:unmerged-head-456",
 };
 
 const policyMessage = {
   kind: "evaluate_human_review_policy" as const,
   deliveryId: "review-delivery-1",
-  installationId: "99",
-  repositoryId: "101",
-  owner: "acme",
-  repo: "api",
-  pullNumber: 7,
+  workspaceId: "ws_local",
+  providerConnectionId: "99",
+  changeRequest: {
+    repository: { provider: "github" as const, externalId: "101", owner: "acme", name: "api" },
+    externalId: "7",
+    number: 7,
+  },
 };
 
 describe("worker routing GitHub reads", () => {
@@ -74,14 +80,17 @@ describe("worker routing GitHub reads", () => {
     expect(request).toHaveBeenCalledWith("GET /repos/{owner}/{repo}/contents/{path}", {
       owner: "acme",
       repo: "api",
-      path: ".github/triagepilot.yml",
+      path: ".triagepilot.yml",
       ref: "trusted-base-123",
     });
   });
 
   it("resolves a legacy queued payload through the current PR base and never the head SHA", async () => {
     const request = configRequester();
-    const { baseSha: _baseSha, ...legacyMessage } = message;
+    const legacyMessage: RoutingJobMessage = {
+      ...message,
+      changeRequest: { ...message.changeRequest, baseRevision: "" },
+    };
     const services = buildServices(legacyMessage, request);
 
     await expect(services.fetchConfig(legacyMessage)).resolves.toBe("version: 1\nmode: shadow\n");
@@ -95,7 +104,7 @@ describe("worker routing GitHub reads", () => {
       ["GET /repos/{owner}/{repo}/contents/{path}", {
         owner: "acme",
         repo: "api",
-        path: ".github/triagepilot.yml",
+        path: ".triagepilot.yml",
         ref: "trusted-base-123",
       }],
     ]);
@@ -473,15 +482,7 @@ describe("worker routing GitHub reads", () => {
       db: knownRepositoryDatabase() as never,
       github: { appId: "123", privateKey: "test-private-key" },
       createRequester,
-    })({
-      kind: "evaluate_human_review_policy",
-      deliveryId: "review-delivery-1",
-      installationId: "99",
-      repositoryId: "101",
-      owner: "acme",
-      repo: "api",
-      pullNumber: 7,
-    });
+    })(policyMessage);
     const decision: HumanReviewPolicyDecision = {
       decisionId: "decision-1",
       owner: "acme",

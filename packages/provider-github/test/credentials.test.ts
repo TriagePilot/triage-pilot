@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { loadGitHubAppCredentials, loadGitHubCredentials } from "../src/credentials";
+import { GitHubCredentialProvider, loadGitHubAppCredentials, loadGitHubCredentials } from "../src/credentials";
 
 describe("loadGitHubCredentials", () => {
   it("loads mounted private-key and webhook-secret files", async () => {
@@ -59,5 +59,20 @@ describe("loadGitHubAppCredentials", () => {
     });
 
     expect(credentials).not.toHaveProperty("webhookSecret");
+  });
+});
+
+describe("GitHubCredentialProvider", () => {
+  it("provides the configured App credential through the provider-neutral port", async () => {
+    const credential = {
+      appId: "123",
+      privateKey: "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----",
+    };
+    const provider = new GitHubCredentialProvider(credential);
+
+    await expect(provider.getCredential({
+      workspaceId: "workspace-1",
+      providerConnectionId: "connection-1",
+    })).resolves.toEqual(credential);
   });
 });

@@ -9,11 +9,13 @@ import {
 const message = {
   kind: "evaluate_human_review_policy" as const,
   deliveryId: "review-delivery-1",
-  installationId: "99",
-  repositoryId: "101",
-  owner: "acme",
-  repo: "api",
-  pullNumber: 7,
+  workspaceId: "ws_local",
+  providerConnectionId: "99",
+  changeRequest: {
+    repository: { provider: "github" as const, externalId: "101", owner: "acme", name: "api" },
+    externalId: "7",
+    number: 7,
+  },
 };
 
 const decision: HumanReviewPolicyDecision = {

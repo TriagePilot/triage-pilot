@@ -9,10 +9,10 @@ TriagePilot is a TypeScript monorepo with two portable Node.js processes and Pos
 
 ## Packages
 
-- `packages/config` parses `.github/triagepilot.yml` and returns structured diagnostics.
+- `packages/config` parses and resolves repository and organization configuration with structured diagnostics.
 - `packages/core` contains pure ownership, risk, and routing logic.
 - `packages/db` owns schema migrations, installations, repositories, webhook receipts, routing decisions and action outcomes, the worker heartbeat, retention, and the PostgreSQL job queue.
-- `packages/github` owns GitHub App authentication, webhook verification, and API operations.
+- `packages/provider-github` owns GitHub App authentication, webhook verification, and API operations.
 - `packages/shared` contains small cross-package types and constants.
 
 ## Request Flow
@@ -20,7 +20,7 @@ TriagePilot is a TypeScript monorepo with two portable Node.js processes and Pos
 1. GitHub sends a signed webhook to `apps/web`.
 2. The web process accepts only routing-relevant pull-request actions from the configured organization. It records every accepted delivery ID with its action and hook ID, but creates at most one routing job for a repository, pull request, signed base SHA, and head SHA in a transaction.
 3. The worker claims the job with PostgreSQL row locking and obtains an installation token.
-4. The worker reads `.github/triagepilot.yml` from the signed base SHA, while the head SHA is reserved for checks and pull-request action targeting. An unmerged pull request therefore cannot enable writes by changing its own configuration. For a pre-upgrade queued job without a base SHA, the worker resolves the current pull request's `base.sha` before the configuration read and never substitutes the head SHA.
+4. The worker reads `.triagepilot.yml`, falling back to `.github/triagepilot.yml`, from the signed base SHA. The head SHA is reserved for checks and pull-request action targeting. An unmerged pull request therefore cannot enable writes by changing its own configuration. For a pre-upgrade queued job without a base SHA, the worker resolves the current pull request's `base.sha` before the configuration read and never substitutes the head SHA.
 5. Pure packages parse the configuration and calculate a routing decision without fetching raw diff contents. Low-risk decisions select no human reviewers, medium-risk decisions select one, and high-risk decisions select at most the configured cap of one or two. Reviewer targets are individual GitHub users; team handles are invalid configuration.
 6. The worker stores the selected reviewer list, requested count, and any eligibility shortfall with the intended action. The legacy first-reviewer field remains populated for compatibility.
 7. Shadow mode stops without a GitHub write. For enforce mode, the worker makes one fresh pull-request read immediately before beginning the action sequence and compares the current head SHA with the signed event head SHA. A mismatch becomes a permanent action failure before any check, label, comment, reviewer, or approval write. A matching action synchronizes exactly one managed `triagepilot:risk-low`, `triagepilot:risk-medium`, or `triagepilot:risk-high` label while leaving other labels untouched.

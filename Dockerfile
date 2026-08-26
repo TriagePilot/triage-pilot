@@ -13,7 +13,7 @@ COPY packages/shared/package.json packages/shared/package.json
 COPY packages/config/package.json packages/config/package.json
 COPY packages/core/package.json packages/core/package.json
 COPY packages/db/package.json packages/db/package.json
-COPY packages/github/package.json packages/github/package.json
+COPY packages/provider-github/package.json packages/provider-github/package.json
 RUN pnpm install --frozen-lockfile
 
 FROM deps AS build
