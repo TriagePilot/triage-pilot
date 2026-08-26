@@ -40,8 +40,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
             action_failed_at: actionFailedAt,
             policy_check_state: index === 51 ? "in_progress" : "not_started",
             risk_score: index,
-            selected_reviewer: index % 2 === 0 ? "@acme/reviewers" : null,
-            selected_reviewers: JSON.stringify(index % 2 === 0 ? ["@acme/reviewers", "@devon"] : []),
+            selected_reviewer: index % 2 === 0 ? "@team-a7f19c/reviewers" : null,
+            selected_reviewers: JSON.stringify(index % 2 === 0 ? ["@team-a7f19c/reviewers", "@user-b4e82d"] : []),
             no_human_reason: null,
             details:
               index === 51

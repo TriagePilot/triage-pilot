@@ -84,7 +84,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
       await setup.query(`
         insert into routing_decisions (
           delivery_id, action, risk_score, selected_reviewer, details
-        ) values ('legacy-delivery', 'request_human_review', 50, '@legacy', '{}')
+        ) values ('legacy-delivery', 'request_human_review', 50, '@user-1f9c4a', '{}')
       `);
       await setup.end();
 
@@ -95,7 +95,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         verification.query<{ selected_reviewers: string[] }>(
           "select selected_reviewers from routing_decisions where delivery_id = 'legacy-delivery'",
         ),
-      ).resolves.toMatchObject({ rows: [{ selected_reviewers: ["@legacy"] }] });
+      ).resolves.toMatchObject({ rows: [{ selected_reviewers: ["@user-1f9c4a"] }] });
       await expect(
         verification.query(
           "update routing_decisions set selected_reviewers = $1::jsonb where delivery_id = 'legacy-delivery'",

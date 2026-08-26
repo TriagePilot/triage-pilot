@@ -10,7 +10,7 @@ mode: enforce
 routing:
   high_risk_reviewers: 2
   exclude_target_branches: ["main", "master"]
-  exclude_source_branch_patterns: ["dependabot/**"]
+  exclude_source_branch_patterns: ["automated-updates/**"]
 risk:
   size:
     high_changed_files: 120
@@ -31,8 +31,8 @@ risk:
 ownership:
   rules:
     - paths: ["src/auth/**"]
-      reviewers: ["@sasha"]
-  fallback_reviewers: ["@sasha"]
+      reviewers: ["@user-f37a82"]
+  fallback_reviewers: ["@user-f37a82"]
 `);
 
     expect(result.ok).toBe(true);
@@ -41,15 +41,15 @@ ownership:
     expect(result.config.mode).toBe("enforce");
     expect(result.config.routing.highRiskReviewers).toBe(2);
     expect(result.config.routing.excludeTargetBranches).toEqual(["main", "master"]);
-    expect(result.config.routing.excludeSourceBranchPatterns).toEqual(["dependabot/**"]);
+    expect(result.config.routing.excludeSourceBranchPatterns).toEqual(["automated-updates/**"]);
     expect(result.config.routing.includeDraftPullRequests).toBe(false);
     expect(result.config.risk.size).toEqual({ highChangedFiles: 120, highChangedLines: 6000 });
     expect(result.config.risk.thresholds).toEqual({ low: 25, high: 70 });
     expect(result.config.risk.paths[0]).toEqual({ pattern: "src/auth/**", weight: 30, tag: "auth" });
     expect(result.config.risk.suppressors[0]).toEqual({ ifAllMatch: ["docs/**", "*.md", "*.mdx"], ceiling: 25 });
     expect(result.config.risk.aiAuthorship).toEqual({ enabled: true, modifier: 10 });
-    expect(result.config.ownership.rules[0]).toEqual({ paths: ["src/auth/**"], reviewers: ["@sasha"] });
-    expect(result.config.ownership.fallbackReviewers).toEqual(["@sasha"]);
+    expect(result.config.ownership.rules[0]).toEqual({ paths: ["src/auth/**"], reviewers: ["@user-f37a82"] });
+    expect(result.config.ownership.fallbackReviewers).toEqual(["@user-f37a82"]);
   });
 
   it("defaults missing configuration to shadow mode", () => {
@@ -95,7 +95,7 @@ version: 1
 ownership:
   rules:
     - paths: ["src/**"]
-      reviewers: ["sasha"]
+      reviewers: ["user-f37a82"]
   fallback_reviewers: []
 `);
 
@@ -105,8 +105,8 @@ ownership:
   });
 
   it.each([
-    'ownership:\n  rules:\n    - paths: ["src/**"]\n      reviewers: ["@acme/security"]\n',
-    'ownership:\n  fallback_reviewers: ["@acme/security"]\n',
+    'ownership:\n  rules:\n    - paths: ["src/**"]\n      reviewers: ["@team-a7f19c/security"]\n',
+    'ownership:\n  fallback_reviewers: ["@team-a7f19c/security"]\n',
   ])("rejects team reviewer handles", (ownership) => {
     const result = parseTriagePilotConfig(`version: 1\nmode: enforce\n${ownership}`);
     expect(result.ok).toBe(false);

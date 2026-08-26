@@ -96,7 +96,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
         action: "request_human_review",
         actionStatus: "pending",
         riskScore: 5,
-        selectedReviewers: ["@alice"],
+        selectedReviewers: ["@user-d82a5f"],
         details: { pullNumber: 7 },
       });
       const failedAt = new Date("2026-08-18T12:03:00.000Z");
@@ -106,7 +106,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
         decisionId: decision.decisionId,
         expectedHeadSha: "abc123",
         riskTier: "medium",
-        selectedReviewers: ["@alice"],
+        selectedReviewers: ["@user-d82a5f"],
       });
 
       const policyServices = createWorkerHumanReviewPolicyServiceFactory({

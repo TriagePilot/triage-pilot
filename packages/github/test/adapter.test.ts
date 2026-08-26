@@ -95,14 +95,14 @@ describe("GitHubAdapter", () => {
 
     await adapter.requestHumanReviewers({
       pullRequest: { owner: "acme", repo: "app", pullNumber: 7 },
-      reviewers: ["@devon", "@acme/security", "@devon"],
+      reviewers: ["@user-b4e82d", "@team-a7f19c/security", "@user-b4e82d"],
     });
 
     expect(request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", {
       owner: "acme",
       repo: "app",
       pull_number: 7,
-      reviewers: ["devon"],
+      reviewers: ["user-b4e82d"],
       team_reviewers: ["security"],
     });
   });
@@ -189,7 +189,7 @@ describe("GitHubAdapter", () => {
   it("lists valid pull-request reviews across pages and ignores malformed records", async () => {
     const firstPage: unknown[] = Array.from({ length: 100 }, () => null);
     firstPage[0] = {
-      user: { login: "devon", type: "User" },
+      user: { login: "user-b4e82d", type: "User" },
       state: "APPROVED",
       commit_id: "head-1",
       submitted_at: "2026-08-21T09:00:00Z",
@@ -199,10 +199,10 @@ describe("GitHubAdapter", () => {
       .mockResolvedValueOnce({ data: firstPage })
       .mockResolvedValueOnce({
         data: [
-          { user: { login: "jules", type: "Bot" }, state: "CHANGES_REQUESTED", commit_id: null, submitted_at: null },
+          { user: { login: "user-7a3d9c", type: "Bot" }, state: "CHANGES_REQUESTED", commit_id: null, submitted_at: null },
           { user: {}, state: "APPROVED" },
           { user: { login: "   " }, state: "APPROVED" },
-          { user: { login: "sasha" }, state: "   " },
+          { user: { login: "user-f37a82" }, state: "   " },
         ],
       });
     const adapter = new GitHubAdapter({ request } as never);
@@ -210,13 +210,13 @@ describe("GitHubAdapter", () => {
     await expect(adapter.listPullRequestReviews({ pullRequest: { owner: "acme", repo: "app", pullNumber: 7 } })).resolves
       .toEqual([
         {
-          userLogin: "devon",
+          userLogin: "user-b4e82d",
           userType: "User",
           state: "APPROVED",
           commitId: "head-1",
           submittedAt: "2026-08-21T09:00:00Z",
         },
-        { userLogin: "jules", userType: "Bot", state: "CHANGES_REQUESTED", commitId: null, submittedAt: null },
+        { userLogin: "user-7a3d9c", userType: "Bot", state: "CHANGES_REQUESTED", commitId: null, submittedAt: null },
       ]);
 
     expect(request).toHaveBeenNthCalledWith(1, "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews", {

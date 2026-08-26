@@ -52,7 +52,7 @@ describe("admin application", () => {
     expect(html).toContain('target="_blank"');
     expect(html).toContain('rel="noreferrer"');
     expect(html).toContain("Reviewers");
-    expect(html).toContain("@acme/reviewers, @devon");
+    expect(html).toContain("@team-a7f19c/reviewers, @user-b4e82d");
     expect(html).toContain("GitHub permission denied");
     expect(html).toContain("Review request rejected");
     expect(html.match(/<table/g)).toHaveLength(4);
@@ -203,8 +203,8 @@ const overview: OperationsOverview = {
       policyCheckState: "in_progress",
       riskScore: 55,
       riskBreakdown: null,
-      selectedReviewer: "@acme/reviewers",
-      selectedReviewers: ["@acme/reviewers", "@devon"],
+      selectedReviewer: "@team-a7f19c/reviewers",
+      selectedReviewers: ["@team-a7f19c/reviewers", "@user-b4e82d"],
       createdAt: "2026-08-18T10:00:00.000Z",
     },
   ],
