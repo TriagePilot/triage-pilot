@@ -5,6 +5,7 @@ import { buildNextRunAt } from "./jobs";
 import type { Database, DecisionOutboxTable } from "./kysely";
 
 type DatabaseExecutor = Kysely<Database> | Transaction<Database>;
+const DECISION_OUTBOX_LEASE_MS = 15 * 60 * 1000;
 
 export interface DecisionOutboxRecord {
   id: string;
@@ -21,8 +22,8 @@ export interface DecisionOutboxRecord {
 
 export interface DecisionOutboxRepository {
   claim(input: { limit: number; now: Date }): Promise<DecisionOutboxRecord[]>;
-  markPublished(input: { id: string; now: Date }): Promise<void>;
-  markFailed(input: { id: string; attemptCount: number; error: unknown; now: Date }): Promise<void>;
+  markPublished(input: { id: string; attemptCount: number; now: Date }): Promise<boolean>;
+  markFailed(input: { id: string; attemptCount: number; error: unknown; now: Date }): Promise<boolean>;
   listUnpublished(): Promise<DecisionOutboxRecord[]>;
 }
 
@@ -67,10 +68,12 @@ export async function markDecisionEventPublished(input: {
   db: Kysely<Database>;
   workspaceId: WorkspaceId;
   id: string;
+  attemptCount: number;
   now?: Date;
-}): Promise<void> {
-  await createDecisionOutboxRepository(input.db, input.workspaceId).markPublished({
+}): Promise<boolean> {
+  return await createDecisionOutboxRepository(input.db, input.workspaceId).markPublished({
     id: input.id,
+    attemptCount: input.attemptCount,
     now: input.now ?? new Date(),
   });
 }
@@ -105,7 +108,7 @@ export function createDecisionOutboxRepository(
             .updateTable("decision_outbox")
             .set({
               attempt_count: nextAttemptCount,
-              available_at: buildNextRunAt(input.now, nextAttemptCount),
+              available_at: buildLeaseExpiresAt(input.now),
             })
             .where("workspace_id", "=", workspaceId)
             .where("id", "=", candidate.id)
@@ -119,17 +122,20 @@ export function createDecisionOutboxRepository(
     },
 
     async markPublished(input) {
-      await db
+      const updated = await db
         .updateTable("decision_outbox")
         .set({ published_at: input.now, last_error: null })
         .where("workspace_id", "=", workspaceId)
         .where("id", "=", input.id)
+        .where("attempt_count", "=", input.attemptCount)
         .where("published_at", "is", null)
+        .returning("id")
         .execute();
+      return updated.length > 0;
     },
 
     async markFailed(input) {
-      await db
+      const updated = await db
         .updateTable("decision_outbox")
         .set({
           last_error: sanitizeError(input.error),
@@ -137,8 +143,11 @@ export function createDecisionOutboxRepository(
         })
         .where("workspace_id", "=", workspaceId)
         .where("id", "=", input.id)
+        .where("attempt_count", "=", input.attemptCount)
         .where("published_at", "is", null)
+        .returning("id")
         .execute();
+      return updated.length > 0;
     },
 
     async listUnpublished() {
@@ -168,8 +177,9 @@ export async function publishDecisionOutbox(input: {
   for (const event of events) {
     try {
       await input.sink.emit(event.payload);
-      await input.repository.markPublished({ id: event.id, now });
-      published += 1;
+      if (await input.repository.markPublished({ id: event.id, attemptCount: event.attemptCount, now })) {
+        published += 1;
+      }
     } catch (error) {
       await input.repository.markFailed({
         id: event.id,
@@ -202,4 +212,8 @@ function toDecisionOutboxRecord(row: Selectable<DecisionOutboxTable>): DecisionO
 function sanitizeError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.replaceAll(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 1_000) || "decision event sink failed";
+}
+
+function buildLeaseExpiresAt(now: Date): Date {
+  return new Date(now.getTime() + DECISION_OUTBOX_LEASE_MS);
 }

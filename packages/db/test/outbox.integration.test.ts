@@ -149,6 +149,92 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("decision outbox", () => 
       await expect(repository.listUnpublished()).resolves.toHaveLength(0);
     });
   });
+
+  it("does not emit concurrently while a claim is leased and ignores stale completions", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const repositoryId = await seedRepository(db, workspaceId, "101");
+      await persistDecisionWithEvent(db, workspaceId, {
+        decision: decisionInput(repositoryId, "delivery-1"),
+        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+      });
+      const repository = createDecisionOutboxRepository(db, workspaceId);
+      let releaseFirstSink: (() => void) | undefined;
+      const firstSink: DecisionEventSink = {
+        emit: vi.fn(() => new Promise<void>((resolve) => {
+          releaseFirstSink = resolve;
+        })),
+      };
+      const secondSink: DecisionEventSink = { emit: vi.fn(async () => {}) };
+      const firstPublish = publishDecisionOutbox({
+        repository,
+        sink: firstSink,
+        limit: 10,
+        now: new Date("2026-08-26T10:00:00.000Z"),
+      });
+
+      await vi.waitFor(() => expect(firstSink.emit).toHaveBeenCalledOnce());
+      await expect(publishDecisionOutbox({
+        repository,
+        sink: secondSink,
+        limit: 10,
+        now: new Date("2026-08-26T10:00:06.000Z"),
+      })).resolves.toEqual({ published: 0 });
+      expect(secondSink.emit).not.toHaveBeenCalled();
+
+      const leased = (await repository.listUnpublished())[0];
+      expect(leased).toEqual(expect.objectContaining({ attemptCount: 1, publishedAt: null }));
+      const secondClaim = (await repository.claim({
+        limit: 10,
+        now: new Date("2026-08-26T10:15:01.000Z"),
+      }))[0];
+      expect(secondClaim).toBeDefined();
+      if (secondClaim === undefined) throw new Error("expected expired lease to be claimable");
+      expect(secondClaim).toEqual(expect.objectContaining({ attemptCount: 2 }));
+
+      await repository.markFailed({
+        id: secondClaim.id,
+        attemptCount: 1,
+        error: new Error("stale failure"),
+        now: new Date("2026-08-26T10:15:02.000Z"),
+      });
+      await repository.markPublished({
+        id: secondClaim.id,
+        attemptCount: 1,
+        now: new Date("2026-08-26T10:15:03.000Z"),
+      });
+      await expect(repository.listUnpublished()).resolves.toEqual([
+        expect.objectContaining({
+          attemptCount: 2,
+          lastError: null,
+          publishedAt: null,
+        }),
+      ]);
+
+      releaseFirstSink?.();
+      await expect(firstPublish).resolves.toEqual({ published: 0 });
+      await expect(repository.listUnpublished()).resolves.toEqual([
+        expect.objectContaining({
+          attemptCount: 2,
+          lastError: null,
+          publishedAt: null,
+        }),
+      ]);
+
+      await repository.markFailed({
+        id: secondClaim.id,
+        attemptCount: 2,
+        error: new Error("current failure"),
+        now: new Date("2026-08-26T10:15:04.000Z"),
+      });
+      await expect(repository.listUnpublished()).resolves.toEqual([
+        expect.objectContaining({
+          attemptCount: 2,
+          lastError: "current failure",
+        }),
+      ]);
+    });
+  });
 });
 
 function decisionInput(repositoryId: string, deliveryId: string) {
