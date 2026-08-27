@@ -4,6 +4,7 @@ import {
   GitHubConfigurationSource,
   type GitHubAppCredentials,
 } from "@triagepilot/provider-github";
+import { resolveConfiguration as resolveEffectiveConfiguration } from "@triagepilot/config";
 import { trustedBaseSha, type HumanReviewPolicyJobPayload, type ScoreComponent } from "@triagepilot/contracts";
 import {
   createWorkspaceJobQueue,
@@ -15,11 +16,16 @@ import {
   updatePolicyCheckState,
   type createDatabase,
 } from "@triagepilot/db";
-import type { ChangedFileMetadata } from "@triagepilot/core";
+import {
+  activeApprovedReviewers,
+  evaluateHumanReviewPolicy,
+  type ChangedFileMetadata,
+  type ReviewMetadata,
+} from "@triagepilot/core";
+import type { ReviewPolicyApplicationPorts, RoutingApplicationPorts } from "@triagepilot/application";
 
 import type { RoutingJobMessage, RoutingJobServices } from "./processor";
 import { classifyWorkerError, PermanentJobError } from "./errors";
-import { activeApprovedReviewers, evaluateHumanReviewPolicy } from "./review-policy";
 import type { HumanReviewPolicyServices } from "./review-policy-processor";
 
 type Requester = Awaited<ReturnType<typeof createInstallationRequester>>;
@@ -29,8 +35,8 @@ export function createWorkerRoutingServiceFactory(input: {
   db: DatabaseClient;
   github: GitHubAppCredentials;
   createRequester?: typeof createInstallationRequester;
-}): (message: RoutingJobMessage) => RoutingJobServices {
-  return (message) => {
+}) {
+  return (message: RoutingJobMessage) => {
     const { changeRequest } = message;
     const { repository } = changeRequest;
     let requesterPromise: Promise<Requester> | null = null;
@@ -69,195 +75,206 @@ export function createWorkerRoutingServiceFactory(input: {
       return pullRequestPromise;
     }
 
-    return {
-      async fetchConfig() {
+    const services: RoutingJobServices = {
+      async resolveConfiguration() {
         const trustedRevision = trustedBaseSha(message) ?? readNestedString(await pullRequest(), ["base", "sha"]);
         if (!trustedRevision) throw new Error("pull request base SHA is unavailable");
-        const document = await new GitHubConfigurationSource(await requester()).loadRepository({
+        const result = await resolveEffectiveConfiguration({
           workspaceId: message.workspaceId,
           repository,
           trustedRevision,
+          source: new GitHubConfigurationSource(await requester()),
+          allowOrganizationEnforce: false,
         });
-        return document?.content ?? "";
-      },
-
-      async fetchChangedFiles() {
-        const files: ChangedFileMetadata[] = [];
-        for (let page = 1; ; page += 1) {
-          const response = await (await requester()).request("GET /repos/{owner}/{repo}/pulls/{pull_number}/files", {
-            owner: repository.owner,
-            repo: repository.name,
-            pull_number: changeRequest.number,
-            page,
-            per_page: 100,
-          });
-          if (!Array.isArray(response.data)) return files;
-          files.push(...response.data.map(toChangedFile));
-          if (response.data.length < 100) return files;
-        }
-      },
-
-      async fetchCommitMessages() {
-        const response = await (await requester()).request("GET /repos/{owner}/{repo}/pulls/{pull_number}/commits", {
-          owner: repository.owner,
-          repo: repository.name,
-          pull_number: changeRequest.number,
-          per_page: 100,
-        });
-        return Array.isArray(response.data)
-          ? response.data.map((commit) => readNestedString(commit, ["commit", "message"])).filter(Boolean)
-          : [];
-      },
-
-      async fetchPullRequestMetadata() {
-        const pullRequestData = await pullRequest();
-        const authorLogin = readNestedString(pullRequestData, ["user", "login"]);
-        return {
-          authorLogin,
-          authorHandle: authorLogin ? `@${authorLogin}` : "",
-          branchName: readNestedString(pullRequestData, ["head", "ref"]),
-          targetBranchName: readNestedString(pullRequestData, ["base", "ref"]),
-        };
-      },
-
-      async fetchActiveApprovedReviewers() {
-        const reviews = await new GitHubAdapter(await requester()).listPullRequestReviews({
-          pullRequest: { owner: repository.owner, repo: repository.name, pullNumber: changeRequest.number },
-        });
-        return activeApprovedReviewers(reviews);
-      },
-
-      async enqueueHumanReviewPolicyEvaluation(policy) {
-        await createWorkspaceJobQueue(input.db, message.workspaceId).enqueue({
-          provider: repository.provider,
-          providerConnectionId: message.providerConnectionId,
-          kind: "evaluate_human_review_policy",
-          payload: { kind: "evaluate_human_review_policy", ...policy },
-          idempotencyKey: `review-policy:${policy.deliveryId}`,
-        });
-      },
-
-      async getReviewerLoad(reviewersInput) {
-        return Object.fromEntries(reviewersInput.reviewers.map((reviewer) => [reviewer, 0]));
-      },
-
-      async updateRepositoryConfigState(state) {
         await input.db
           .updateTable("repositories")
           .set({
-            config_state: state.configState,
-            last_config_mode: state.mode,
+            config_state: result.ok ? "valid" : "invalid",
+            last_config_mode: result.ok ? result.config.mode : "shadow",
             updated_at: new Date(),
           })
           .where("workspace_id", "=", message.workspaceId)
           .where("id", "=", await repositoryId())
           .execute();
+        return result;
       },
 
-      async persistDecision(decision) {
-        const persisted = await persistRoutingDecision(input.db, message.workspaceId, {
-          repositoryId: await repositoryId(),
-          ...decision,
-        });
-        persistedDecisionId = persisted.decisionId;
-        return persisted;
-      },
+      provider: {
+        async fetchChangeRequestMetadata() {
+          const pullRequestData = await pullRequest();
+          const author = readNestedString(pullRequestData, ["user", "login"]);
+          return {
+            author,
+            sourceBranch: readNestedString(pullRequestData, ["head", "ref"]),
+            targetBranch: readNestedString(pullRequestData, ["base", "ref"]),
+            currentHeadRevision: readNestedString(pullRequestData, ["head", "sha"]),
+          };
+        },
 
-      async markActionSucceeded(decisionId, at) {
-        await persistActionSucceeded(input.db, message.workspaceId, decisionId, at);
-      },
+        async fetchChangedFiles() {
+          const files: ChangedFileMetadata[] = [];
+          for (let page = 1; ; page += 1) {
+            const response = await (await requester()).request("GET /repos/{owner}/{repo}/pulls/{pull_number}/files", {
+              owner: repository.owner,
+              repo: repository.name,
+              pull_number: changeRequest.number,
+              page,
+              per_page: 100,
+            });
+            if (!Array.isArray(response.data)) return files;
+            files.push(...response.data.map(toChangedFile));
+            if (response.data.length < 100) return files;
+          }
+        },
 
-      async markActionFailed(decisionId, error, at) {
-        await persistActionFailed(input.db, message.workspaceId, decisionId, error, at);
-      },
+        async fetchCommitMessages() {
+          const response = await (await requester()).request("GET /repos/{owner}/{repo}/pulls/{pull_number}/commits", {
+            owner: repository.owner,
+            repo: repository.name,
+            pull_number: changeRequest.number,
+            per_page: 100,
+          });
+          return Array.isArray(response.data)
+            ? response.data.map((commit) => readNestedString(commit, ["commit", "message"])).filter(Boolean)
+            : [];
+        },
 
-      async applyDecisionActions(action) {
-        persistedDecisionId = action.decisionId;
-        const githubRequester = await requester();
-        const pullRequest = {
-          owner: repository.owner,
-          repo: repository.name,
-          pullNumber: changeRequest.number,
-        };
-        const currentPullRequest = await githubRequester.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
-          owner: repository.owner,
-          repo: repository.name,
-          pull_number: changeRequest.number,
-        });
-        if (readNestedString(currentPullRequest.data, ["head", "sha"]) !== action.expectedHeadSha) {
-          throw new PermanentJobError("pull request head changed before enforce actions");
-        }
+        async fetchCurrentRevisionApprovals() {
+          const reviews = await new GitHubAdapter(await requester()).listPullRequestReviews({
+            pullRequest: { owner: repository.owner, repo: repository.name, pullNumber: changeRequest.number },
+          });
+          return activeApprovedReviewers(reviews.map(toReviewMetadata));
+        },
 
-        const adapter = new GitHubAdapter(githubRequester);
-        const route = action.action === "policy_approval"
-          ? "no_human"
-          : action.action === "no_eligible_reviewer"
-            ? "no_eligible_reviewer"
-            : "human_review";
-        const evaluation = evaluateHumanReviewPolicy({
-          route,
-          selectedReviewers: action.selectedReviewers ?? [],
-          headSha: action.expectedHeadSha,
-          reviews: [],
-        });
-        const checkRun = { owner: repository.owner, repo: repository.name, headSha: action.expectedHeadSha };
-        const policyCheckRunId = await ensureInitialPolicyCheck({
-          db: input.db,
-          workspaceId: message.workspaceId,
-          adapter,
-          checkRun,
-          decisionId: action.decisionId,
-          appId: toSafeInteger(input.github.appId),
-          state: evaluation.state,
-          summary: evaluation.summary,
-        });
+        async applyActions(action) {
+          persistedDecisionId = action.decisionId;
+          const githubRequester = await requester();
+          const pullRequest = {
+            owner: repository.owner,
+            repo: repository.name,
+            pullNumber: changeRequest.number,
+          };
+          const currentPullRequest = await githubRequester.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
+            owner: repository.owner,
+            repo: repository.name,
+            pull_number: changeRequest.number,
+          });
+          if (readNestedString(currentPullRequest.data, ["head", "sha"]) !== action.expectedHeadRevision) {
+            throw new PermanentJobError("pull request head changed before enforce actions");
+          }
 
-        try {
-          await adapter.writeRoutingCheck({
+          const adapter = new GitHubAdapter(githubRequester);
+          const route = action.action === "policy_approval"
+            ? "no_human"
+            : action.action === "no_eligible_reviewer"
+              ? "no_eligible_reviewer"
+              : "human_review";
+          const evaluation = evaluateHumanReviewPolicy({
+            route,
+            selectedReviewers: action.selectedActors,
+            reviews: [],
+          });
+          const checkRun = { owner: repository.owner, repo: repository.name, headSha: action.expectedHeadRevision };
+          const policyCheckRunId = await ensureInitialPolicyCheck({
+            db: input.db,
+            workspaceId: message.workspaceId,
+            adapter,
             checkRun,
             decisionId: action.decisionId,
-            conclusion: "success",
-            summary: action.noHumanReason ?? action.selectedReviewers?.join(", ") ?? action.action,
+            appId: toSafeInteger(input.github.appId),
+            state: evaluation.state,
+            summary: evaluation.summary,
           });
-          await adapter.syncRiskLabel({
-            pullRequest,
-            tier: action.riskTier,
-          });
-          await adapter.upsertRoutingComment({
-            pullRequest,
-            decisionId: action.decisionId,
-            body: formatRoutingComment(action),
-          });
-          const reviewersToRequest = action.reviewersToRequest ?? action.selectedReviewers ?? [];
-          if (route === "human_review" && reviewersToRequest.length) {
-            await adapter.requestHumanReviewers({
-              pullRequest,
-              reviewers: reviewersToRequest,
-            });
-          }
-          if (action.action === "policy_approval") {
-            await adapter.submitPolicyApproval({
-              pullRequest,
-              expectedHeadSha: action.expectedHeadSha,
-              decisionId: action.decisionId,
-              body: "TriagePilot policy approval",
-            });
-          }
-        } catch (error) {
-          const classified = classifyWorkerError(error);
-          if (classified instanceof PermanentJobError) {
-            const summary = `TriagePilot routing action failed: ${classified.message}`;
-            await adapter.updateHumanReviewPolicyCheck({
+
+          try {
+            await adapter.writeRoutingCheck({
               checkRun,
-              checkRunId: policyCheckRunId,
-              state: "failure",
-              summary,
+              decisionId: action.decisionId,
+              conclusion: "success",
+              summary: action.noHumanReason ?? (action.selectedActors.join(", ") || action.action),
             });
-            await updatePolicyCheckState(input.db, message.workspaceId, { decisionId: action.decisionId, state: "failure" });
+            await adapter.syncRiskLabel({ pullRequest, tier: action.risk.tier });
+            await adapter.upsertRoutingComment({
+              pullRequest,
+              decisionId: action.decisionId,
+              body: formatRoutingComment({ action: action.action, riskTier: action.risk.tier, risk: action.risk }),
+            });
+            if (route === "human_review" && action.actorsToRequest.length > 0) {
+              await adapter.requestHumanReviewers({ pullRequest, reviewers: action.actorsToRequest });
+            }
+            if (action.action === "policy_approval") {
+              await adapter.submitPolicyApproval({
+                pullRequest,
+                expectedHeadSha: action.expectedHeadRevision,
+                decisionId: action.decisionId,
+                body: "TriagePilot policy approval",
+              });
+            }
+          } catch (error) {
+            const classified = classifyWorkerError(error);
+            if (classified instanceof PermanentJobError) {
+              const summary = `TriagePilot routing action failed: ${classified.message}`;
+              await adapter.updateHumanReviewPolicyCheck({ checkRun, checkRunId: policyCheckRunId, state: "failure", summary });
+              await updatePolicyCheckState(input.db, message.workspaceId, { decisionId: action.decisionId, state: "failure" });
+            }
+            throw error;
           }
-          throw error;
-        }
+        },
       },
+
+      async enqueueReviewPolicy(policy) {
+        await createWorkspaceJobQueue(input.db, message.workspaceId).enqueue({
+          provider: repository.provider,
+          providerConnectionId: message.providerConnectionId,
+          kind: "evaluate_human_review_policy",
+          payload: policy,
+          idempotencyKey: `review-policy:${policy.deliveryId}`,
+        });
+      },
+
+      async reviewerLoad(reviewersInput) {
+        return Object.fromEntries(reviewersInput.actors.map((actor) => [actor, 0]));
+      },
+
+      decisions: {
+        async persist(decision) {
+          const persisted = await persistRoutingDecision(input.db, message.workspaceId, {
+            repositoryId: await repositoryId(),
+            deliveryId: decision.deliveryId,
+            routingKey: decision.routingKey,
+            pullNumber: decision.changeRequestNumber,
+            headSha: decision.headRevision,
+            mode: decision.mode,
+            action: decision.action,
+            actionStatus: decision.actionStatus,
+            riskScore: decision.riskScore,
+            ...(decision.selectedActors === undefined ? {} : { selectedReviewers: decision.selectedActors }),
+            ...(decision.noHumanReason === undefined ? {} : { noHumanReason: decision.noHumanReason }),
+            details: decision.details,
+            organizationConfigVersion: decision.organizationConfigVersion,
+            repositoryConfigPath: decision.repositoryConfigPath,
+            repositoryConfigRevision: decision.repositoryConfigRevision,
+            ...(decision.effectiveConfigHash === null ? {} : { effectiveConfigHash: decision.effectiveConfigHash }),
+            inheritanceMode: decision.inheritanceMode,
+            configDiagnostics: decision.configDiagnostics,
+            configSources: decision.configSources,
+          });
+          persistedDecisionId = persisted.decisionId;
+          return persisted;
+        },
+
+        async markActionSucceeded(decisionId, at) {
+          await persistActionSucceeded(input.db, message.workspaceId, decisionId, at);
+        },
+
+        async markActionFailed(decisionId, error, at) {
+          await persistActionFailed(input.db, message.workspaceId, decisionId, error, at);
+        },
+      },
+
+      async stageDecisionEvent() {},
+
+      clock: { now: () => new Date() },
 
       async failPolicyCheck(summary) {
         persistedDecisionId ??= await findDecisionIdForDelivery(
@@ -297,6 +314,98 @@ export function createWorkerRoutingServiceFactory(input: {
         });
       },
     };
+    const applicationServices = services as RoutingApplicationPorts;
+    const compatibilityServices = Object.assign(services, {
+      async fetchConfig(_job?: RoutingJobMessage) {
+        const trustedRevision = trustedBaseSha(message) ?? readNestedString(await pullRequest(), ["base", "sha"]);
+        if (!trustedRevision) throw new Error("pull request base SHA is unavailable");
+        const document = await new GitHubConfigurationSource(await requester()).loadRepository({
+          workspaceId: message.workspaceId,
+          repository,
+          trustedRevision,
+        });
+        return document?.content ?? "";
+      },
+      fetchChangedFiles: applicationServices.provider.fetchChangedFiles,
+      fetchCommitMessages: applicationServices.provider.fetchCommitMessages,
+      async fetchPullRequestMetadata() {
+        const metadata = await applicationServices.provider.fetchChangeRequestMetadata(message);
+        return {
+          authorLogin: metadata.author.replace(/^@/, ""),
+          authorHandle: metadata.author ? `@${metadata.author.replace(/^@/, "")}` : "",
+          branchName: metadata.sourceBranch,
+          targetBranchName: metadata.targetBranch,
+        };
+      },
+      fetchActiveApprovedReviewers: applicationServices.provider.fetchCurrentRevisionApprovals,
+      async enqueueHumanReviewPolicyEvaluation(policy: Omit<HumanReviewPolicyJobPayload, "kind">) {
+        await applicationServices.enqueueReviewPolicy({ kind: "evaluate_human_review_policy", ...policy });
+      },
+      async getReviewerLoad(loadInput: { reviewers: string[] }) {
+        return applicationServices.reviewerLoad({ workspaceId: message.workspaceId, actors: loadInput.reviewers });
+      },
+      async updateRepositoryConfigState(state: { configState: "valid" | "invalid"; mode: "shadow" | "enforce" }) {
+        await input.db
+          .updateTable("repositories")
+          .set({ config_state: state.configState, last_config_mode: state.mode, updated_at: new Date() })
+          .where("workspace_id", "=", message.workspaceId)
+          .where("id", "=", await repositoryId())
+          .execute();
+      },
+      async persistDecision(decision: {
+        deliveryId: string;
+        routingKey: string;
+        pullNumber: number;
+        headSha: string;
+        mode: "shadow" | "enforce";
+        action: string;
+        actionStatus: "not_applied" | "pending" | "succeeded" | "failed";
+        riskScore: number;
+        selectedReviewers?: string[];
+        noHumanReason?: string;
+        details: unknown;
+      }) {
+        const persisted = await persistRoutingDecision(input.db, message.workspaceId, {
+          repositoryId: await repositoryId(),
+          ...decision,
+        });
+        persistedDecisionId = persisted.decisionId;
+        return persisted;
+      },
+      markActionSucceeded: applicationServices.decisions.markActionSucceeded,
+      markActionFailed: applicationServices.decisions.markActionFailed,
+      async applyDecisionActions(action: {
+        action: string;
+        expectedHeadSha: string;
+        decisionId: string;
+        riskTier: "low" | "medium" | "high";
+        risk?: { score: number; classifierVersion: "risk-v2"; components: ScoreComponent[]; tier?: "low" | "medium" | "high" };
+        selectedReviewers?: string[];
+        reviewersToRequest?: string[];
+        noHumanReason?: string;
+      }) {
+        await applicationServices.provider.applyActions({
+          workspaceId: message.workspaceId,
+          providerConnectionId: message.providerConnectionId,
+          repository,
+          changeRequestId: changeRequest.externalId,
+          changeRequestNumber: changeRequest.number,
+          expectedHeadRevision: action.expectedHeadSha,
+          decisionId: action.decisionId,
+          action: action.action as "policy_approval" | "request_human_review" | "no_eligible_reviewer",
+          risk: {
+            classifierVersion: action.risk?.classifierVersion ?? "risk-v2",
+            score: action.risk?.score ?? 0,
+            tier: action.riskTier,
+            components: action.risk?.components ?? [],
+          },
+          selectedActors: action.selectedReviewers ?? [],
+          actorsToRequest: action.reviewersToRequest ?? action.selectedReviewers ?? [],
+          ...(action.noHumanReason === undefined ? {} : { noHumanReason: action.noHumanReason }),
+        });
+      },
+    });
+    return compatibilityServices;
   };
 }
 
@@ -350,8 +459,8 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
   db: DatabaseClient;
   github: GitHubAppCredentials;
   createRequester?: typeof createInstallationRequester;
-}): (message: HumanReviewPolicyJobPayload) => HumanReviewPolicyServices {
-  return (message) => {
+}) {
+  return (message: HumanReviewPolicyJobPayload) => {
     const { changeRequest } = message;
     const { repository } = changeRequest;
     let requesterPromise: Promise<Requester> | null = null;
@@ -390,36 +499,67 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
       return decision;
     }
 
-    return {
-      async findDecision(decisionInput) {
-        if (decisionInput.pullNumber !== changeRequest.number) return null;
-        return await findDecision();
+    const services: HumanReviewPolicyServices = {
+      decisions: {
+        async findLatest(decisionInput) {
+          if (
+            decisionInput.workspaceId !== message.workspaceId ||
+            decisionInput.repository.externalId !== repository.externalId ||
+            decisionInput.changeRequestId !== changeRequest.externalId ||
+            decisionInput.changeRequestNumber !== changeRequest.number
+          ) return null;
+          const found = await findDecision();
+          if (found === null) return null;
+          return {
+            decisionId: found.decisionId,
+            workspaceId: message.workspaceId,
+            repository,
+            changeRequestId: changeRequest.externalId,
+            changeRequestNumber: found.pullNumber,
+            headRevision: found.headSha,
+            mode: found.mode,
+            action: found.action,
+            selectedActors: found.selectedReviewers,
+            ...(found.requiredApprovalCount === undefined ? {} : { requiredApprovalCount: found.requiredApprovalCount }),
+            policyCheckRunId: found.policyCheckRunId,
+            policyCheckState: found.policyCheckState,
+          };
+        },
+
+        async persistState(state) {
+          await updatePolicyCheckState(input.db, state.workspaceId, {
+            decisionId: state.decisionId,
+            state: state.state,
+          });
+        },
       },
 
-      async fetchPullRequest() {
-        const response = await (await requester()).request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
-          owner: repository.owner,
-          repo: repository.name,
-          pull_number: changeRequest.number,
-        });
-        return {
-          state: readString(response.data, "state"),
-          headSha: readNestedString(response.data, ["head", "sha"]),
-        };
-      },
+      provider: {
+        async fetchChangeRequestState() {
+          const response = await (await requester()).request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
+            owner: repository.owner,
+            repo: repository.name,
+            pull_number: changeRequest.number,
+          });
+          return {
+            state: readString(response.data, "state"),
+            currentHeadRevision: readNestedString(response.data, ["head", "sha"]),
+          };
+        },
 
-      async fetchReviews() {
-        return await new GitHubAdapter(await requester()).listPullRequestReviews({ pullRequest: pullRequestRef() });
-      },
+        async fetchReviews() {
+          const reviews = await new GitHubAdapter(await requester()).listPullRequestReviews({ pullRequest: pullRequestRef() });
+          return reviews.map(toReviewMetadata);
+        },
 
-      async updateCheck(check) {
+        async updatePolicyCheck(check) {
         if (check.state === "in_progress") {
           if (check.decision.policyCheckState === "failure") return;
           const adapter = new GitHubAdapter(await requester());
           const checkRun = {
-            owner: check.decision.owner,
-            repo: check.decision.repo,
-            headSha: check.decision.headSha,
+            owner: check.decision.repository.owner,
+            repo: check.decision.repository.name,
+            headSha: check.decision.headRevision,
           };
           const existing = await adapter.findHumanReviewPolicyCheck({
             checkRun,
@@ -461,9 +601,9 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
         }
         const adapter = new GitHubAdapter(await requester());
         const checkRun = {
-          owner: check.decision.owner,
-          repo: check.decision.repo,
-          headSha: check.decision.headSha,
+          owner: check.decision.repository.owner,
+          repo: check.decision.repository.name,
+          headSha: check.decision.headRevision,
         };
         const existing = await adapter.findHumanReviewPolicyCheck({
           checkRun,
@@ -499,9 +639,6 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
           });
         }
       },
-
-      async persistState(state) {
-        await updatePolicyCheckState(input.db, message.workspaceId, state);
       },
 
       policyCheckFailureDecisionId() {
@@ -550,6 +687,48 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
         });
       },
     };
+    const applicationServices = services as ReviewPolicyApplicationPorts;
+    const compatibilityServices = Object.assign(services, {
+      async findDecision(decisionInput: { repositoryId?: string; pullNumber: number }) {
+        if (decisionInput.pullNumber !== changeRequest.number) return null;
+        return findDecision();
+      },
+      async fetchPullRequest(_job?: HumanReviewPolicyJobPayload) {
+        const state = await applicationServices.provider.fetchChangeRequestState(message);
+        return { state: state.state, headSha: state.currentHeadRevision };
+      },
+      async fetchReviews(_job?: HumanReviewPolicyJobPayload) {
+        return new GitHubAdapter(await requester()).listPullRequestReviews({ pullRequest: pullRequestRef() });
+      },
+      async updateCheck(check: {
+        decision: Awaited<ReturnType<typeof findDecision>> extends infer T ? NonNullable<T> : never;
+        state: "in_progress" | "success" | "failure";
+        summary: string;
+      }) {
+        await applicationServices.provider.updatePolicyCheck({
+          decision: {
+            decisionId: check.decision.decisionId,
+            workspaceId: message.workspaceId,
+            repository,
+            changeRequestId: changeRequest.externalId,
+            changeRequestNumber: check.decision.pullNumber,
+            headRevision: check.decision.headSha,
+            mode: check.decision.mode,
+            action: check.decision.action,
+            selectedActors: check.decision.selectedReviewers,
+            ...(check.decision.requiredApprovalCount === undefined ? {} : { requiredApprovalCount: check.decision.requiredApprovalCount }),
+            policyCheckRunId: check.decision.policyCheckRunId,
+            policyCheckState: check.decision.policyCheckState,
+          },
+          state: check.state,
+          summary: check.summary,
+        });
+      },
+      async persistState(state: { decisionId: string; state: "in_progress" | "success" | "failure" }) {
+        await applicationServices.decisions.persistState({ workspaceId: message.workspaceId, ...state });
+      },
+    });
+    return compatibilityServices;
   };
 }
 
@@ -720,6 +899,21 @@ function toChangedFile(file: unknown): ChangedFileMetadata {
     path: readString(file, "filename"),
     additions: readNumber(file, "additions"),
     deletions: readNumber(file, "deletions"),
+  };
+}
+
+function toReviewMetadata(review: {
+  userLogin: string;
+  userType?: string;
+  state: string;
+  submittedAt: string | null;
+}): ReviewMetadata {
+  const actorType = review.userType === undefined || review.userType === "User" ? "human" : "bot";
+  return {
+    actor: review.userLogin,
+    actorType,
+    state: review.state.toLowerCase(),
+    submittedAt: review.submittedAt,
   };
 }
 

@@ -78,6 +78,9 @@ importers:
 
   apps/worker:
     dependencies:
+      '@triagepilot/application':
+        specifier: workspace:*
+        version: link:../../packages/application
       '@triagepilot/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -96,9 +99,18 @@ importers:
       '@triagepilot/shared':
         specifier: workspace:*
         version: link:../../packages/shared
-      minimatch:
-        specifier: ^10.2.5
-        version: 10.2.5
+
+  packages/application:
+    dependencies:
+      '@triagepilot/config':
+        specifier: workspace:*
+        version: link:../config
+      '@triagepilot/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@triagepilot/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/config:
     dependencies:

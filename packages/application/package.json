@@ -1,0 +1,18 @@
+{
+  "name": "@triagepilot/application",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@triagepilot/config": "workspace:*",
+    "@triagepilot/contracts": "workspace:*",
+    "@triagepilot/core": "workspace:*"
+  }
+}

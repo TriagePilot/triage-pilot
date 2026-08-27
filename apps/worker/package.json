@@ -9,12 +9,12 @@
     "start": "tsx src/main.ts"
   },
   "dependencies": {
+    "@triagepilot/application": "workspace:*",
     "@triagepilot/config": "workspace:*",
     "@triagepilot/contracts": "workspace:*",
     "@triagepilot/core": "workspace:*",
     "@triagepilot/db": "workspace:*",
     "@triagepilot/provider-github": "workspace:*",
-    "@triagepilot/shared": "workspace:*",
-    "minimatch": "^10.2.5"
+    "@triagepilot/shared": "workspace:*"
   }
 }

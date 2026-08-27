@@ -23,6 +23,39 @@ const routingJobPayload = {
   routingKey: "routing:ws_local:github:101:7:trusted-base:abc123",
 };
 
+function effectiveConfiguration(mode: "shadow" | "enforce") {
+  return {
+    ok: true as const,
+    config: {
+      version: 1 as const,
+      mode,
+      routing: {
+        highRiskReviewers: 2 as const,
+        excludeTargetBranches: [],
+        excludeSourceBranchPatterns: [],
+        includeDraftPullRequests: false,
+      },
+      risk: {
+        size: { highChangedFiles: 100, highChangedLines: 5000 },
+        thresholds: { low: 25, high: 70 },
+        paths: [],
+        suppressors: [],
+        aiAuthorship: { enabled: false, modifier: 0 },
+      },
+      ownership: { rules: [], fallbackReviewers: [] },
+    },
+    diagnostics: [] as [],
+    provenance: {
+      organizationVersion: null,
+      repositoryPath: null,
+      repositoryRevision: null,
+      inheritanceMode: "defaults" as const,
+      effectiveHash: "effective-hash",
+      sources: {},
+    },
+  };
+}
+
 const jobScope = {
   workspaceId: "ws_local",
   provider: "github" as const,
@@ -357,32 +390,37 @@ describe("runWorkerOnce", () => {
   it("records a delayed enforce head mismatch and does not retry the job", async () => {
     const queue = buildQueueWithJob();
     const services: RoutingJobServices = {
-      fetchConfig: vi.fn(async () => "version: 1\nmode: enforce\n"),
-      fetchChangedFiles: vi.fn(async () => []),
-      fetchCommitMessages: vi.fn(async () => []),
-      fetchPullRequestMetadata: vi.fn(async () => ({
-        authorLogin: "user-c91e46",
-        authorHandle: "@user-c91e46",
-        branchName: "feature",
-        targetBranchName: "develop",
-      })),
-      fetchActiveApprovedReviewers: vi.fn(async () => []),
-      enqueueHumanReviewPolicyEvaluation: vi.fn(async () => {}),
-      getReviewerLoad: vi.fn(async () => ({})),
-      updateRepositoryConfigState: vi.fn(async () => {}),
-      persistDecision: vi.fn(async () => ({
-        decisionId: "decision-1",
-        actionStatus: "pending" as const,
-        actionError: null,
-        actionAppliedAt: null,
-      })),
-      applyDecisionActions: vi.fn(async (input) => {
-        if (input.expectedHeadSha === "abc123") {
-          throw new PermanentJobError("pull request head changed before enforce actions");
-        }
-      }),
-      markActionSucceeded: vi.fn(async () => {}),
-      markActionFailed: vi.fn(async () => {}),
+      resolveConfiguration: vi.fn(async () => effectiveConfiguration("enforce")),
+      provider: {
+        fetchChangeRequestMetadata: vi.fn(async () => ({
+          author: "@user-c91e46",
+          sourceBranch: "feature",
+          targetBranch: "develop",
+          currentHeadRevision: "abc123",
+        })),
+        fetchChangedFiles: vi.fn(async () => []),
+        fetchCommitMessages: vi.fn(async () => []),
+        fetchCurrentRevisionApprovals: vi.fn(async () => []),
+        applyActions: vi.fn(async (input) => {
+          if (input.expectedHeadRevision === "abc123") {
+            throw new PermanentJobError("pull request head changed before enforce actions");
+          }
+        }),
+      },
+      reviewerLoad: vi.fn(async () => ({})),
+      decisions: {
+        persist: vi.fn(async () => ({
+          decisionId: "decision-1",
+          actionStatus: "pending" as const,
+          actionError: null,
+          actionAppliedAt: null,
+        })),
+        markActionSucceeded: vi.fn(async () => {}),
+        markActionFailed: vi.fn(async () => {}),
+      },
+      enqueueReviewPolicy: vi.fn(async () => {}),
+      stageDecisionEvent: vi.fn(async () => {}),
+      clock: { now: () => new Date("2026-08-18T10:00:00.000Z") },
     };
 
     await runWorkerOnce({
@@ -394,7 +432,7 @@ describe("runWorkerOnce", () => {
       buildRoutingServices: vi.fn(() => services),
     });
 
-    expect(services.markActionFailed).toHaveBeenCalledWith(
+    expect(services.decisions.markActionFailed).toHaveBeenCalledWith(
       "decision-1",
       "pull request head changed before enforce actions",
       expect.any(Date),

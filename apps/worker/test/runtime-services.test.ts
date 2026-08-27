@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ReviewPolicyDecision } from "@triagepilot/application";
 import type { HumanReviewPolicyDecision } from "@triagepilot/db";
 
 import {
@@ -356,7 +357,10 @@ describe("worker routing GitHub reads", () => {
 
     await processHumanReviewPolicyJob(policyMessage, {
       ...services,
-      findDecision: async () => decision,
+      decisions: {
+        ...services.decisions,
+        findLatest: async () => applicationDecision(decision),
+      },
     });
 
     expect(request).toHaveBeenCalledWith(
@@ -379,7 +383,13 @@ describe("worker routing GitHub reads", () => {
     });
     const services = buildPolicyServices(request, db);
     const staleDecision = humanReviewDecision({ policyCheckRunId: "71", policyCheckState: "in_progress" });
-    const processingServices = { ...services, findDecision: async () => staleDecision };
+    const processingServices = {
+      ...services,
+      decisions: {
+        ...services.decisions,
+        findLatest: async () => applicationDecision(staleDecision),
+      },
+    };
 
     await expect(processHumanReviewPolicyJob(policyMessage, processingServices)).rejects.toThrow(
       "database state persistence failed",
@@ -913,6 +923,23 @@ function humanReviewDecision(
     policyCheckRunId: "71",
     policyCheckState: "in_progress",
     ...overrides,
+  };
+}
+
+function applicationDecision(decision: HumanReviewPolicyDecision): ReviewPolicyDecision {
+  return {
+    decisionId: decision.decisionId,
+    workspaceId: policyMessage.workspaceId,
+    repository: policyMessage.changeRequest.repository,
+    changeRequestId: policyMessage.changeRequest.externalId,
+    changeRequestNumber: decision.pullNumber,
+    headRevision: decision.headSha,
+    mode: decision.mode,
+    action: decision.action,
+    selectedActors: decision.selectedReviewers,
+    ...(decision.requiredApprovalCount === undefined ? {} : { requiredApprovalCount: decision.requiredApprovalCount }),
+    policyCheckRunId: decision.policyCheckRunId,
+    policyCheckState: decision.policyCheckState,
   };
 }
 
