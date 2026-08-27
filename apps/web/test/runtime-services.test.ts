@@ -207,6 +207,7 @@ function runtimeInput(
       webhookSecret: "hook-secret",
     },
     verifySignature: async () => {},
+    normalizeGitHubWebhook: () => null,
   };
 }
 

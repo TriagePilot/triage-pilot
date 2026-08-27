@@ -25,6 +25,7 @@ interface WebRuntimeServicesInput {
   githubOrganization: string;
   github: GitHubAppCredentialShape;
   verifySignature: WebServices["verifySignature"];
+  normalizeGitHubWebhook: WebServices["normalizeGitHubWebhook"];
 }
 
 export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebServices {
@@ -37,6 +38,7 @@ export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebSer
     sourceAddress: input.sourceAddress,
     githubOrganization: input.githubOrganization,
     verifySignature: input.verifySignature,
+    normalizeGitHubWebhook: input.normalizeGitHubWebhook,
 
     async checkDatabase() {
       await sql`select 1`.execute(input.db);

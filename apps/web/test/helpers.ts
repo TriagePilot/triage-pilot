@@ -1,3 +1,5 @@
+import { normalizeGitHubWebhook } from "@triagepilot/provider-github";
+
 import type { WebServices } from "../src/app";
 
 export function buildServices(overrides: Partial<WebServices> = {}): WebServices {
@@ -10,6 +12,7 @@ export function buildServices(overrides: Partial<WebServices> = {}): WebServices
     sourceAddress: () => "203.0.113.8",
     checkDatabase: async () => {},
     verifySignature: async () => {},
+    normalizeGitHubWebhook,
     getWebhookSecret: async () => "hook-secret",
     githubOrganization: "acme",
     acceptRoutingDelivery: async () => ({ inserted: true, jobId: "job-1" }),

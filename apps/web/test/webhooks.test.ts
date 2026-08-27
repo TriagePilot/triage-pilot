@@ -64,6 +64,65 @@ describe("GitHub webhook route", () => {
     });
   });
 
+  it("builds the routing job from the provider normalizer output", async () => {
+    const acceptRoutingDelivery = vi.fn(async () => ({ inserted: true, jobId: "job-1" }));
+    const normalizeGitHubWebhook = vi.fn(() => ({
+      deliveryId: "delivery-1",
+      eventName: "change_request" as const,
+      eventAction: "synchronize",
+      provider: "github" as const,
+      externalConnectionId: "provider-connection-9",
+      changeRequest: {
+        repository: {
+          provider: "github" as const,
+          externalId: "repository-77",
+          owner: "AcMe",
+          name: "normalized-api",
+        },
+        externalId: "42",
+        number: 42,
+        baseRevision: "normalized-base",
+        headRevision: "normalized-head",
+      },
+      actor: { externalId: "actor-5", displayName: "event-sender-71c9ab" },
+      isDraft: true,
+    }));
+    const app = createWebApp(buildServices({ acceptRoutingDelivery, normalizeGitHubWebhook }));
+
+    const response = await signedWebhook(
+      app,
+      pullRequestBody({ owner: { login: "AcMe", type: "Organization" } }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(acceptRoutingDelivery).toHaveBeenCalledWith(expect.objectContaining({
+      eventAction: "synchronize",
+      installation: { githubInstallationId: "provider-connection-9", accountLogin: "AcMe" },
+      repository: { githubRepositoryId: "repository-77", owner: "AcMe", name: "normalized-api" },
+      payload: {
+        kind: "process_change_request",
+        deliveryId: "delivery-1",
+        eventName: "change_request.synchronize",
+        workspaceId: "ws_local",
+        providerConnectionId: "provider-connection-9",
+        changeRequest: {
+          repository: {
+            provider: "github",
+            externalId: "repository-77",
+            owner: "AcMe",
+            name: "normalized-api",
+          },
+          externalId: "42",
+          number: 42,
+          baseRevision: "normalized-base",
+          headRevision: "normalized-head",
+        },
+        isDraft: true,
+        routingKey: "routing:ws_local:github:repository-77:42:normalized-base:normalized-head",
+      },
+    }));
+  });
+
   it("passes an opened draft pull request to the worker for configuration-aware routing", async () => {
     const acceptRoutingDelivery = vi.fn(async () => ({ inserted: true, jobId: "job-1" }));
     const app = createWebApp(buildServices({ githubOrganization: "acme", acceptRoutingDelivery }));
@@ -352,8 +411,10 @@ const pullRequestBody = ({
   JSON.stringify({
     action,
     installation: { id: 99 },
+    sender: { id: 502, login: "event-sender-71c9ab" },
     repository: { id: 101, name: "api", owner },
     pull_request: {
+      id: 7001,
       number: 7,
       draft,
       base: { sha: "trusted-base-123" },
@@ -365,8 +426,15 @@ const pullRequestReviewBody = ({ owner }: { owner: { login: string; type: string
   JSON.stringify({
     action: "submitted",
     installation: { id: 99 },
+    sender: { id: 503, login: "reviewer-82df10" },
     repository: { id: 101, name: "api", owner },
-    pull_request: { number: 7 },
+    pull_request: {
+      id: 7001,
+      number: 7,
+      draft: false,
+      base: { sha: "trusted-base-123" },
+      head: { sha: "abc123" },
+    },
     review: {
       state: "approved",
       body: "This review body must not enter the durable job payload.",

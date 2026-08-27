@@ -2,6 +2,7 @@ import type { NormalizedChangeRequestEvent } from "@triagepilot/contracts";
 import { z } from "zod";
 
 const ROUTING_PULL_REQUEST_ACTIONS = new Set(["opened", "reopened", "synchronize", "ready_for_review"]);
+const REVIEW_PULL_REQUEST_ACTIONS = new Set(["submitted", "edited", "dismissed"]);
 
 const githubIdSchema = z.union([
   z.number().int().safe().transform(String),
@@ -29,6 +30,10 @@ const pullRequestWebhookSchema = z.object({
   }),
 });
 
+const pullRequestReviewWebhookSchema = pullRequestWebhookSchema.extend({
+  review: z.object({ state: z.string().trim().min(1) }),
+});
+
 export interface GitHubWebhookInput {
   deliveryId: string;
   eventName: string;
@@ -36,14 +41,29 @@ export interface GitHubWebhookInput {
 }
 
 export function normalizeGitHubWebhook(input: GitHubWebhookInput): NormalizedChangeRequestEvent | null {
-  if (input.eventName !== "pull_request") return null;
+  if (input.eventName === "pull_request") {
+    const payload = pullRequestWebhookSchema.parse(input.payload);
+    if (!ROUTING_PULL_REQUEST_ACTIONS.has(payload.action)) return null;
+    return toNormalizedEvent(input.deliveryId, "change_request", payload);
+  }
 
-  const payload = pullRequestWebhookSchema.parse(input.payload);
-  if (!ROUTING_PULL_REQUEST_ACTIONS.has(payload.action)) return null;
+  if (input.eventName === "pull_request_review") {
+    const payload = pullRequestReviewWebhookSchema.parse(input.payload);
+    if (!REVIEW_PULL_REQUEST_ACTIONS.has(payload.action)) return null;
+    return toNormalizedEvent(input.deliveryId, "change_request_review", payload);
+  }
 
+  return null;
+}
+
+function toNormalizedEvent(
+  deliveryId: string,
+  eventName: NormalizedChangeRequestEvent["eventName"],
+  payload: z.infer<typeof pullRequestWebhookSchema>,
+): NormalizedChangeRequestEvent {
   return {
-    deliveryId: input.deliveryId,
-    eventName: "change_request",
+    deliveryId,
+    eventName,
     eventAction: payload.action,
     provider: "github",
     externalConnectionId: payload.installation.id,
@@ -54,7 +74,7 @@ export function normalizeGitHubWebhook(input: GitHubWebhookInput): NormalizedCha
         owner: payload.repository.owner.login,
         name: payload.repository.name,
       },
-      externalId: payload.pull_request.id,
+      externalId: String(payload.pull_request.number),
       number: payload.pull_request.number,
       baseRevision: payload.pull_request.base.sha,
       headRevision: payload.pull_request.head.sha,

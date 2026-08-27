@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { createDatabase } from "@triagepilot/db";
-import { verifyGitHubSignature } from "@triagepilot/provider-github";
+import { normalizeGitHubWebhook, verifyGitHubSignature } from "@triagepilot/provider-github";
 
 import { createWebApp, type StaticAsset } from "./app";
 import { readWebRuntimeEnv } from "./runtime-env";
@@ -26,6 +26,7 @@ const app = createWebApp(
     githubOrganization: env.githubOrganization,
     github: env.github,
     verifySignature: verifyGitHubSignature,
+    normalizeGitHubWebhook,
   }),
   {
     async readAsset(assetPath) {
