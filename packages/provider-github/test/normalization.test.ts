@@ -31,6 +31,10 @@ describe("normalizeGitHubWebhook", () => {
       eventAction: "opened",
       provider: "github",
       externalConnectionId: "99",
+      providerAccount: {
+        login: "acme",
+        type: "Organization",
+      },
       changeRequest: {
         repository: {
           provider: "github",
@@ -87,6 +91,10 @@ describe("normalizeGitHubWebhook", () => {
       eventAction: "submitted",
       provider: "github",
       externalConnectionId: "99",
+      providerAccount: {
+        login: "acme",
+        type: "Organization",
+      },
       changeRequest: {
         repository: {
           provider: "github",
@@ -130,5 +138,34 @@ describe("normalizeGitHubWebhook", () => {
         },
       },
     })).toBeNull();
+  });
+
+  it("retains a personal account owner type for webhook scope checks", () => {
+    expect(normalizeGitHubWebhook({
+      deliveryId: "delivery-personal-1",
+      eventName: "pull_request",
+      payload: {
+        action: "opened",
+        installation: { id: 99 },
+        sender: { id: 502, login: "event-sender-71c9ab" },
+        repository: {
+          id: 101,
+          name: "api",
+          owner: { login: "acme", type: "User" },
+        },
+        pull_request: {
+          id: 7001,
+          number: 7,
+          draft: false,
+          base: { sha: "base-sha" },
+          head: { sha: "head-sha" },
+        },
+      },
+    })).toMatchObject({
+      providerAccount: {
+        login: "acme",
+        type: "User",
+      },
+    });
   });
 });

@@ -22,10 +22,33 @@ describe("GitHub webhook route", () => {
     expect(logIgnoredWebhook).toHaveBeenCalledWith({
       eventName: "pull_request",
       deliveryId: "delivery-1",
-      accountType: "Organization",
+      accountType: owner.type,
       accountLogin: owner.login,
     });
     expect(logIgnoredWebhook.mock.calls[0]?.[0]).not.toHaveProperty("body");
+  });
+
+  it("rejects a personal account whose login matches the configured organization before enqueue", async () => {
+    const acceptRoutingDelivery = vi.fn();
+    const logIgnoredWebhook = vi.fn();
+    const app = createWebApp(
+      buildServices({ githubOrganization: "acme", acceptRoutingDelivery, logIgnoredWebhook }),
+    );
+
+    const response = await signedWebhook(
+      app,
+      pullRequestBody({ owner: { login: "acme", type: "User" } }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ ok: true, ignored: "account_scope" });
+    expect(acceptRoutingDelivery).not.toHaveBeenCalled();
+    expect(logIgnoredWebhook).toHaveBeenCalledWith({
+      eventName: "pull_request",
+      deliveryId: "delivery-1",
+      accountType: "User",
+      accountLogin: "acme",
+    });
   });
 
   it("accepts a matching organization pull request with metadata only", async () => {
@@ -69,6 +92,7 @@ describe("GitHub webhook route", () => {
       eventAction: "synchronize",
       provider: "github" as const,
       externalConnectionId: "provider-connection-9",
+      providerAccount: { login: "AcMe", type: "Organization" },
       changeRequest: {
         repository: {
           provider: "github" as const,
@@ -206,6 +230,30 @@ describe("GitHub webhook route", () => {
         externalId: "7",
         number: 7,
       },
+    });
+  });
+
+  it("rejects a personal account pull request review whose login matches the configured organization before enqueue", async () => {
+    const acceptHumanReviewPolicyDelivery = vi.fn();
+    const logIgnoredWebhook = vi.fn();
+    const app = createWebApp(
+      buildServices({ githubOrganization: "acme", acceptHumanReviewPolicyDelivery, logIgnoredWebhook }),
+    );
+
+    const response = await signedWebhook(
+      app,
+      pullRequestReviewBody({ owner: { login: "acme", type: "User" } }),
+      { eventName: "pull_request_review", deliveryId: "delivery-review-personal" },
+    );
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ ok: true, ignored: "account_scope" });
+    expect(acceptHumanReviewPolicyDelivery).not.toHaveBeenCalled();
+    expect(logIgnoredWebhook).toHaveBeenCalledWith({
+      eventName: "pull_request_review",
+      deliveryId: "delivery-review-personal",
+      accountType: "User",
+      accountLogin: "acme",
     });
   });
 

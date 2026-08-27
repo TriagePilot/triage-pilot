@@ -16,5 +16,9 @@ export {
   type GitHubAppCredentials,
   type GitHubAppCredentialShape,
 } from "./credentials";
-export { normalizeGitHubWebhook, type GitHubWebhookInput } from "./normalization";
+export {
+  normalizeGitHubWebhook,
+  type GitHubWebhookInput,
+  type NormalizedGitHubWebhookEvent,
+} from "./normalization";
 export { verifyGitHubSignature } from "./webhook";

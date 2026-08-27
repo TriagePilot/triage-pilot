@@ -19,7 +19,7 @@ const pullRequestWebhookSchema = z.object({
   repository: z.object({
     id: githubIdSchema,
     name: z.string().trim().min(1),
-    owner: z.object({ login: z.string().trim().min(1) }),
+    owner: z.object({ login: z.string().trim().min(1), type: z.string().trim().min(1) }),
   }),
   pull_request: z.object({
     id: githubIdSchema,
@@ -40,7 +40,12 @@ export interface GitHubWebhookInput {
   payload: unknown;
 }
 
-export function normalizeGitHubWebhook(input: GitHubWebhookInput): NormalizedChangeRequestEvent | null {
+export interface NormalizedGitHubWebhookEvent extends NormalizedChangeRequestEvent {
+  provider: "github";
+  providerAccount: { login: string; type: string };
+}
+
+export function normalizeGitHubWebhook(input: GitHubWebhookInput): NormalizedGitHubWebhookEvent | null {
   if (input.eventName === "pull_request") {
     const payload = pullRequestWebhookSchema.parse(input.payload);
     if (!ROUTING_PULL_REQUEST_ACTIONS.has(payload.action)) return null;
@@ -60,13 +65,17 @@ function toNormalizedEvent(
   deliveryId: string,
   eventName: NormalizedChangeRequestEvent["eventName"],
   payload: z.infer<typeof pullRequestWebhookSchema>,
-): NormalizedChangeRequestEvent {
+): NormalizedGitHubWebhookEvent {
   return {
     deliveryId,
     eventName,
     eventAction: payload.action,
     provider: "github",
     externalConnectionId: payload.installation.id,
+    providerAccount: {
+      login: payload.repository.owner.login,
+      type: payload.repository.owner.type,
+    },
     changeRequest: {
       repository: {
         provider: "github",

@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { runMigrations } from "@triagepilot/db";
 
 import { createWebApp } from "../src/app";
@@ -66,6 +66,34 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("self-hosted web composit
     });
   });
 
+  it("rejects a personal account matching the configured organization before persistence", async () => {
+    await withPostgresTestDatabaseUrl(async (databaseUrl) => {
+      await runMigrations(databaseUrl);
+      const composition = await createSelfHostedWebComposition(webEnv(databaseUrl));
+      const writeWarning = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const app = createWebApp(composition.services);
+      const body = pullRequestBody({ owner: "acme", ownerType: "User", repo: "api" });
+
+      try {
+        const response = await app.request("/webhooks/github", {
+          method: "POST",
+          headers: signedHeaders(body),
+          body,
+        });
+
+        expect(response.status).toBe(202);
+        expect(await response.json()).toEqual({ ok: true, ignored: "account_scope" });
+        await expect(composition.db.selectFrom("webhook_receipts").select("delivery_id").execute()).resolves.toEqual([]);
+        await expect(composition.db.selectFrom("provider_connections").select("id").execute()).resolves.toEqual([]);
+        await expect(composition.db.selectFrom("jobs").select("id").execute()).resolves.toEqual([]);
+        expect(writeWarning).toHaveBeenCalledOnce();
+      } finally {
+        writeWarning.mockRestore();
+        await composition.close();
+      }
+    });
+  });
+
   it("serializes ignored-webhook logs with workspace scope and no credential or payload material", async () => {
     await withPostgresTestDatabaseUrl(async (databaseUrl) => {
       await runMigrations(databaseUrl);
@@ -123,7 +151,7 @@ function webEnv(databaseUrl: string) {
   };
 }
 
-function pullRequestBody(input: { owner: string; repo: string }) {
+function pullRequestBody(input: { owner: string; ownerType?: string; repo: string }) {
   return JSON.stringify({
     action: "opened",
     installation: { id: 99 },
@@ -131,7 +159,7 @@ function pullRequestBody(input: { owner: string; repo: string }) {
     repository: {
       id: 101,
       name: input.repo,
-      owner: { login: input.owner, type: "Organization" },
+      owner: { login: input.owner, type: input.ownerType ?? "Organization" },
     },
     pull_request: {
       id: 7001,

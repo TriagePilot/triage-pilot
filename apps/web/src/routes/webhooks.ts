@@ -3,11 +3,10 @@ import { z } from "zod";
 import {
   buildRoutingKey,
   type HumanReviewPolicyJobPayload,
-  type NormalizedChangeRequestEvent,
   type RoutingJobPayload,
   type WorkspaceId,
 } from "@triagepilot/contracts";
-import type { GitHubWebhookInput } from "@triagepilot/provider-github";
+import type { GitHubWebhookInput, NormalizedGitHubWebhookEvent } from "@triagepilot/provider-github";
 import type {
   GitHubInstallationMetadata,
   GitHubId,
@@ -43,7 +42,7 @@ export interface WebhookServices {
   workspaceId: WorkspaceId;
   getWebhookSecret(): Promise<string>;
   verifySignature(input: { body: string; secret: string; signature: string | null }): Promise<void>;
-  normalizeGitHubWebhook(input: GitHubWebhookInput): NormalizedChangeRequestEvent | null;
+  normalizeGitHubWebhook(input: GitHubWebhookInput): NormalizedGitHubWebhookEvent | null;
   acceptRoutingDelivery(input: {
     deliveryId: string;
     eventName: string;
@@ -106,11 +105,8 @@ export function githubWebhookRoutes(services: WebhookServices) {
       if (normalized === null) {
         return c.json({ ok: true, ignored: "action" as const }, 202);
       }
-      if (!isConfiguredRepositoryOwner(normalized.changeRequest.repository.owner, services.githubOrganization)) {
-        return ignoreAccount(c, services, eventName, deliveryId, {
-          login: normalized.changeRequest.repository.owner,
-          type: "Organization",
-        });
+      if (!isConfiguredOrganization(normalized.providerAccount, services.githubOrganization)) {
+        return ignoreAccount(c, services, eventName, deliveryId, normalized.providerAccount);
       }
 
       if (normalized.eventName === "change_request") {
@@ -223,14 +219,14 @@ export function githubWebhookRoutes(services: WebhookServices) {
   return app;
 }
 
-function toInstallationMetadata(event: NormalizedChangeRequestEvent): GitHubInstallationMetadata {
+function toInstallationMetadata(event: NormalizedGitHubWebhookEvent): GitHubInstallationMetadata {
   return {
     githubInstallationId: event.externalConnectionId,
     accountLogin: event.changeRequest.repository.owner,
   };
 }
 
-function toRepositoryMetadata(event: NormalizedChangeRequestEvent): GitHubRepositoryMetadata {
+function toRepositoryMetadata(event: NormalizedGitHubWebhookEvent): GitHubRepositoryMetadata {
   return {
     githubRepositoryId: event.changeRequest.repository.externalId,
     owner: event.changeRequest.repository.owner,
@@ -246,10 +242,6 @@ function isSupportedEvent(
 
 function isConfiguredOrganization(account: z.infer<typeof accountSchema>, configuredLogin: string): boolean {
   return account.type === "Organization" && account.login.toLowerCase() === configuredLogin.toLowerCase();
-}
-
-function isConfiguredRepositoryOwner(repositoryOwner: string, configuredLogin: string): boolean {
-  return repositoryOwner.toLowerCase() === configuredLogin.toLowerCase();
 }
 
 function ignoreAccount(
