@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { readdir, readFile } from "node:fs/promises";
+import { basename, isAbsolute, join, normalize, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { validateReleaseManifest } from "./create-release-manifest.mjs";
@@ -37,19 +37,38 @@ export async function verifyReleaseArtifacts(options) {
 
   const checksumEntries = parseChecksums(await readFile(checksumsPath, "utf8"));
   const expectedRelativePaths = new Set([
+    "checksums.txt",
     "release-manifest.json",
     "container/metadata.json",
     imageTarRelativePath,
     ...manifest.packages.map((entry) => `packages/${basename(entry.tarball)}`),
   ]);
+  const expectedChecksummedRelativePaths = new Set([...expectedRelativePaths].filter((path) => path !== "checksums.txt"));
+  const expectedPackageRelativePaths = manifest.packages.map((entry) => `packages/${basename(entry.tarball)}`);
+  const actualRelativePaths = await collectArtifactFiles(artifactsDir);
 
-  for (const relativePath of expectedRelativePaths) {
+  for (const relativePath of expectedChecksummedRelativePaths) {
     if (!checksumEntries.has(relativePath)) {
       throw new Error(`checksums.txt is missing ${relativePath}.`);
     }
   }
-
+  for (const relativePath of checksumEntries.keys()) {
+    if (!expectedChecksummedRelativePaths.has(relativePath)) {
+      throw new Error(`Unexpected checksum entry ${relativePath}.`);
+    }
+  }
+  for (const relativePath of actualRelativePaths) {
+    if (!expectedRelativePaths.has(relativePath)) {
+      throw new Error(`Unexpected artifact file ${relativePath}.`);
+    }
+  }
   for (const relativePath of expectedRelativePaths) {
+    if (!actualRelativePaths.has(relativePath)) {
+      throw new Error(`Artifact file is missing ${relativePath}.`);
+    }
+  }
+
+  for (const relativePath of expectedChecksummedRelativePaths) {
     const expectedSha = checksumEntries.get(relativePath);
     const actualSha = await sha256(join(artifactsDir, relativePath));
     if (actualSha !== expectedSha) {
@@ -57,15 +76,16 @@ export async function verifyReleaseArtifacts(options) {
     }
   }
 
-  for (const entry of manifest.packages) {
-    const relativePath = `packages/${basename(entry.tarball)}`;
+  for (const relativePath of expectedPackageRelativePaths) {
+    const entry = manifest.packages.find((candidate) => `packages/${basename(candidate.tarball)}` === relativePath);
+    if (!entry) throw new Error(`Missing manifest package entry for ${relativePath}.`);
     const actualSha = await sha256(join(artifactsDir, relativePath));
     if (actualSha !== entry.sha256) {
       throw new Error(`Artifact checksum mismatch for ${relativePath}.`);
     }
   }
 
-  return { manifestPath, checksumsPath, imageTarPath };
+  return { manifestPath, checksumsPath, imageTarPath, packageRelativePaths: expectedPackageRelativePaths };
 }
 
 function parseChecksums(content) {
@@ -74,9 +94,46 @@ function parseChecksums(content) {
     if (line.trim().length === 0) continue;
     const match = /^([0-9a-f]{64})  (.+)$/.exec(line);
     if (!match) throw new Error(`Invalid checksums.txt line: ${line}`);
-    entries.set(match[2], match[1]);
+    const relativePath = normalizeChecksumPath(match[2]);
+    if (entries.has(relativePath)) {
+      throw new Error(`Duplicate checksum entry for ${relativePath}.`);
+    }
+    entries.set(relativePath, match[1]);
   }
   return entries;
+}
+
+async function collectArtifactFiles(artifactsDir) {
+  const relativePaths = new Set();
+  await walkArtifacts(artifactsDir, "", relativePaths);
+  return relativePaths;
+}
+
+async function walkArtifacts(root, relativeDirectory, relativePaths) {
+  const directory = relativeDirectory.length === 0 ? root : join(root, relativeDirectory);
+  const entries = await readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    const relativePath = relativeDirectory.length === 0 ? entry.name : `${relativeDirectory}/${entry.name}`;
+    if (entry.isDirectory()) {
+      await walkArtifacts(root, relativePath, relativePaths);
+      continue;
+    }
+    if (!entry.isFile()) {
+      throw new Error(`Unexpected artifact type ${relativePath}.`);
+    }
+    relativePaths.add(relativePath);
+  }
+}
+
+function normalizeChecksumPath(path) {
+  if (isAbsolute(path)) {
+    throw new Error(`Checksum entry path must be relative: ${path}`);
+  }
+  const normalized = normalize(path).replace(/\\/g, "/");
+  if (normalized === ".." || normalized.startsWith("../")) {
+    throw new Error(`Checksum entry path escapes artifacts directory: ${path}`);
+  }
+  return normalized;
 }
 
 async function sha256(path) {
@@ -124,7 +181,12 @@ function parseArgs(argv) {
 
 async function main() {
   const result = await verifyReleaseArtifacts(parseArgs(process.argv.slice(2)));
-  process.stdout.write(`${result.manifestPath}\n`);
+  process.stdout.write(`${JSON.stringify({
+    manifestPath: result.manifestPath,
+    checksumsPath: result.checksumsPath,
+    imageTarPath: result.imageTarPath,
+    packageRelativePaths: result.packageRelativePaths,
+  })}\n`);
 }
 
 const entrypoint = process.argv[1];

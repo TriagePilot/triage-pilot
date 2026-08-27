@@ -197,12 +197,15 @@ jobs:
             "${manifest_args[@]}"
           cp "$snapshot_dir/artifacts/release-manifest.json" "$GITHUB_WORKSPACE/artifacts/release-manifest.json"
           git worktree remove "$snapshot_dir" --force
-          sha256sum \
-            "$GITHUB_WORKSPACE"/artifacts/packages/*.tgz \
-            "$GITHUB_WORKSPACE"/artifacts/container/metadata.json \
-            "$GITHUB_WORKSPACE"/artifacts/container/triagepilot-${{ steps.release_meta.outputs.version }}.tar \
-            "$GITHUB_WORKSPACE"/artifacts/release-manifest.json \
-            > "$GITHUB_WORKSPACE/artifacts/checksums.txt"
+          (
+            cd "$GITHUB_WORKSPACE/artifacts"
+            sha256sum \
+              container/metadata.json \
+              "container/triagepilot-${{ steps.release_meta.outputs.version }}.tar" \
+              release-manifest.json \
+              $(find packages -maxdepth 1 -type f -name '*.tgz' -print | sort) \
+              > checksums.txt
+          )
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -248,12 +251,13 @@ jobs:
       - name: Revalidate downloaded release manifest
         run: |
           set -Eeuo pipefail
-          node scripts/verify-release-artifacts.mjs \
+          verification_json="$(node scripts/verify-release-artifacts.mjs \
             --artifacts-dir artifacts \
             --version "${{ needs.build_verify.outputs.version }}" \
             --git-commit "${{ needs.build_verify.outputs.git_commit }}" \
             --database-migration 0006_decision_outbox.sql \
-            --container-digest "${{ needs.build_verify.outputs.container_digest }}"
+            --container-digest "${{ needs.build_verify.outputs.container_digest }}")"
+          printf '%s\n' "$verification_json" > artifacts/verified-release.json
 
       - name: Publish container image
         run: |
@@ -272,6 +276,15 @@ jobs:
       - name: Publish packages with npm provenance
         run: |
           set -Eeuo pipefail
-          for tarball in artifacts/packages/*.tgz; do
+          mapfile -t package_tarballs < <(node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const verification = JSON.parse(readFileSync("artifacts/verified-release.json", "utf8"));
+          for (const relativePath of verification.packageRelativePaths) {
+            process.stdout.write(`artifacts/${relativePath}\n`);
+          }
+          NODE
+          )
+          for tarball in "${package_tarballs[@]}"; do
             npm publish "$tarball" --provenance --access public
           done

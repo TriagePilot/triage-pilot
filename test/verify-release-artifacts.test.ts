@@ -80,6 +80,111 @@ describe("verifyReleaseArtifacts", () => {
       }),
     ).rejects.toThrow("checksums.txt is missing container/triagepilot-0.1.0.tar.");
   });
+
+  it("fails when checksums.txt uses absolute paths instead of canonical relative artifact paths", async () => {
+    const fixture = await createArtifactFixture();
+    const checksumsPath = join(fixture.artifactsDir, "checksums.txt");
+    const content = await readFile(checksumsPath, "utf8");
+    await writeFile(
+      checksumsPath,
+      content.replace("release-manifest.json", `${fixture.artifactsDir}/release-manifest.json`),
+    );
+
+    await expect(
+      verifyReleaseArtifacts({
+        artifactsDir: fixture.artifactsDir,
+        version: "0.1.0",
+        gitCommit: fixture.gitCommit,
+        databaseMigration: "0006_decision_outbox.sql",
+        containerDigest: fixture.containerDigest,
+      }),
+    ).rejects.toThrow("Checksum entry path must be relative: ");
+  });
+
+  it("fails on duplicate checksum entries, traversal paths, unexpected entries, and extra package tarballs", async () => {
+    const duplicateFixture = await createArtifactFixture();
+    await writeFile(
+      join(duplicateFixture.artifactsDir, "checksums.txt"),
+      `${await readFile(join(duplicateFixture.artifactsDir, "checksums.txt"), "utf8")}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  release-manifest.json\n`,
+    );
+    await expect(
+      verifyReleaseArtifacts({
+        artifactsDir: duplicateFixture.artifactsDir,
+        version: "0.1.0",
+        gitCommit: duplicateFixture.gitCommit,
+        databaseMigration: "0006_decision_outbox.sql",
+        containerDigest: duplicateFixture.containerDigest,
+      }),
+    ).rejects.toThrow("Duplicate checksum entry for release-manifest.json.");
+
+    const traversalFixture = await createArtifactFixture();
+    await writeFile(
+      join(traversalFixture.artifactsDir, "checksums.txt"),
+      `${await readFile(join(traversalFixture.artifactsDir, "checksums.txt"), "utf8")}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  ../escape\n`,
+    );
+    await expect(
+      verifyReleaseArtifacts({
+        artifactsDir: traversalFixture.artifactsDir,
+        version: "0.1.0",
+        gitCommit: traversalFixture.gitCommit,
+        databaseMigration: "0006_decision_outbox.sql",
+        containerDigest: traversalFixture.containerDigest,
+      }),
+    ).rejects.toThrow("Checksum entry path escapes artifacts directory: ../escape");
+
+    const unexpectedChecksumFixture = await createArtifactFixture();
+    await writeFile(
+      join(unexpectedChecksumFixture.artifactsDir, "checksums.txt"),
+      `${await readFile(join(unexpectedChecksumFixture.artifactsDir, "checksums.txt"), "utf8")}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  packages/unexpected-0.1.0.tgz\n`,
+    );
+    await expect(
+      verifyReleaseArtifacts({
+        artifactsDir: unexpectedChecksumFixture.artifactsDir,
+        version: "0.1.0",
+        gitCommit: unexpectedChecksumFixture.gitCommit,
+        databaseMigration: "0006_decision_outbox.sql",
+        containerDigest: unexpectedChecksumFixture.containerDigest,
+      }),
+    ).rejects.toThrow("Unexpected checksum entry packages/unexpected-0.1.0.tgz.");
+
+    const extraPackageFixture = await createArtifactFixture();
+    await writeFile(join(extraPackageFixture.artifactsDir, "packages", "triagepilot-extra-0.1.0.tgz"), "extra\n");
+    await expect(
+      verifyReleaseArtifacts({
+        artifactsDir: extraPackageFixture.artifactsDir,
+        version: "0.1.0",
+        gitCommit: extraPackageFixture.gitCommit,
+        databaseMigration: "0006_decision_outbox.sql",
+        containerDigest: extraPackageFixture.containerDigest,
+      }),
+    ).rejects.toThrow("Unexpected artifact file packages/triagepilot-extra-0.1.0.tgz.");
+  });
+
+  it("fails when required files are missing or unexpected files exist under artifact roots", async () => {
+    const missingFixture = await createArtifactFixture();
+    await rm(join(missingFixture.artifactsDir, "container", "metadata.json"));
+    await expect(
+      verifyReleaseArtifacts({
+        artifactsDir: missingFixture.artifactsDir,
+        version: "0.1.0",
+        gitCommit: missingFixture.gitCommit,
+        databaseMigration: "0006_decision_outbox.sql",
+        containerDigest: missingFixture.containerDigest,
+      }),
+    ).rejects.toThrow(/ENOENT/);
+
+    const unexpectedFixture = await createArtifactFixture();
+    await writeFile(join(unexpectedFixture.artifactsDir, "container", "extra.txt"), "extra\n");
+    await expect(
+      verifyReleaseArtifacts({
+        artifactsDir: unexpectedFixture.artifactsDir,
+        version: "0.1.0",
+        gitCommit: unexpectedFixture.gitCommit,
+        databaseMigration: "0006_decision_outbox.sql",
+        containerDigest: unexpectedFixture.containerDigest,
+      }),
+    ).rejects.toThrow("Unexpected artifact file container/extra.txt.");
+  });
 });
 
 async function createArtifactFixture() {

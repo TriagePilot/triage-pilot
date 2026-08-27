@@ -24,5 +24,9 @@ describe("release workflow guardrails", () => {
 
     expect(release).toMatch(/\[\[\s+!\s+"\$GITHUB_REF_NAME"\s+=~\s+\^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$\s+\]\]/);
     expect(release).toContain('node scripts/verify-release-artifacts.mjs');
+    expect(release).toContain('cd "$GITHUB_WORKSPACE/artifacts"');
+    expect(release).toContain('find packages -maxdepth 1 -type f -name \'*.tgz\' -print | sort');
+    expect(release).not.toContain('for tarball in artifacts/packages/*.tgz; do');
+    expect(release).toContain('mapfile -t package_tarballs < <(node --input-type=module');
   });
 });
