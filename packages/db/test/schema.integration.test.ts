@@ -15,6 +15,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         order by table_name
       `.execute(db);
       expect(result.rows.map((row) => row.table_name)).toEqual([
+        "decision_outbox",
         "jobs",
         "provider_connections",
         "repositories",
@@ -74,6 +75,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         { name: "0003_human_review_policy.sql" },
         { name: "0004_semantic_routing_deduplication.sql" },
         { name: "0005_workspace_scope.sql" },
+        { name: "0006_decision_outbox.sql" },
       ]);
     });
   });

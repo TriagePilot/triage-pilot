@@ -105,6 +105,19 @@ export interface RoutingDecisionsTable {
   created_at: Timestamp;
 }
 
+export interface DecisionOutboxTable {
+  id: Generated<string>;
+  workspace_id: string;
+  decision_id: string;
+  schema_version: number;
+  payload: Json;
+  occurred_at: Timestamp;
+  available_at: Timestamp;
+  published_at: NullableTimestamp;
+  attempt_count: Generated<number>;
+  last_error: string | null;
+}
+
 export interface WorkerHeartbeatTable {
   id: ColumnType<boolean, boolean | undefined, never>;
   worker_id: string;
@@ -118,6 +131,7 @@ export interface Database {
   webhook_receipts: WebhookReceiptsTable;
   jobs: JobsTable;
   routing_decisions: RoutingDecisionsTable;
+  decision_outbox: DecisionOutboxTable;
   worker_heartbeat: WorkerHeartbeatTable;
 }
 

@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { sql, type Kysely } from "kysely";
-import { legacyRoutingKey, type ActionStatus, type RepositoryMode, type RoutingAction, type WorkspaceId } from "@triagepilot/contracts";
+import { sql, type Kysely, type Transaction } from "kysely";
+import { legacyRoutingKey, type ActionStatus, type DecisionEventV1, type RepositoryMode, type RoutingAction, type WorkspaceId } from "@triagepilot/contracts";
 
 import type { Database } from "./kysely";
+import { stageDecisionEvent } from "./outbox";
 
 export interface DecisionInput {
   repositoryId: string;
@@ -48,9 +49,33 @@ export interface HumanReviewPolicyDecision {
 }
 
 type PolicyCheckState = Exclude<HumanReviewPolicyDecision["policyCheckState"], "not_started">;
+type DatabaseExecutor = Kysely<Database> | Transaction<Database>;
 
 export async function persistDecision(
   db: Kysely<Database>,
+  workspaceId: WorkspaceId,
+  input: DecisionInput,
+): Promise<PersistedDecision> {
+  return await persistDecisionRecord(db, workspaceId, input);
+}
+
+export async function persistDecisionWithEvent(
+  db: Kysely<Database>,
+  workspaceId: WorkspaceId,
+  input: {
+    decision: DecisionInput;
+    event(persisted: PersistedDecision): DecisionEventV1;
+  },
+): Promise<PersistedDecision> {
+  return await db.transaction().execute(async (trx) => {
+    const persisted = await persistDecisionRecord(trx, workspaceId, input.decision);
+    await stageDecisionEvent(trx, workspaceId, persisted.decisionId, input.event(persisted));
+    return persisted;
+  });
+}
+
+async function persistDecisionRecord(
+  db: DatabaseExecutor,
   workspaceId: WorkspaceId,
   input: DecisionInput,
 ): Promise<PersistedDecision> {

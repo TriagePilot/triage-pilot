@@ -3,18 +3,21 @@ import { pathToFileURL } from "node:url";
 import {
   createJobClaimer,
   createDatabase,
+  createDecisionOutboxRepository,
   createWorkspaceRepositories,
   ensureLocalWorkspace,
+  publishDecisionOutbox,
   updateWorkerHeartbeat,
 } from "@triagepilot/db";
 import { formatLog } from "@triagepilot/shared";
 
 import { readWorkerEnv } from "./env";
-import { runWorkerMaintenance, runWorkerStartup } from "./maintenance";
+import { runDecisionOutboxDrain, runWorkerMaintenance, runWorkerStartup } from "./maintenance";
 import { processRoutingJob } from "./processor";
 import { processHumanReviewPolicyJob } from "./review-policy-processor";
 import { runWorkerOnce } from "./runner";
 import {
+  createNoopDecisionEventSink,
   createWorkerHumanReviewPolicyServiceFactory,
   createWorkerRoutingServiceFactory,
 } from "./runtime-services";
@@ -26,7 +29,9 @@ export async function runWorkerProcess(source: NodeJS.ProcessEnv = process.env):
   try {
     const workspaceId = await ensureLocalWorkspace(db);
     const localRepositories = createWorkspaceRepositories(db, workspaceId);
+    const decisionOutbox = createDecisionOutboxRepository(db, workspaceId);
     const jobClaimer = createJobClaimer(db);
+    const decisionEventSink = createNoopDecisionEventSink();
     const buildRoutingServices = createWorkerRoutingServiceFactory({ db, github: env.github });
     const buildHumanReviewPolicyServices = createWorkerHumanReviewPolicyServiceFactory({ db, github: env.github });
     const maintenanceServices = {
@@ -38,6 +43,9 @@ export async function runWorkerProcess(source: NodeJS.ProcessEnv = process.env):
       },
       async updateHeartbeat(now: Date) {
         await updateWorkerHeartbeat(db, { workerId: env.workerId, now });
+      },
+      async drainDecisionOutbox(now: Date) {
+        await publishDecisionOutbox({ repository: decisionOutbox, sink: decisionEventSink, limit: 25, now });
       },
     };
     let maintenanceState = await runWorkerStartup(maintenanceServices, new Date());
@@ -57,6 +65,7 @@ export async function runWorkerProcess(source: NodeJS.ProcessEnv = process.env):
           processHumanReviewPolicyJob,
           buildHumanReviewPolicyServices,
         });
+        await runDecisionOutboxDrain(maintenanceServices, new Date());
       } catch (error) {
         console.error(
           formatLog({

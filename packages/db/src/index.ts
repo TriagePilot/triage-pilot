@@ -19,12 +19,22 @@ export {
   markActionSucceeded,
   findLatestHumanReviewPolicyDecision,
   persistDecision,
+  persistDecisionWithEvent,
   recordPolicyCheck,
   updatePolicyCheckState,
   type DecisionInput,
   type HumanReviewPolicyDecision,
   type PersistedDecision,
 } from "./decisions";
+export {
+  claimDecisionEvents,
+  createDecisionOutboxRepository,
+  markDecisionEventPublished,
+  publishDecisionOutbox,
+  stageDecisionEvent,
+  type DecisionOutboxRecord,
+  type DecisionOutboxRepository,
+} from "./outbox";
 export {
   acceptHumanReviewPolicyDelivery,
   acceptRoutingDelivery,
@@ -59,7 +69,7 @@ export {
   RECEIPT_AND_COMPLETED_JOB_DAYS,
 } from "./retention";
 export { runMigrations } from "./migrate";
-export type { Database, WorkerHeartbeatTable } from "./kysely";
+export type { Database, DecisionOutboxTable, WorkerHeartbeatTable } from "./kysely";
 export {
   createWorkspaceRepositories,
   ensureLocalWorkspace,

@@ -5,13 +5,14 @@ import {
   type GitHubAppCredentials,
 } from "@triagepilot/provider-github";
 import { resolveConfiguration as resolveEffectiveConfiguration } from "@triagepilot/config";
-import { trustedBaseSha, type HumanReviewPolicyJobPayload, type ScoreComponent } from "@triagepilot/contracts";
+import { trustedBaseSha, type DecisionEventSink, type HumanReviewPolicyJobPayload, type ScoreComponent } from "@triagepilot/contracts";
 import {
   createWorkspaceJobQueue,
   findLatestHumanReviewPolicyDecision,
   markActionFailed as persistActionFailed,
   markActionSucceeded as persistActionSucceeded,
   persistDecision as persistRoutingDecision,
+  persistDecisionWithEvent,
   recordPolicyCheck,
   updatePolicyCheckState,
   type createDatabase,
@@ -31,6 +32,10 @@ import type { HumanReviewPolicyServices } from "./review-policy-processor";
 type Requester = Awaited<ReturnType<typeof createInstallationRequester>>;
 type DatabaseClient = ReturnType<typeof createDatabase>;
 
+export function createNoopDecisionEventSink(): DecisionEventSink {
+  return { async emit() {} };
+}
+
 export function createWorkerRoutingServiceFactory(input: {
   db: DatabaseClient;
   github: GitHubAppCredentials;
@@ -43,6 +48,7 @@ export function createWorkerRoutingServiceFactory(input: {
     let knownRepositoryPromise: Promise<KnownRepository> | null = null;
     let pullRequestPromise: Promise<unknown> | null = null;
     let persistedDecisionId: string | null = null;
+    const clock = { now: () => new Date() };
 
     async function requester(): Promise<Requester> {
       await repositoryId();
@@ -238,26 +244,44 @@ export function createWorkerRoutingServiceFactory(input: {
 
       decisions: {
         async persist(decision) {
-          const persisted = await persistRoutingDecision(input.db, message.workspaceId, {
-            repositoryId: await repositoryId(),
-            deliveryId: decision.deliveryId,
-            routingKey: decision.routingKey,
-            pullNumber: decision.changeRequestNumber,
-            headSha: decision.headRevision,
-            mode: decision.mode,
-            action: decision.action,
-            actionStatus: decision.actionStatus,
-            riskScore: decision.riskScore,
-            ...(decision.selectedActors === undefined ? {} : { selectedReviewers: decision.selectedActors }),
-            ...(decision.noHumanReason === undefined ? {} : { noHumanReason: decision.noHumanReason }),
-            details: decision.details,
-            organizationConfigVersion: decision.organizationConfigVersion,
-            repositoryConfigPath: decision.repositoryConfigPath,
-            repositoryConfigRevision: decision.repositoryConfigRevision,
-            ...(decision.effectiveConfigHash === null ? {} : { effectiveConfigHash: decision.effectiveConfigHash }),
-            inheritanceMode: decision.inheritanceMode,
-            configDiagnostics: decision.configDiagnostics,
-            configSources: decision.configSources,
+          const persisted = await persistDecisionWithEvent(input.db, message.workspaceId, {
+            decision: {
+              repositoryId: await repositoryId(),
+              deliveryId: decision.deliveryId,
+              routingKey: decision.routingKey,
+              pullNumber: decision.changeRequestNumber,
+              headSha: decision.headRevision,
+              mode: decision.mode,
+              action: decision.action,
+              actionStatus: decision.actionStatus,
+              riskScore: decision.riskScore,
+              ...(decision.selectedActors === undefined ? {} : { selectedReviewers: decision.selectedActors }),
+              ...(decision.noHumanReason === undefined ? {} : { noHumanReason: decision.noHumanReason }),
+              details: decision.details,
+              organizationConfigVersion: decision.organizationConfigVersion,
+              repositoryConfigPath: decision.repositoryConfigPath,
+              repositoryConfigRevision: decision.repositoryConfigRevision,
+              ...(decision.effectiveConfigHash === null ? {} : { effectiveConfigHash: decision.effectiveConfigHash }),
+              inheritanceMode: decision.inheritanceMode,
+              configDiagnostics: decision.configDiagnostics,
+              configSources: decision.configSources,
+            },
+            event: ({ decisionId }) => ({
+              schemaVersion: 1,
+              eventId: `decision:${decisionId}:v1`,
+              occurredAt: clock.now().toISOString(),
+              workspaceId: message.workspaceId,
+              provider: repository.provider,
+              decisionId,
+              repositoryId: repository.externalId,
+              changeRequestId: changeRequest.externalId,
+              routingKey: decision.routingKey,
+              mode: decision.mode,
+              action: decision.action,
+              riskScore: decision.riskScore,
+              selectedActors: decision.selectedActors ?? [],
+              effectiveConfigurationHash: decision.effectiveConfigHash ?? "invalid",
+            }),
           });
           persistedDecisionId = persisted.decisionId;
           return persisted;
@@ -274,7 +298,7 @@ export function createWorkerRoutingServiceFactory(input: {
 
       async stageDecisionEvent() {},
 
-      clock: { now: () => new Date() },
+      clock,
 
       async failPolicyCheck(summary) {
         persistedDecisionId ??= await findDecisionIdForDelivery(

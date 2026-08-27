@@ -7,6 +7,7 @@ function buildServices() {
     recoverStaleJobs: vi.fn(async (_now: Date) => {}),
     applyRetention: vi.fn(async (_now: Date) => {}),
     updateHeartbeat: vi.fn(async (_now: Date) => {}),
+    drainDecisionOutbox: vi.fn(async (_now: Date) => {}),
   };
 }
 
@@ -22,6 +23,8 @@ describe("worker maintenance", () => {
     expect(services.applyRetention).toHaveBeenCalledWith(now);
     expect(services.updateHeartbeat).toHaveBeenCalledOnce();
     expect(services.updateHeartbeat).toHaveBeenCalledWith(now);
+    expect(services.drainDecisionOutbox).toHaveBeenCalledOnce();
+    expect(services.drainDecisionOutbox).toHaveBeenCalledWith(now);
   });
 
   it("recovers stale jobs and heartbeats on every cycle without early retention", async () => {
@@ -32,6 +35,7 @@ describe("worker maintenance", () => {
     await expect(runWorkerMaintenance({ lastRetentionAt }, services, now)).resolves.toEqual({ lastRetentionAt });
     expect(services.recoverStaleJobs).toHaveBeenCalledWith(now);
     expect(services.updateHeartbeat).toHaveBeenCalledWith(now);
+    expect(services.drainDecisionOutbox).toHaveBeenCalledWith(now);
     expect(services.applyRetention).not.toHaveBeenCalled();
   });
 
@@ -48,5 +52,18 @@ describe("worker maintenance", () => {
     await runWorkerMaintenance({ lastRetentionAt: now }, services, nextCycle);
     expect(services.updateHeartbeat).toHaveBeenCalledTimes(2);
     expect(services.applyRetention).toHaveBeenCalledOnce();
+    expect(services.drainDecisionOutbox).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not fail maintenance when the decision outbox sink is unavailable", async () => {
+    const services = buildServices();
+    services.drainDecisionOutbox.mockRejectedValueOnce(new Error("sink unavailable"));
+    const lastRetentionAt = new Date("2026-08-18T10:00:00.000Z");
+    const now = new Date("2026-08-19T09:00:00.000Z");
+
+    await expect(runWorkerMaintenance({ lastRetentionAt }, services, now)).resolves.toEqual({ lastRetentionAt });
+    expect(services.recoverStaleJobs).toHaveBeenCalledWith(now);
+    expect(services.updateHeartbeat).toHaveBeenCalledWith(now);
+    expect(services.applyRetention).not.toHaveBeenCalled();
   });
 });
