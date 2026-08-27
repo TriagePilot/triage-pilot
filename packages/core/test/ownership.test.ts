@@ -18,7 +18,12 @@ describe("matchOwnership", () => {
         matchedFiles: ["src/billing/invoice.ts"],
       },
     ]);
-    expect(result.eligibleReviewers).toEqual(["@user-b4e82d", "@user-5c9f21"]);
+    expect(result.preferredReviewers).toEqual(["@user-b4e82d", "@user-5c9f21"]);
+    expect(result.eligibleReviewers).toEqual([
+      "@user-b4e82d",
+      "@user-5c9f21",
+      "@team-a7f19c/engineers",
+    ]);
     expect(result.uncoveredFiles).toEqual(["docs/readme.md"]);
   });
 
@@ -30,6 +35,7 @@ describe("matchOwnership", () => {
     });
 
     expect(result.eligibleReviewers).toEqual(["@team-a7f19c/engineers"]);
+    expect(result.preferredReviewers).toEqual(["@team-a7f19c/engineers"]);
     expect(result.usedFallback).toBe(true);
   });
 });

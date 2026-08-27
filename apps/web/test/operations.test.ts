@@ -31,6 +31,8 @@ const overview = {
       riskBreakdown: null,
       selectedReviewer: "@team-a7f19c/reviewers",
       selectedReviewers: ["@team-a7f19c/reviewers", "@user-b4e82d"],
+      requestedReviewerCount: 2,
+      reviewerShortfall: 0,
       createdAt: "2026-08-18T10:00:00.000Z",
     },
   ],

@@ -183,6 +183,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
         riskScore: 51,
         selectedReviewer: null,
         selectedReviewers: [],
+        requestedReviewerCount: null,
+        reviewerShortfall: null,
         riskBreakdown: {
           classifierVersion: "risk-v1",
           tier: "medium",

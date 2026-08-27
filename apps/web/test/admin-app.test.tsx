@@ -58,6 +58,7 @@ describe("admin application", () => {
     expect(html).toContain('rel="noreferrer"');
     expect(html).toContain("Reviewers");
     expect(html).toContain("@team-a7f19c/reviewers, @user-b4e82d");
+    expect(html).toContain("2 of 2 required");
     expect(html).toContain("GitHub permission denied");
     expect(html).toContain("Review request rejected");
     expect(html.match(/<table/g)).toHaveLength(5);
@@ -93,6 +94,28 @@ describe("admin application", () => {
     expect(html).toContain("No routing decisions have been recorded yet.");
     expect(html).toContain("No permanent job failures.");
     expect(html).toContain("No action failures.");
+  });
+
+  it("shows why a reviewer quota was not fulfilled", () => {
+    const html = renderToStaticMarkup(
+      <Dashboard
+        username="admin"
+        overview={{
+          ...overview,
+          decisions: [{
+            ...overview.decisions[0],
+            selectedReviewer: "@user-b4e82d",
+            selectedReviewers: ["@user-b4e82d"],
+            reviewerShortfall: 1,
+          }],
+        }}
+        availability={availability}
+        onAvailabilityChange={() => {}}
+        onLogout={async () => {}}
+      />,
+    );
+
+    expect(html).toContain("1 of 2 required · shortfall 1");
   });
 
   it("keeps an operational error visible without replacing readable data", () => {
@@ -223,6 +246,8 @@ const overview: OperationsOverview = {
       riskBreakdown: null,
       selectedReviewer: "@team-a7f19c/reviewers",
       selectedReviewers: ["@team-a7f19c/reviewers", "@user-b4e82d"],
+      requestedReviewerCount: 2,
+      reviewerShortfall: 0,
       createdAt: "2026-08-18T10:00:00.000Z",
     },
   ],

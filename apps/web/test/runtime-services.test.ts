@@ -246,7 +246,11 @@ describe("web runtime services", () => {
             selected_reviewer: "@team-a7f19c/reviewers",
             selected_reviewers: JSON.stringify(["@team-a7f19c/reviewers", "@user-b4e82d"]),
             no_human_reason: null,
-            details: { pullNumber: 7, privateKey: "raw-detail-secret" },
+            details: {
+              pullNumber: 7,
+              privateKey: "raw-detail-secret",
+              routing: { requestedReviewerCount: 2, reviewerShortfall: 0 },
+            },
             created_at: new Date("2026-08-18T10:00:00.000Z"),
           })
           .returning("id")
@@ -296,6 +300,8 @@ describe("web runtime services", () => {
               riskBreakdown: null,
               selectedReviewer: "@team-a7f19c/reviewers",
               selectedReviewers: ["@team-a7f19c/reviewers", "@user-b4e82d"],
+              requestedReviewerCount: 2,
+              reviewerShortfall: 0,
               createdAt: "2026-08-18T10:00:00.000Z",
             },
           ],

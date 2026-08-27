@@ -291,6 +291,7 @@ function reviewerReplacementCandidate(): ReviewerReplacementCandidate {
     mode: "enforce",
     selectedReviewers: ["@user-d82a5f"],
     originalEligibleReviewers: ["@user-d82a5f", "@user-f30c8a"],
+    originalPreferredReviewers: ["@user-d82a5f", "@user-f30c8a"],
     requiredApprovalCount: 1,
     policyCheckRunId: "71",
     policyCheckState: "in_progress",

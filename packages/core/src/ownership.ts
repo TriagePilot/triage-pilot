@@ -18,6 +18,7 @@ export interface OwnershipMatchResult {
     reviewers: string[];
     matchedFiles: string[];
   }>;
+  preferredReviewers: string[];
   eligibleReviewers: string[];
   uncoveredFiles: string[];
   usedFallback: boolean;
@@ -36,10 +37,12 @@ export function matchOwnership(input: OwnershipInput): OwnershipMatchResult {
   const matchedFiles = new Set(matchedRules.flatMap((rule) => rule.matchedFiles));
   const directReviewers = dedupe(matchedRules.flatMap((rule) => rule.reviewers));
   const usedFallback = directReviewers.length === 0;
+  const fallbackReviewers = dedupe(input.fallbackReviewers);
 
   return {
     matchedRules,
-    eligibleReviewers: usedFallback ? dedupe(input.fallbackReviewers) : directReviewers,
+    preferredReviewers: usedFallback ? fallbackReviewers : directReviewers,
+    eligibleReviewers: usedFallback ? fallbackReviewers : dedupe([...directReviewers, ...fallbackReviewers]),
     uncoveredFiles: input.files.filter((file) => !matchedFiles.has(file)),
     usedFallback,
   };

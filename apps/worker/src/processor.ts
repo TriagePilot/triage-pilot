@@ -142,6 +142,11 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
     absences: absenceWindows,
     now: availabilityEvaluatedAt,
   });
+  const availablePreferredReviewers = availableReviewerHandlesAt({
+    reviewers: ownership.preferredReviewers,
+    absences: absenceWindows,
+    now: availabilityEvaluatedAt,
+  });
   const excludedReviewers = canonicalEligibleReviewers.filter(
     (reviewer) => !availableEligibleReviewers.includes(reviewer),
   );
@@ -161,6 +166,7 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
     risk,
     author: pullRequestMetadata.authorHandle,
     eligibleReviewers: availableEligibleReviewers,
+    preferredReviewers: availablePreferredReviewers,
     existingApprovedReviewers,
     load: reviewerLoad,
     highRiskReviewers: configResult.config.routing.highRiskReviewers,

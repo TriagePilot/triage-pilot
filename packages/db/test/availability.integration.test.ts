@@ -453,6 +453,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability", 
             mode: "enforce",
             selectedReviewers: ["@user-d82a5f", "@user-b4e82d"],
             originalEligibleReviewers: ["@user-d82a5f", "@user-b4e82d", "@user-c91e46"],
+            originalPreferredReviewers: ["@user-d82a5f", "@user-b4e82d", "@user-c91e46"],
             requiredApprovalCount: 2,
           },
           expect.objectContaining({
