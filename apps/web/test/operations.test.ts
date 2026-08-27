@@ -59,6 +59,15 @@ describe("operations routes", () => {
     expect(await response.json()).toEqual({ error: "unauthorized" });
   });
 
+  it("requires an administrator session for effective configuration", async () => {
+    const app = createWebApp(buildServices());
+
+    const response = await app.request("/api/operations/effective-configuration");
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "unauthorized" });
+  });
+
   it("returns the operational overview to an authenticated administrator", async () => {
     const { app, cookie } = await authenticatedApp({
       listOperationsOverview: async () => overview,
@@ -72,6 +81,19 @@ describe("operations routes", () => {
     expect(await response.json()).toEqual(overview);
   });
 
+  it("returns effective configuration provenance to an authenticated administrator", async () => {
+    const { app, cookie } = await authenticatedApp({
+      readEffectiveConfiguration: async () => effectiveConfiguration,
+    });
+
+    const response = await app.request("/api/operations/effective-configuration", {
+      headers: { cookie },
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(effectiveConfiguration);
+  });
+
   it.each(["/api/setup/status", "/api/setup/github-app", "/api/operations/recent"])(
     "does not expose the removed route %s",
     async (path) => {
@@ -83,6 +105,17 @@ describe("operations routes", () => {
     },
   );
 });
+
+const effectiveConfiguration = {
+  trustedPath: ".triagepilot.yml",
+  trustedRevision: "trusted-base-sha",
+  repositoryRevision: "trusted-base-sha",
+  inheritanceMode: "replace" as const,
+  effectiveHash: "a".repeat(64),
+  values: [
+    { path: "$.mode", label: "mode", value: "shadow", source: "repository" as const },
+  ],
+};
 
 async function authenticatedApp(overrides: Parameters<typeof buildServices>[0]) {
   const app = createWebApp(buildServices(overrides));

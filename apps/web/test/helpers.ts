@@ -32,6 +32,14 @@ export function buildServices(overrides: Partial<WebServices> = {}): WebServices
       failures: { jobs: [], actions: [] },
       worker: { available: false, workerId: null, lastHeartbeatAt: null },
     }),
+    readEffectiveConfiguration: async () => ({
+      trustedPath: null,
+      trustedRevision: "self-hosted-probe",
+      repositoryRevision: null,
+      inheritanceMode: "defaults",
+      effectiveHash: "a".repeat(64),
+      values: [],
+    }),
     ...overrides,
   };
 }

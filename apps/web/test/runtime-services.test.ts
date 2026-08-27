@@ -229,6 +229,14 @@ function runtimeInput(
     },
     verifySignature: async () => {},
     normalizeGitHubWebhook: () => null,
+    readEffectiveConfiguration: async () => ({
+      trustedPath: null,
+      trustedRevision: "self-hosted-probe",
+      repositoryRevision: null,
+      inheritanceMode: "defaults" as const,
+      effectiveHash: "a".repeat(64),
+      values: [],
+    }),
   };
 }
 

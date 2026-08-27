@@ -3,6 +3,7 @@ import {
   type createDatabase,
   type WorkspaceRepositories,
 } from "@triagepilot/db";
+import type { EffectiveConfigurationOverview } from "@triagepilot/ui";
 import type { WorkspaceId } from "@triagepilot/contracts";
 import type { GitHubAppCredentialShape } from "@triagepilot/provider-github";
 import { formatLog } from "@triagepilot/shared";
@@ -24,6 +25,7 @@ interface WebRuntimeServicesInput {
   github: GitHubAppCredentialShape;
   verifySignature: WebServices["verifySignature"];
   normalizeGitHubWebhook: WebServices["normalizeGitHubWebhook"];
+  readEffectiveConfiguration: () => Promise<EffectiveConfigurationOverview>;
 }
 
 export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebServices {
@@ -116,6 +118,10 @@ export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebSer
         now: input.now(),
         heartbeatStaleAfterMs: 30_000,
       });
+    },
+
+    async readEffectiveConfiguration() {
+      return await input.readEffectiveConfiguration();
     },
   };
 }

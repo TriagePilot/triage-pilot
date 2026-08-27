@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { fetchOperationsOverview, getSession, login, logout } from "../src/admin/api";
+import {
+  fetchEffectiveConfigurationForWorkspace,
+  fetchOperationsOverview,
+  fetchOperationsOverviewForWorkspace,
+  getSession,
+  login,
+  logout,
+} from "../src/admin/api";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -56,6 +63,47 @@ describe("admin API", () => {
     expect(calls).toEqual([
       ["/api/operations/overview", { credentials: "same-origin" }],
       ["/api/auth/logout", { method: "POST", credentials: "same-origin" }],
+    ]);
+  });
+
+  it("sends the active workspace context when fetching reusable operations data", async () => {
+    const calls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push([input, init]);
+      if (input === "/api/operations/overview") return Response.json(emptyOverview);
+      if (input === "/api/operations/effective-configuration") {
+        return Response.json({
+          trustedPath: null,
+          trustedRevision: "self-hosted-probe",
+          repositoryRevision: null,
+          inheritanceMode: "defaults",
+          effectiveHash: "a".repeat(64),
+          values: [],
+        });
+      }
+      throw new Error(`unexpected request to ${String(input)}`);
+    });
+
+    const workspace = { id: "ws_local", displayName: "Self-hosted" };
+
+    await fetchOperationsOverviewForWorkspace(workspace);
+    await fetchEffectiveConfigurationForWorkspace(workspace);
+
+    expect(calls).toEqual([
+      [
+        "/api/operations/overview",
+        {
+          credentials: "same-origin",
+          headers: { "x-triagepilot-workspace": "ws_local" },
+        },
+      ],
+      [
+        "/api/operations/effective-configuration",
+        {
+          credentials: "same-origin",
+          headers: { "x-triagepilot-workspace": "ws_local" },
+        },
+      ],
     ]);
   });
 

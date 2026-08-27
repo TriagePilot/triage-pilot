@@ -16,6 +16,7 @@
     "@triagepilot/db": "workspace:*",
     "@triagepilot/provider-github": "workspace:*",
     "@triagepilot/shared": "workspace:*",
+    "@triagepilot/ui": "workspace:*",
     "@vitejs/plugin-react": "^4.3.4",
     "hono": "^4.12.34",
     "kysely": "^0.28.17",

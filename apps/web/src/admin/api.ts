@@ -1,4 +1,9 @@
-import type { OperationsOverview } from "@triagepilot/db";
+import type {
+  EffectiveConfigurationOverview,
+  OperationsApiClient,
+  OperationsOverview,
+  WorkspaceContext,
+} from "@triagepilot/ui";
 
 export type AdminSession =
   | { authenticated: true; username: string }
@@ -52,4 +57,69 @@ export async function fetchOperationsOverview(): Promise<OperationsOverview> {
   return response.json() as Promise<OperationsOverview>;
 }
 
-export type { OperationsOverview };
+export function createSelfHostedOperationsApi(input: {
+  onUnauthorized?(message: string): void;
+} = {}): OperationsApiClient {
+  return {
+    async readOperationsOverview(workspace) {
+      try {
+        return await fetchOperationsOverviewForWorkspace(workspace);
+      } catch (caught) {
+        notifyUnauthorized(caught, input.onUnauthorized);
+        throw caught;
+      }
+    },
+    async readEffectiveConfiguration(workspace) {
+      try {
+        return await fetchEffectiveConfigurationForWorkspace(workspace);
+      } catch (caught) {
+        notifyUnauthorized(caught, input.onUnauthorized);
+        throw caught;
+      }
+    },
+  };
+}
+
+export async function fetchOperationsOverviewForWorkspace(
+  workspace: WorkspaceContext,
+): Promise<OperationsOverview> {
+  const response = await fetch("/api/operations/overview", {
+    credentials: "same-origin",
+    headers: workspaceHeaders(workspace),
+  });
+  if (response.status === 401) {
+    throw new AdminApiError("The administrator session has expired.", response.status);
+  }
+  if (!response.ok) {
+    throw new AdminApiError("Could not load the operations overview.", response.status);
+  }
+  return response.json() as Promise<OperationsOverview>;
+}
+
+export async function fetchEffectiveConfigurationForWorkspace(
+  workspace: WorkspaceContext,
+): Promise<EffectiveConfigurationOverview> {
+  const response = await fetch("/api/operations/effective-configuration", {
+    credentials: "same-origin",
+    headers: workspaceHeaders(workspace),
+  });
+  if (response.status === 401) {
+    throw new AdminApiError("The administrator session has expired.", response.status);
+  }
+  if (!response.ok) {
+    throw new AdminApiError("Could not load the effective configuration.", response.status);
+  }
+  return response.json() as Promise<EffectiveConfigurationOverview>;
+}
+
+function notifyUnauthorized(caught: unknown, onUnauthorized: ((message: string) => void) | undefined) {
+  if (caught instanceof AdminApiError && caught.status === 401) {
+    onUnauthorized?.(caught.message);
+  }
+}
+
+function workspaceHeaders(workspace: WorkspaceContext): HeadersInit {
+  return { "x-triagepilot-workspace": workspace.id };
+}
+
+export type { EffectiveConfigurationOverview, OperationsOverview };

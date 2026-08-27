@@ -1,5 +1,5 @@
 import { getConnInfo } from "@hono/node-server/conninfo";
-import { resolveConfiguration } from "@triagepilot/config";
+import { resolveConfiguration, type TriagePilotConfig } from "@triagepilot/config";
 import type { ConfigurationDocument, ConfigurationSource, RepositoryRef, WorkspaceId } from "@triagepilot/contracts";
 import {
   createDatabase,
@@ -7,6 +7,7 @@ import {
   ensureLocalWorkspace,
   type WorkspaceRepositories,
 } from "@triagepilot/db";
+import type { EffectiveConfigurationOverview, EffectiveConfigurationValue } from "@triagepilot/ui";
 import {
   normalizeGitHubWebhook,
   verifyGitHubSignature,
@@ -40,6 +41,7 @@ export async function createSelfHostedWebComposition(env: WebRuntimeEnv): Promis
   const db = createDatabase(env.databaseUrl);
   const workspaceId = await ensureLocalWorkspace(db);
   const localRepositories = createWorkspaceRepositories(db, workspaceId);
+  const configuration = createSelfHostedConfigurationProbe(workspaceId);
   const services = createWebRuntimeServices({
     db,
     workspaceId,
@@ -54,6 +56,7 @@ export async function createSelfHostedWebComposition(env: WebRuntimeEnv): Promis
     github: env.github,
     verifySignature: verifyGitHubSignature,
     normalizeGitHubWebhook,
+    readEffectiveConfiguration: () => readSelfHostedEffectiveConfiguration(configuration),
   });
 
   return {
@@ -61,7 +64,7 @@ export async function createSelfHostedWebComposition(env: WebRuntimeEnv): Promis
     workspaceId,
     localRepositories,
     services,
-    configuration: createSelfHostedConfigurationProbe(workspaceId),
+    configuration,
     close: () => db.destroy(),
   };
 }
@@ -109,4 +112,46 @@ class ProbeConfigurationSource implements ConfigurationSource {
       path: ".triagepilot.yml",
     };
   }
+}
+
+async function readSelfHostedEffectiveConfiguration(
+  configuration: SelfHostedConfigurationProbe,
+): Promise<EffectiveConfigurationOverview> {
+  const result = await configuration.resolve({ repositoryDocument: null });
+  return {
+    trustedPath: result.provenance.repositoryPath,
+    trustedRevision: result.provenance.repositoryRevision ?? "self-hosted-probe",
+    repositoryRevision: result.provenance.repositoryRevision,
+    inheritanceMode: result.provenance.inheritanceMode,
+    effectiveHash: result.provenance.effectiveHash,
+    values: result.ok ? flattenConfigurationValues(result.config, result.provenance.sources) : [],
+  };
+}
+
+function flattenConfigurationValues(
+  config: TriagePilotConfig,
+  sources: Record<string, EffectiveConfigurationValue["source"]>,
+): EffectiveConfigurationValue[] {
+  return Object.entries(sources).map(([path, source]) => ({
+    path,
+    label: path.startsWith("$.") ? path.slice(2) : path,
+    value: readPath(config, path),
+    source,
+  }));
+}
+
+function readPath(value: unknown, path: string): unknown {
+  return path
+    .replace(/^\$\./, "")
+    .split(".")
+    .filter(Boolean)
+    .reduce<unknown>((current, segment) => {
+      if (Array.isArray(current)) return current[Number(segment)];
+      if (isRecord(current)) return current[segment];
+      return undefined;
+    }, value);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
