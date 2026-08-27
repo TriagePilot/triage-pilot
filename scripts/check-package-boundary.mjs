@@ -192,7 +192,7 @@ async function pathExists(path) {
 }
 
 function iterateDependencyVersions(manifest) {
-  const sections = ["dependencies", "peerDependencies", "optionalDependencies"];
+  const sections = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
   const entries = [];
 
   for (const section of sections) {

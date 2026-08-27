@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -242,7 +242,7 @@ async function runPnpm(args: string[], cwd = repoRoot) {
 function pnpmEnv() {
   return {
     ...process.env,
-    PATH: ["/Users/clovnrian/.nvm/versions/node/v22.23.1/bin", process.env.PATH ?? ""]
+    PATH: [dirname(process.execPath), process.env.PATH ?? ""]
       .filter(Boolean)
       .join(":"),
   };
@@ -273,7 +273,7 @@ function readFiles(value: unknown, label: string) {
 }
 
 function collectDependencyVersions(manifest: Record<string, unknown>) {
-  const sections = ["dependencies", "peerDependencies", "optionalDependencies"] as const;
+  const sections = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] as const;
   const versions: Record<string, string> = {};
 
   for (const section of sections) {

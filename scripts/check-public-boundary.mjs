@@ -9,12 +9,42 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024;
 const CONTENT_EXCLUDED_PATHS = new Set([
-  "AGENTS.md",
-  "LICENSE",
-  "docs/specs/2026-07-07-open-source-self-hosting-design.md",
-  "docs/specs/2026-08-26-commercial-saas-extension-design.md",
   "pnpm-lock.yaml",
-  "scripts/check-public-boundary.mjs",
+]);
+const ALLOWED_VIOLATIONS_BY_PATH = new Map([
+  ["LICENSE", new Set(["content:commercial"])],
+  [
+    "AGENTS.md",
+    new Set(["content:hosted", "content:private-deployment"]),
+  ],
+  [
+    "docs/specs/2026-07-07-open-source-self-hosting-design.md",
+    new Set([
+      "content:commercial",
+      "content:saas",
+      "content:hosted",
+      "content:enterprise",
+      "content:tenant-id",
+      "content:stripe",
+      "content:secret-manager",
+      "content:provider-binding",
+      "content:provider-config",
+      "content:provider-queue",
+      "content:provider-cron",
+    ]),
+  ],
+  [
+    "docs/specs/2026-08-26-commercial-saas-extension-design.md",
+    new Set(["content:commercial", "content:saas", "content:hosted", "content:enterprise", "content:tenant-id", "content:stripe", "content:secret-manager"]),
+  ],
+  [
+    "docs/operations/deployment-overlays.md",
+    new Set(["content:hosted", "content:secret-manager"]),
+  ],
+  [
+    "scripts/check-public-boundary.mjs",
+    new Set(["content:commercial", "content:enterprise", "content:tenant-id", "content:stripe", "content:secret-manager", "content:hosted", "content:saas"]),
+  ],
 ]);
 
 const forbiddenPaths = [
@@ -33,6 +63,8 @@ const forbiddenContent = [
   { rule: "content:provider-queue", pattern: new RegExp(["cloudflare", "\\s+queues"].join(""), "i") },
   { rule: "content:provider-cron", pattern: new RegExp(["cloudflare", "\\s+cron"].join(""), "i") },
   { rule: "content:commercial", pattern: /\bcommercial\b/i },
+  { rule: "content:saas", pattern: /\bsaas\b/i },
+  { rule: "content:hosted", pattern: /(?<!self[- ])hosted\b/i },
   { rule: "content:enterprise", pattern: /\benterprise\b/i },
   { rule: "content:tenant-id", pattern: /\btenant[_ -]?id\b/i },
   { rule: "content:stripe", pattern: /\bstripe\b/i },
@@ -51,7 +83,13 @@ export function findContentViolations(path, content) {
 
   return forbiddenContent
     .filter(({ pattern }) => pattern.test(content))
-    .map(({ rule }) => ({ path, rule }));
+    .map(({ rule }) => ({ path, rule }))
+    .filter((violation) => !isAllowedViolation(violation));
+}
+
+export function isAllowedViolation(violation) {
+  const allowedRules = ALLOWED_VIOLATIONS_BY_PATH.get(violation.path);
+  return allowedRules?.has(violation.rule) ?? false;
 }
 
 export function formatViolation(violation) {
