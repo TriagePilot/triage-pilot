@@ -1,14 +1,9 @@
 import {
-  acceptHumanReviewPolicyDelivery,
-  acceptRoutingDelivery,
-  activateConfiguredInstallation,
-  deleteConfiguredInstallation,
-  readOperationsOverview,
-  replaceInstallationRepositories,
-  suspendConfiguredInstallation,
-  updateInstallationRepositories,
+  createWorkspaceRepositories,
   type createDatabase,
+  type WorkspaceRepositories,
 } from "@triagepilot/db";
+import type { WorkspaceId } from "@triagepilot/contracts";
 import type { GitHubAppCredentialShape } from "@triagepilot/provider-github";
 import { sql } from "kysely";
 
@@ -16,6 +11,8 @@ import type { WebServices } from "./app";
 
 interface WebRuntimeServicesInput {
   db: ReturnType<typeof createDatabase>;
+  workspaceId: WorkspaceId;
+  repositories?: WorkspaceRepositories;
   adminUsername: string;
   adminPassword: string;
   sessionSecret: string;
@@ -29,6 +26,7 @@ interface WebRuntimeServicesInput {
 }
 
 export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebServices {
+  const repositories = input.repositories ?? createWorkspaceRepositories(input.db, input.workspaceId);
   return {
     adminUsername: input.adminUsername,
     adminPassword: input.adminPassword,
@@ -37,6 +35,7 @@ export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebSer
     now: input.now,
     sourceAddress: input.sourceAddress,
     githubOrganization: input.githubOrganization,
+    workspaceId: input.workspaceId,
     verifySignature: input.verifySignature,
     normalizeGitHubWebhook: input.normalizeGitHubWebhook,
 
@@ -49,31 +48,51 @@ export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebSer
     },
 
     async acceptRoutingDelivery(delivery) {
-      return await acceptRoutingDelivery(input.db, delivery);
+      const { installation, repository, ...inputDelivery } = delivery;
+      return await repositories.acceptRoutingDelivery({
+        ...inputDelivery,
+        connection: toProviderConnection(installation),
+        repository: toProviderRepository(repository),
+      });
     },
 
     async acceptHumanReviewPolicyDelivery(delivery) {
-      return await acceptHumanReviewPolicyDelivery(input.db, delivery);
+      const { installation, repository, ...inputDelivery } = delivery;
+      return await repositories.acceptHumanReviewPolicyDelivery({
+        ...inputDelivery,
+        connection: toProviderConnection(installation),
+        repository: toProviderRepository(repository),
+      });
     },
 
     async activateConfiguredInstallation(installation) {
-      await activateConfiguredInstallation(input.db, installation);
+      await repositories.activateConfiguredProviderConnection(toProviderConnection(installation));
     },
 
     async replaceInstallationRepositories(installation) {
-      await replaceInstallationRepositories(input.db, installation);
+      await repositories.replaceProviderConnectionRepositories({
+        ...toProviderConnection(installation),
+        repositories: installation.repositories.map(toProviderRepository),
+      });
     },
 
     async updateInstallationRepositories(installation) {
-      await updateInstallationRepositories(input.db, installation);
+      await repositories.updateProviderConnectionRepositories({
+        ...toProviderConnection(installation),
+        repositoriesAdded: installation.repositoriesAdded.map(toProviderRepository),
+        repositoryIdsRemoved: installation.repositoryIdsRemoved,
+      });
     },
 
     async suspendConfiguredInstallation(installation) {
-      await suspendConfiguredInstallation(input.db, installation);
+      await repositories.suspendConfiguredProviderConnection(toProviderConnection(installation));
     },
 
     async deleteConfiguredInstallation(installation) {
-      await deleteConfiguredInstallation(input.db, installation);
+      await repositories.deleteConfiguredProviderConnection({
+        provider: "github",
+        externalConnectionId: installation.githubInstallationId,
+      });
     },
 
     logIgnoredWebhook(metadata) {
@@ -81,12 +100,30 @@ export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebSer
     },
 
     async listOperationsOverview() {
-      return await readOperationsOverview(input.db, {
+      return await repositories.readOperations({
         githubOrganization: input.githubOrganization,
         githubAppId: input.github.appId,
         now: input.now(),
         heartbeatStaleAfterMs: 30_000,
       });
     },
+  };
+}
+
+function toProviderConnection(input: { githubInstallationId: string; accountLogin?: string }) {
+  return {
+    provider: "github" as const,
+    externalConnectionId: input.githubInstallationId,
+    workspaceLogin: input.accountLogin ?? "",
+    accountType: "Organization",
+  };
+}
+
+function toProviderRepository(input: { githubRepositoryId: string; owner: string; name: string }) {
+  return {
+    provider: "github" as const,
+    externalRepositoryId: input.githubRepositoryId,
+    owner: input.owner,
+    name: input.name,
   };
 }

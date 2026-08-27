@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { sql, type Kysely } from "kysely";
-import { legacyRoutingKey, type ActionStatus, type RepositoryMode, type RoutingAction } from "@triagepilot/contracts";
+import { legacyRoutingKey, type ActionStatus, type RepositoryMode, type RoutingAction, type WorkspaceId } from "@triagepilot/contracts";
 
 import type { Database } from "./kysely";
 
@@ -16,6 +17,13 @@ export interface DecisionInput {
   selectedReviewers?: string[];
   noHumanReason?: string;
   details: unknown;
+  organizationConfigVersion?: string | null;
+  repositoryConfigPath?: string | null;
+  repositoryConfigRevision?: string | null;
+  effectiveConfigHash?: string;
+  inheritanceMode?: "legacy" | "defaults" | "organization" | "replace" | "inherit";
+  configDiagnostics?: unknown[];
+  configSources?: Record<string, unknown>;
 }
 
 export interface PersistedDecision {
@@ -43,6 +51,7 @@ type PolicyCheckState = Exclude<HumanReviewPolicyDecision["policyCheckState"], "
 
 export async function persistDecision(
   db: Kysely<Database>,
+  workspaceId: WorkspaceId,
   input: DecisionInput,
 ): Promise<PersistedDecision> {
   const selectedReviewers = [...new Set(input.selectedReviewers ?? [])].slice(0, 2);
@@ -51,6 +60,7 @@ export async function persistDecision(
   const decision = await db
     .insertInto("routing_decisions")
     .values({
+      workspace_id: workspaceId,
       repository_id: input.repositoryId,
       delivery_id: input.deliveryId,
       routing_key: routingKey,
@@ -67,9 +77,16 @@ export async function persistDecision(
       selected_reviewers: selectedReviewersJson,
       no_human_reason: input.noHumanReason ?? null,
       details: input.details,
+      organization_config_version: input.organizationConfigVersion ?? null,
+      repository_config_path: input.repositoryConfigPath ?? null,
+      repository_config_revision: input.repositoryConfigRevision ?? null,
+      effective_config_hash: input.effectiveConfigHash ?? legacyConfigHash(input.details),
+      inheritance_mode: input.inheritanceMode ?? "legacy",
+      config_diagnostics: input.configDiagnostics ?? [],
+      config_sources: input.configSources ?? {},
     })
     .onConflict((conflict) =>
-      conflict.column("routing_key").doUpdateSet((eb) => ({
+      conflict.columns(["workspace_id", "routing_key"]).doUpdateSet((eb) => ({
         mode: preserveAfterSuccess<RepositoryMode>("mode", input.mode),
         action: preserveAfterSuccess<string>("action", input.action),
         risk_score: preserveAfterSuccess<number>("risk_score", input.riskScore),
@@ -85,6 +102,13 @@ export async function persistDecision(
           input.noHumanReason ?? null,
         ),
         details: preserveAfterSuccess<unknown>("details", input.details),
+        organization_config_version: preserveAfterSuccess<string | null>("organization_config_version", input.organizationConfigVersion ?? null),
+        repository_config_path: preserveAfterSuccess<string | null>("repository_config_path", input.repositoryConfigPath ?? null),
+        repository_config_revision: preserveAfterSuccess<string | null>("repository_config_revision", input.repositoryConfigRevision ?? null),
+        effective_config_hash: preserveAfterSuccess<string>("effective_config_hash", input.effectiveConfigHash ?? legacyConfigHash(input.details)),
+        inheritance_mode: preserveAfterSuccess<"legacy" | "defaults" | "organization" | "replace" | "inherit">("inheritance_mode", input.inheritanceMode ?? "legacy"),
+        config_diagnostics: preserveAfterSuccess<unknown>("config_diagnostics", input.configDiagnostics ?? []),
+        config_sources: preserveAfterSuccess<unknown>("config_sources", input.configSources ?? {}),
         action_status: eb
           .case()
           .when("routing_decisions.action_status", "=", "succeeded")
@@ -106,12 +130,14 @@ export async function persistDecision(
 
 export async function recordPolicyCheck(
   db: Kysely<Database>,
+  workspaceId: WorkspaceId,
   input: { decisionId: string; checkRunId: string; state: PolicyCheckState },
 ): Promise<void> {
   await db
     .updateTable("routing_decisions")
     .set({ policy_check_run_id: input.checkRunId, policy_check_state: input.state })
     .where((eb) => eb.and([
+      eb("workspace_id", "=", workspaceId),
       eb("id", "=", input.decisionId),
       eb("policy_check_state", "!=", "failure"),
     ]))
@@ -120,11 +146,14 @@ export async function recordPolicyCheck(
 
 export async function findLatestHumanReviewPolicyDecision(
   db: Kysely<Database>,
+  workspaceId: WorkspaceId,
   input: { repositoryId: string; pullNumber: number },
 ): Promise<HumanReviewPolicyDecision | null> {
   const decision = await db
     .selectFrom("routing_decisions")
-    .innerJoin("repositories", "repositories.id", "routing_decisions.repository_id")
+    .innerJoin("repositories", (join) => join
+      .onRef("repositories.id", "=", "routing_decisions.repository_id")
+      .onRef("repositories.workspace_id", "=", "routing_decisions.workspace_id"))
     .select([
       "routing_decisions.id as decisionId",
       "repositories.owner",
@@ -138,8 +167,11 @@ export async function findLatestHumanReviewPolicyDecision(
       "routing_decisions.policy_check_run_id as policyCheckRunId",
       "routing_decisions.policy_check_state as policyCheckState",
     ])
-    .where("routing_decisions.repository_id", "=", input.repositoryId)
-    .where("routing_decisions.pull_number", "=", input.pullNumber)
+    .where("routing_decisions.workspace_id", "=", workspaceId)
+    .where((eb) => eb.and([
+      eb("routing_decisions.repository_id", "=", input.repositoryId),
+      eb("routing_decisions.pull_number", "=", input.pullNumber),
+    ]))
     .orderBy("routing_decisions.created_at", "desc")
     .executeTakeFirst();
 
@@ -181,12 +213,14 @@ function parseRequiredApprovalCount(details: unknown, selectedReviewers: string[
 
 export async function updatePolicyCheckState(
   db: Kysely<Database>,
+  workspaceId: WorkspaceId,
   input: { decisionId: string; state: PolicyCheckState },
 ): Promise<void> {
   await db
     .updateTable("routing_decisions")
     .set({ policy_check_state: input.state })
     .where((eb) => eb.and([
+      eb("workspace_id", "=", workspaceId),
       eb("id", "=", input.decisionId),
       eb("policy_check_state", "!=", "failure"),
     ]))
@@ -213,7 +247,7 @@ function preserveAfterSuccess<T>(column: string, nextValue: T) {
   end`;
 }
 
-export async function markActionSucceeded(db: Kysely<Database>, decisionId: string, at: Date): Promise<void> {
+export async function markActionSucceeded(db: Kysely<Database>, workspaceId: WorkspaceId, decisionId: string, at: Date): Promise<void> {
   await db
     .updateTable("routing_decisions")
     .set({
@@ -222,13 +256,17 @@ export async function markActionSucceeded(db: Kysely<Database>, decisionId: stri
       action_applied_at: at,
       action_failed_at: null,
     })
-    .where("id", "=", decisionId)
-    .where("action_status", "!=", "succeeded")
+    .where((eb) => eb.and([
+      eb("workspace_id", "=", workspaceId),
+      eb("id", "=", decisionId),
+      eb("action_status", "!=", "succeeded"),
+    ]))
     .execute();
 }
 
 export async function markActionFailed(
   db: Kysely<Database>,
+  workspaceId: WorkspaceId,
   decisionId: string,
   error: string,
   at: Date,
@@ -241,7 +279,14 @@ export async function markActionFailed(
       action_applied_at: null,
       action_failed_at: at,
     })
-    .where("id", "=", decisionId)
-    .where("action_status", "!=", "succeeded")
+    .where((eb) => eb.and([
+      eb("workspace_id", "=", workspaceId),
+      eb("id", "=", decisionId),
+      eb("action_status", "!=", "succeeded"),
+    ]))
     .execute();
+}
+
+function legacyConfigHash(details: unknown): string {
+  return createHash("sha256").update(JSON.stringify(details)).digest("hex");
 }

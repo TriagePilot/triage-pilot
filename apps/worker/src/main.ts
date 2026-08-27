@@ -1,10 +1,10 @@
 import { pathToFileURL } from "node:url";
 
 import {
-  applyFixedRetention,
+  createJobClaimer,
   createDatabase,
-  createJobQueue,
-  recoverStaleJobs,
+  createWorkspaceRepositories,
+  ensureLocalWorkspace,
   updateWorkerHeartbeat,
 } from "@triagepilot/db";
 import { formatLog } from "@triagepilot/shared";
@@ -24,15 +24,17 @@ export async function runWorkerProcess(source: NodeJS.ProcessEnv = process.env):
   const db = createDatabase(env.databaseUrl);
 
   try {
-    const queue = createJobQueue(db);
+    const workspaceId = await ensureLocalWorkspace(db);
+    const localRepositories = createWorkspaceRepositories(db, workspaceId);
+    const jobClaimer = createJobClaimer(db);
     const buildRoutingServices = createWorkerRoutingServiceFactory({ db, github: env.github });
     const buildHumanReviewPolicyServices = createWorkerHumanReviewPolicyServiceFactory({ db, github: env.github });
     const maintenanceServices = {
       async recoverStaleJobs(now: Date) {
-        await recoverStaleJobs(db, now);
+        await localRepositories.recoverStaleJobs(now);
       },
       async applyRetention(now: Date) {
-        await applyFixedRetention(db, now);
+        await localRepositories.applyFixedRetention(now);
       },
       async updateHeartbeat(now: Date) {
         await updateWorkerHeartbeat(db, { workerId: env.workerId, now });
@@ -46,7 +48,8 @@ export async function runWorkerProcess(source: NodeJS.ProcessEnv = process.env):
       try {
         maintenanceState = await runWorkerMaintenance(maintenanceState, maintenanceServices, now);
         await runWorkerOnce({
-          queue,
+          jobClaimer,
+          workspaceQueue: (claimedWorkspaceId) => createWorkspaceRepositories(db, claimedWorkspaceId).jobs,
           workerId: env.workerId,
           now,
           processRoutingJob,

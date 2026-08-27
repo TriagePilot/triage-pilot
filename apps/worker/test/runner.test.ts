@@ -23,8 +23,15 @@ const routingJobPayload = {
   routingKey: "routing:ws_local:github:101:7:trusted-base:abc123",
 };
 
+const jobScope = {
+  workspaceId: "ws_local",
+  provider: "github" as const,
+  providerConnectionId: "123",
+};
+
 const jobRecord: JobRecord = {
   id: "job-1",
+  ...jobScope,
   kind: "process_pull_request",
   status: "queued",
   payload: routingJobPayload,
@@ -36,7 +43,7 @@ const jobRecord: JobRecord = {
   lockedBy: "worker-1",
   lastError: null,
 };
-const jobLease = { jobId: "job-1", lockedBy: "worker-1", attemptCount: 1, maxAttempts: 5 };
+const jobLease = { ...jobScope, jobId: "job-1", lockedBy: "worker-1", attemptCount: 1, maxAttempts: 5 };
 const policyJobPayload = {
   kind: "evaluate_human_review_policy" as const,
   deliveryId: "review-delivery-1",
@@ -65,6 +72,7 @@ describe("runWorkerOnce", () => {
       enqueue: vi.fn(),
       claimNext: vi.fn(async (): Promise<JobRecord> => ({
         id: "job-1",
+        ...jobScope,
         kind: "process_pull_request",
         status: "running",
         payload: {
@@ -94,7 +102,8 @@ describe("runWorkerOnce", () => {
     };
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-07-07T12:00:00.000Z"),
       processRoutingJob,
@@ -113,7 +122,7 @@ describe("runWorkerOnce", () => {
       {},
     );
     expect(queue.markSucceeded).toHaveBeenCalledWith(
-      { jobId: "job-1", lockedBy: "worker-1", attemptCount: 1, maxAttempts: 5 },
+      { ...jobScope, jobId: "job-1", lockedBy: "worker-1", attemptCount: 1, maxAttempts: 5 },
       expect.any(Date),
     );
     expect(queue.markFailed).not.toHaveBeenCalled();
@@ -133,7 +142,8 @@ describe("runWorkerOnce", () => {
     const processRoutingJob = vi.fn(async () => {});
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob,
@@ -203,7 +213,8 @@ describe("runWorkerOnce", () => {
     });
     const processRoutingJob = vi.fn(async () => {});
     const input = {
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob,
@@ -217,6 +228,7 @@ describe("runWorkerOnce", () => {
     expect(queue.markFailed).toHaveBeenNthCalledWith(
       1,
       {
+        ...jobScope,
         jobId: "job-1",
         lockedBy: "worker-1",
         attemptCount: failure.attemptCount,
@@ -241,6 +253,7 @@ describe("runWorkerOnce", () => {
     expect(queue.markFailed).toHaveBeenNthCalledWith(
       2,
       {
+        ...jobScope,
         jobId: "job-1",
         lockedBy: "worker-1",
         attemptCount: failure.attemptCount + 1,
@@ -256,7 +269,8 @@ describe("runWorkerOnce", () => {
     const queue = buildQueueWithJob();
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob: vi.fn(async () => {
@@ -305,7 +319,8 @@ describe("runWorkerOnce", () => {
     };
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob,
@@ -330,7 +345,8 @@ describe("runWorkerOnce", () => {
     const queue = buildQueueWithJob();
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob: vi.fn(async () => {
@@ -357,7 +373,8 @@ describe("runWorkerOnce", () => {
     const queue = buildQueueWithJob();
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob: vi.fn(async () => {
@@ -409,7 +426,8 @@ describe("runWorkerOnce", () => {
       throw new TransientJobError("GitHub unavailable");
     });
     const input = {
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob,
@@ -421,7 +439,7 @@ describe("runWorkerOnce", () => {
     expect(failPolicyCheck).not.toHaveBeenCalled();
     expect(queue.markFailed).toHaveBeenNthCalledWith(
       1,
-      { jobId: "job-1", lockedBy: "worker-1", attemptCount: 5, maxAttempts: 5 },
+      { ...jobScope, jobId: "job-1", lockedBy: "worker-1", attemptCount: 5, maxAttempts: 5 },
       "GitHub unavailable",
       expect.any(Date),
       {
@@ -439,7 +457,7 @@ describe("runWorkerOnce", () => {
     expect(processRoutingJob).toHaveBeenCalledOnce();
     expect(queue.markFailed).toHaveBeenNthCalledWith(
       2,
-      { jobId: "job-1", lockedBy: "worker-1", attemptCount: 6, maxAttempts: 8 },
+      { ...jobScope, jobId: "job-1", lockedBy: "worker-1", attemptCount: 6, maxAttempts: 8 },
       "GitHub still unavailable",
       expect.any(Date),
       { retryable: true },
@@ -451,7 +469,7 @@ describe("runWorkerOnce", () => {
     expect(processRoutingJob).toHaveBeenCalledOnce();
     expect(queue.markFailed).toHaveBeenNthCalledWith(
       3,
-      { jobId: "job-1", lockedBy: "worker-1", attemptCount: 7, maxAttempts: 8 },
+      { ...jobScope, jobId: "job-1", lockedBy: "worker-1", attemptCount: 7, maxAttempts: 8 },
       "GitHub unavailable",
       expect.any(Date),
       { retryable: false },
@@ -463,7 +481,8 @@ describe("runWorkerOnce", () => {
     const failPolicyCheck = vi.fn(async () => {});
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob: vi.fn(async () => {
@@ -491,7 +510,8 @@ describe("runWorkerOnce", () => {
     const processRoutingJob = vi.fn(async () => {});
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob,
@@ -524,7 +544,8 @@ describe("runWorkerOnce", () => {
     const processHumanReviewPolicyJob = vi.fn(async () => {});
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob: vi.fn(async () => {}),
@@ -562,7 +583,8 @@ describe("runWorkerOnce", () => {
     const processRoutingJob = vi.fn(async () => {});
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob,
@@ -587,7 +609,8 @@ describe("runWorkerOnce", () => {
     } as unknown as JobRecord);
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob: vi.fn(async () => {}),
@@ -608,7 +631,8 @@ describe("runWorkerOnce", () => {
 
     await expect(
       runWorkerOnce({
-        queue,
+        jobClaimer: queue,
+        workspaceQueue: () => queue,
         workerId: "worker-1",
         now: new Date("2026-08-18T10:00:00.000Z"),
         processRoutingJob: vi.fn(async () => {}),

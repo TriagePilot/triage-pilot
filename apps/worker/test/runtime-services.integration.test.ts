@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { withPostgresTestDatabase } from "../../../packages/db/test/postgres";
+import { ensureLocalWorkspace } from "@triagepilot/db";
 import {
   createWorkerHumanReviewPolicyServiceFactory,
   createWorkerRoutingServiceFactory,
@@ -27,6 +28,12 @@ const message: RoutingJobMessage = {
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime services", () => {
   it("rejects decisions for repositories absent from the configured projection", async () => {
     await withPostgresTestDatabase(async (db) => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const scopedMessage = {
+        ...message,
+        workspaceId,
+        providerConnectionId: "00000000-0000-4000-8000-000000000099",
+      };
       const buildServices = createWorkerRoutingServiceFactory({
         db,
         github: {
@@ -34,9 +41,9 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
           privateKey: "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----",
         },
       });
-      const services = buildServices(message);
+      const services = buildServices(scopedMessage);
 
-      await expect(services.fetchConfig(message)).rejects.toThrow("repository 101 is not known");
+      await expect(services.fetchConfig(scopedMessage)).rejects.toThrow("repository 101 is not known");
       await expect(
         services.persistDecision({
           deliveryId: "delivery-1",
@@ -51,7 +58,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
         }),
       ).rejects.toThrow("repository 101 is not known");
 
-      await expect(db.selectFrom("installations").select("id").execute()).resolves.toEqual([]);
+      await expect(db.selectFrom("provider_connections").select("id").execute()).resolves.toEqual([]);
       await expect(db.selectFrom("repositories").select("id").execute()).resolves.toEqual([]);
       await expect(db.selectFrom("routing_decisions").select("id").execute()).resolves.toEqual([]);
     });
@@ -59,11 +66,14 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
 
   it("projects configuration and persists policy-check lifecycle for a known repository", async () => {
     await withPostgresTestDatabase(async (db) => {
-      const installation = await db
-        .insertInto("installations")
+      const workspaceId = await ensureLocalWorkspace(db);
+      const connection = await db
+        .insertInto("provider_connections")
         .values({
-          github_installation_id: "99",
-          account_login: "acme",
+          workspace_id: workspaceId,
+          provider: "github",
+          external_connection_id: "99",
+          workspace_login: "acme",
           account_type: "Organization",
           status: "active",
           permissions: {},
@@ -73,8 +83,10 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
       const repository = await db
         .insertInto("repositories")
         .values({
-          installation_id: installation.id,
-          github_repository_id: "101",
+          workspace_id: workspaceId,
+          provider: "github",
+          provider_connection_id: connection.id,
+          external_repository_id: "101",
           owner: "acme",
           name: "api",
           default_branch: "main",
@@ -82,6 +94,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
         })
         .returning("id")
         .executeTakeFirstOrThrow();
+      const scopedMessage = { ...message, workspaceId, providerConnectionId: connection.id };
       const services = createWorkerRoutingServiceFactory({
         db,
         github: {
@@ -89,7 +102,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
           privateKey: "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----",
         },
         createRequester: async () => ({ request: policyCheckRequester }) as never,
-      })(message);
+      })(scopedMessage);
 
       await services.updateRepositoryConfigState({ configState: "valid", mode: "enforce" });
       const decision = await services.persistDecision({
@@ -124,8 +137,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
       })({
         kind: "evaluate_human_review_policy",
         deliveryId: "review-delivery-1",
-        workspaceId: "ws_local",
-        providerConnectionId: "99",
+        workspaceId,
+        providerConnectionId: connection.id,
         changeRequest: {
           repository: { provider: "github", externalId: "101", owner: "acme", name: "api" },
           externalId: "7",

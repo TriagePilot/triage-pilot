@@ -1,14 +1,16 @@
 export {
   buildNextRunAt,
-  createJobQueue,
+  createJobClaimer,
+  createWorkspaceJobQueue,
   type EnqueueJobInput,
   type JobKind,
   type JobLease,
-  type JobQueue,
+  type JobClaimer,
   type JobRecord,
   type JobRecovery,
   type JobStatus,
   type JobTransitionResult,
+  type WorkspaceJobQueue,
   recoverStaleJobs,
 } from "./jobs";
 export { createDatabase } from "./database";
@@ -40,15 +42,17 @@ export {
   type RepositoryOverview,
 } from "./operations";
 export {
-  activateConfiguredInstallation,
-  deleteConfiguredInstallation,
-  replaceInstallationRepositories,
-  suspendConfiguredInstallation,
-  updateInstallationRepositories,
-  upsertConfiguredInstallation,
-  type ConfiguredInstallationInput,
-  type InstallationRepositoryUpdateInput,
-} from "./installations";
+  activateConfiguredProviderConnection,
+  deleteConfiguredProviderConnection,
+  replaceProviderConnectionRepositories,
+  suspendConfiguredProviderConnection,
+  updateProviderConnectionRepositories,
+  upsertConfiguredProviderConnection,
+  type ConfiguredProviderConnectionInput,
+  type ProviderConnectionMetadata,
+  type ProviderConnectionRepositoryUpdateInput,
+  type ProviderRepositoryMetadata,
+} from "./provider-connections";
 export {
   applyFixedRetention,
   DECISION_AND_FAILURE_DAYS,
@@ -56,3 +60,9 @@ export {
 } from "./retention";
 export { runMigrations } from "./migrate";
 export type { Database, WorkerHeartbeatTable } from "./kysely";
+export {
+  createWorkspaceRepositories,
+  ensureLocalWorkspace,
+  LOCAL_WORKSPACE_EXTERNAL_KEY,
+  type WorkspaceRepositories,
+} from "./workspaces";

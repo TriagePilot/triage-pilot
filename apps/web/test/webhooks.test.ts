@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import type { HumanReviewPolicyDeliveryInput } from "@triagepilot/db";
 
 import { createWebApp } from "../src/app";
 import { buildServices } from "./helpers";
@@ -49,8 +48,6 @@ describe("GitHub webhook route", () => {
         kind: "process_change_request",
         deliveryId: "delivery-1",
         eventName: "change_request.opened",
-        workspaceId: "ws_local",
-        providerConnectionId: "99",
         changeRequest: {
           repository: { provider: "github", externalId: "101", owner: "AcMe", name: "api" },
           externalId: "7",
@@ -59,7 +56,7 @@ describe("GitHub webhook route", () => {
           headRevision: "abc123",
         },
         isDraft: false,
-        routingKey: "routing:ws_local:github:101:7:trusted-base-123:abc123",
+        routingKey: "routing:00000000-0000-4000-8000-000000000001:github:101:7:trusted-base-123:abc123",
       },
     });
   });
@@ -108,8 +105,6 @@ describe("GitHub webhook route", () => {
         kind: "process_change_request",
         deliveryId: "delivery-1",
         eventName: "change_request.synchronize",
-        workspaceId: "ws_local",
-        providerConnectionId: "provider-connection-9",
         changeRequest: {
           repository: {
             provider: "github",
@@ -123,7 +118,7 @@ describe("GitHub webhook route", () => {
           headRevision: "normalized-head",
         },
         isDraft: true,
-        routingKey: "routing:ws_local:github:repository-77:42:normalized-base:normalized-head",
+        routingKey: "routing:00000000-0000-4000-8000-000000000001:github:repository-77:42:normalized-base:normalized-head",
       },
     }));
   });
@@ -177,7 +172,7 @@ describe("GitHub webhook route", () => {
   });
 
   it("enqueues a matching organization review with only policy-evaluation metadata", async () => {
-    const acceptHumanReviewPolicyDelivery = vi.fn(async (_delivery: HumanReviewPolicyDeliveryInput) => ({
+    const acceptHumanReviewPolicyDelivery = vi.fn(async (_delivery) => ({
       inserted: true,
       jobId: "job-review-1",
     }));
@@ -206,8 +201,6 @@ describe("GitHub webhook route", () => {
     expect(acceptHumanReviewPolicyDelivery.mock.calls[0]?.[0]?.payload).toEqual({
       kind: "evaluate_human_review_policy",
       deliveryId: "delivery-review-1",
-      workspaceId: "ws_local",
-      providerConnectionId: "99",
       changeRequest: {
         repository: { provider: "github", externalId: "101", owner: "AcMe", name: "api" },
         externalId: "7",

@@ -6,7 +6,7 @@ import {
 } from "@triagepilot/provider-github";
 import { trustedBaseSha, type HumanReviewPolicyJobPayload, type ScoreComponent } from "@triagepilot/contracts";
 import {
-  createJobQueue,
+  createWorkspaceJobQueue,
   findLatestHumanReviewPolicyDecision,
   markActionFailed as persistActionFailed,
   markActionSucceeded as persistActionSucceeded,
@@ -34,7 +34,7 @@ export function createWorkerRoutingServiceFactory(input: {
     const { changeRequest } = message;
     const { repository } = changeRequest;
     let requesterPromise: Promise<Requester> | null = null;
-    let repositoryIdPromise: Promise<string> | null = null;
+    let knownRepositoryPromise: Promise<KnownRepository> | null = null;
     let pullRequestPromise: Promise<unknown> | null = null;
     let persistedDecisionId: string | null = null;
 
@@ -43,14 +43,18 @@ export function createWorkerRoutingServiceFactory(input: {
       requesterPromise ??= (input.createRequester ?? createInstallationRequester)({
         appId: input.github.appId,
         privateKey: input.github.privateKey,
-        installationId: toSafeInteger(message.providerConnectionId),
+        installationId: toSafeInteger((await knownRepository()).externalConnectionId),
       });
       return requesterPromise;
     }
 
     async function repositoryId(): Promise<string> {
-      repositoryIdPromise ??= findKnownRepository(input.db, message);
-      return repositoryIdPromise;
+      return (await knownRepository()).repositoryId;
+    }
+
+    async function knownRepository(): Promise<KnownRepository> {
+      knownRepositoryPromise ??= findKnownRepository(input.db, message);
+      return knownRepositoryPromise;
     }
 
     async function pullRequest(): Promise<unknown> {
@@ -124,7 +128,9 @@ export function createWorkerRoutingServiceFactory(input: {
       },
 
       async enqueueHumanReviewPolicyEvaluation(policy) {
-        await createJobQueue(input.db).enqueue({
+        await createWorkspaceJobQueue(input.db, message.workspaceId).enqueue({
+          provider: repository.provider,
+          providerConnectionId: message.providerConnectionId,
           kind: "evaluate_human_review_policy",
           payload: { kind: "evaluate_human_review_policy", ...policy },
           idempotencyKey: `review-policy:${policy.deliveryId}`,
@@ -148,7 +154,7 @@ export function createWorkerRoutingServiceFactory(input: {
       },
 
       async persistDecision(decision) {
-        const persisted = await persistRoutingDecision(input.db, {
+        const persisted = await persistRoutingDecision(input.db, message.workspaceId, {
           repositoryId: await repositoryId(),
           ...decision,
         });
@@ -157,11 +163,11 @@ export function createWorkerRoutingServiceFactory(input: {
       },
 
       async markActionSucceeded(decisionId, at) {
-        await persistActionSucceeded(input.db, decisionId, at);
+        await persistActionSucceeded(input.db, message.workspaceId, decisionId, at);
       },
 
       async markActionFailed(decisionId, error, at) {
-        await persistActionFailed(input.db, decisionId, error, at);
+        await persistActionFailed(input.db, message.workspaceId, decisionId, error, at);
       },
 
       async applyDecisionActions(action) {
@@ -196,6 +202,7 @@ export function createWorkerRoutingServiceFactory(input: {
         const checkRun = { owner: repository.owner, repo: repository.name, headSha: action.expectedHeadSha };
         const policyCheckRunId = await ensureInitialPolicyCheck({
           db: input.db,
+          workspaceId: message.workspaceId,
           adapter,
           checkRun,
           decisionId: action.decisionId,
@@ -245,7 +252,7 @@ export function createWorkerRoutingServiceFactory(input: {
               state: "failure",
               summary,
             });
-            await updatePolicyCheckState(input.db, { decisionId: action.decisionId, state: "failure" });
+            await updatePolicyCheckState(input.db, message.workspaceId, { decisionId: action.decisionId, state: "failure" });
           }
           throw error;
         }
@@ -254,6 +261,7 @@ export function createWorkerRoutingServiceFactory(input: {
       async failPolicyCheck(summary) {
         persistedDecisionId ??= await findDecisionIdForDelivery(
           input.db,
+          message.workspaceId,
           message.deliveryId,
           changeRequest.headRevision,
         );
@@ -262,6 +270,7 @@ export function createWorkerRoutingServiceFactory(input: {
         const checkRun = { owner: repository.owner, repo: repository.name, headSha: changeRequest.headRevision };
         const recordedCheckRunId = await findRecordedPolicyCheckRunId(
           input.db,
+          message.workspaceId,
           persistedDecisionId,
           changeRequest.headRevision,
         );
@@ -280,7 +289,7 @@ export function createWorkerRoutingServiceFactory(input: {
           state: "failure",
           summary,
         });
-        await recordPolicyCheck(input.db, {
+        await recordPolicyCheck(input.db, message.workspaceId, {
           decisionId: persistedDecisionId,
           checkRunId,
           state: "failure",
@@ -345,12 +354,16 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
     const { changeRequest } = message;
     const { repository } = changeRequest;
     let requesterPromise: Promise<Requester> | null = null;
-    let repositoryIdPromise: Promise<string> | null = null;
+    let knownRepositoryPromise: Promise<KnownRepository> | null = null;
     let evaluatedDecisionId: string | null = null;
 
     async function repositoryId(): Promise<string> {
-      repositoryIdPromise ??= findKnownRepository(input.db, message);
-      return repositoryIdPromise;
+      return (await knownRepository()).repositoryId;
+    }
+
+    async function knownRepository(): Promise<KnownRepository> {
+      knownRepositoryPromise ??= findKnownRepository(input.db, message);
+      return knownRepositoryPromise;
     }
 
     async function requester(): Promise<Requester> {
@@ -358,7 +371,7 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
       requesterPromise ??= (input.createRequester ?? createInstallationRequester)({
         appId: input.github.appId,
         privateKey: input.github.privateKey,
-        installationId: toSafeInteger(message.providerConnectionId),
+        installationId: toSafeInteger((await knownRepository()).externalConnectionId),
       });
       return requesterPromise;
     }
@@ -368,7 +381,7 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
     }
 
     async function findDecision() {
-      const decision = await findLatestHumanReviewPolicyDecision(input.db, {
+      const decision = await findLatestHumanReviewPolicyDecision(input.db, message.workspaceId, {
         repositoryId: await repositoryId(),
         pullNumber: changeRequest.number,
       });
@@ -413,7 +426,7 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
             appId: toSafeInteger(input.github.appId),
           });
           if (existing?.state === "failure") {
-            await updatePolicyCheckState(input.db, {
+            await updatePolicyCheckState(input.db, message.workspaceId, {
               decisionId: check.decision.decisionId,
               state: "failure",
             });
@@ -424,7 +437,7 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
               existing.checkRunId !== check.decision.policyCheckRunId ||
               check.decision.policyCheckState !== "in_progress"
             ) {
-              await recordPolicyCheck(input.db, {
+              await recordPolicyCheck(input.db, message.workspaceId, {
                 decisionId: check.decision.decisionId,
                 checkRunId: existing.checkRunId,
                 state: "in_progress",
@@ -438,7 +451,7 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
             state: "in_progress",
             summary: check.summary,
           });
-          await recordPolicyCheck(input.db, {
+          await recordPolicyCheck(input.db, message.workspaceId, {
             decisionId: check.decision.decisionId,
             checkRunId: created.checkRunId,
             state: "in_progress",
@@ -457,7 +470,7 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
           appId: toSafeInteger(input.github.appId),
         });
         if (existing?.state === "failure") {
-          await recordPolicyCheck(input.db, {
+          await recordPolicyCheck(input.db, message.workspaceId, {
             decisionId: check.decision.decisionId,
             checkRunId: existing.checkRunId,
             state: "failure",
@@ -478,7 +491,7 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
           summary: check.summary,
         });
         if (checkRunId !== check.decision.policyCheckRunId) {
-          await recordPolicyCheck(input.db, {
+          await recordPolicyCheck(input.db, message.workspaceId, {
             decisionId: check.decision.decisionId,
             checkRunId,
             state: check.state,
@@ -487,7 +500,7 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
       },
 
       async persistState(state) {
-        await updatePolicyCheckState(input.db, state);
+        await updatePolicyCheckState(input.db, message.workspaceId, state);
       },
 
       policyCheckFailureDecisionId() {
@@ -497,6 +510,7 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
       async failPolicyCheck(summary, decisionId) {
         const decision = decisionId
           ? await findPolicyCheckDecision(input.db, {
+              workspaceId: message.workspaceId,
               decisionId,
               repositoryId: await repositoryId(),
               pullNumber: changeRequest.number,
@@ -513,7 +527,7 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
           appId: toSafeInteger(input.github.appId),
         });
         if (recovered?.state === "failure") {
-          await recordPolicyCheck(input.db, {
+          await recordPolicyCheck(input.db, message.workspaceId, {
             decisionId: decision.decisionId,
             checkRunId: recovered.checkRunId,
             state: "failure",
@@ -528,7 +542,7 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
           state: "failure",
           summary,
         });
-        await recordPolicyCheck(input.db, {
+        await recordPolicyCheck(input.db, message.workspaceId, {
           decisionId: decision.decisionId,
           checkRunId,
           state: "failure",
@@ -540,31 +554,49 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
 
 async function findKnownRepository(
   db: DatabaseClient,
-  message: Pick<RoutingJobMessage, "providerConnectionId" | "changeRequest"> | HumanReviewPolicyJobPayload,
-): Promise<string> {
+  message: Pick<RoutingJobMessage, "workspaceId" | "providerConnectionId" | "changeRequest"> | HumanReviewPolicyJobPayload,
+): Promise<KnownRepository> {
   const repository = await db
     .selectFrom("repositories")
-    .innerJoin("installations", "installations.id", "repositories.installation_id")
-    .select("repositories.id")
-    .where("repositories.github_repository_id", "=", message.changeRequest.repository.externalId)
-    .where("installations.github_installation_id", "=", message.providerConnectionId)
-    .where("installations.status", "=", "active")
+    .innerJoin("provider_connections", (join) => join
+      .onRef("provider_connections.id", "=", "repositories.provider_connection_id")
+      .onRef("provider_connections.workspace_id", "=", "repositories.workspace_id"))
+    .select([
+      "repositories.id as repositoryId",
+      "provider_connections.external_connection_id as externalConnectionId",
+    ])
+    .where("repositories.workspace_id", "=", message.workspaceId)
+    .where((eb) => eb.and([
+      eb("repositories.provider", "=", message.changeRequest.repository.provider),
+      eb("repositories.external_repository_id", "=", message.changeRequest.repository.externalId),
+    ]))
+    .where((eb) => eb.and([
+      eb("provider_connections.id", "=", message.providerConnectionId),
+      eb("provider_connections.provider", "=", message.changeRequest.repository.provider),
+      eb("provider_connections.status", "=", "active"),
+    ]))
     .executeTakeFirst();
   if (!repository) {
     throw new Error(`repository ${message.changeRequest.repository.externalId} is not known`);
   }
-  return repository.id;
+  return repository;
+}
+
+interface KnownRepository {
+  repositoryId: string;
+  externalConnectionId: string;
 }
 
 async function findRecordedPolicyCheckRunId(
   db: DatabaseClient,
+  workspaceId: string,
   decisionId: string,
   headSha: string,
 ): Promise<string | null> {
   const decision = await db
     .selectFrom("routing_decisions")
     .select(["policy_check_run_id as checkRunId", "head_sha as headSha"])
-    .where("id", "=", decisionId)
+    .where((eb) => eb.and([eb("workspace_id", "=", workspaceId), eb("id", "=", decisionId)]))
     .executeTakeFirst();
   if (!decision || decision.headSha !== headSha) return null;
   return decision.checkRunId;
@@ -572,13 +604,14 @@ async function findRecordedPolicyCheckRunId(
 
 async function findDecisionIdForDelivery(
   db: DatabaseClient,
+  workspaceId: string,
   deliveryId: string,
   headSha: string,
 ): Promise<string | null> {
   const decision = await db
     .selectFrom("routing_decisions")
     .select(["id as decisionId", "head_sha as headSha"])
-    .where("delivery_id", "=", deliveryId)
+    .where((eb) => eb.and([eb("workspace_id", "=", workspaceId), eb("delivery_id", "=", deliveryId)]))
     .executeTakeFirst();
   return decision?.headSha === headSha ? decision.decisionId : null;
 }
@@ -586,6 +619,7 @@ async function findDecisionIdForDelivery(
 async function findPolicyCheckDecision(
   db: DatabaseClient,
   input: {
+    workspaceId: string;
     decisionId: string;
     repositoryId: string;
     pullNumber: number;
@@ -611,7 +645,10 @@ async function findPolicyCheckDecision(
       "policy_check_run_id as policyCheckRunId",
       "policy_check_state as policyCheckState",
     ])
-    .where("id", "=", input.decisionId)
+    .where((eb) => eb.and([
+      eb("workspace_id", "=", input.workspaceId),
+      eb("id", "=", input.decisionId),
+    ]))
     .executeTakeFirst();
   if (
     !decision ||
@@ -632,6 +669,7 @@ async function findPolicyCheckDecision(
 
 async function ensureInitialPolicyCheck(input: {
   db: DatabaseClient;
+  workspaceId: string;
   adapter: GitHubAdapter;
   checkRun: { owner: string; repo: string; headSha: string };
   decisionId: string;
@@ -641,6 +679,7 @@ async function ensureInitialPolicyCheck(input: {
 }): Promise<string> {
   const recordedCheckRunId = await findRecordedPolicyCheckRunId(
     input.db,
+    input.workspaceId,
     input.decisionId,
     input.checkRun.headSha,
   );
@@ -652,7 +691,7 @@ async function ensureInitialPolicyCheck(input: {
     appId: input.appId,
   });
   if (existing !== null) {
-    await recordPolicyCheck(input.db, {
+    await recordPolicyCheck(input.db, input.workspaceId, {
       decisionId: input.decisionId,
       checkRunId: existing.checkRunId,
       state: existing.state,
@@ -666,13 +705,14 @@ async function ensureInitialPolicyCheck(input: {
     state: input.state,
     summary: input.summary,
   });
-  await recordPolicyCheck(input.db, {
+  await recordPolicyCheck(input.db, input.workspaceId, {
     decisionId: input.decisionId,
     checkRunId: created.checkRunId,
     state: input.state,
   });
   return created.checkRunId;
 }
+
 
 function toChangedFile(file: unknown): ChangedFileMetadata {
   return {

@@ -15,6 +15,7 @@ export function buildServices(overrides: Partial<WebServices> = {}): WebServices
     normalizeGitHubWebhook,
     getWebhookSecret: async () => "hook-secret",
     githubOrganization: "acme",
+    workspaceId: "00000000-0000-4000-8000-000000000001",
     acceptRoutingDelivery: async () => ({ inserted: true, jobId: "job-1" }),
     acceptHumanReviewPolicyDelivery: async () => ({ inserted: true, jobId: "job-review-1" }),
     activateConfiguredInstallation: async () => {},

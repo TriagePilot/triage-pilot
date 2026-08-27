@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { readOperationsOverview } from "../src";
+import { ensureLocalWorkspace, readOperationsOverview } from "../src";
 import { withPostgresTestDatabase } from "./postgres";
 
 const now = new Date("2026-08-18T12:00:00.000Z");
@@ -8,19 +8,22 @@ const now = new Date("2026-08-18T12:00:00.000Z");
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", () => {
   it("maps mixed-case organization data with bounded ordering and decimal GitHub IDs", async () => {
     await withPostgresTestDatabase(async (db) => {
-      const installation = await db
-        .insertInto("installations")
+      const workspaceId = await ensureLocalWorkspace(db);
+      const providerConnection = await db
+        .insertInto("provider_connections")
         .values({
-          github_installation_id: "9007199254740993",
-          account_login: "AcMe",
+          workspace_id: workspaceId,
+          provider: "github",
+          external_connection_id: "9007199254740993",
+          workspace_login: "AcMe",
           account_type: "Organization",
           status: "active",
           permissions: { privateKey: "db-private-key" },
         })
         .returning("id")
         .executeTakeFirstOrThrow();
-      const zeta = await seedRepository(db, installation.id, "201", "zeta", "enforce", "invalid");
-      const api = await seedRepository(db, installation.id, "101", "api", "shadow", "valid");
+      const zeta = await seedRepository(db, workspaceId, providerConnection.id, "201", "zeta", "enforce", "invalid");
+      const api = await seedRepository(db, workspaceId, providerConnection.id, "101", "api", "shadow", "valid");
 
       const decisionIds: string[] = [];
       for (let index = 0; index < 52; index += 1) {
@@ -29,6 +32,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
         const row = await db
           .insertInto("routing_decisions")
           .values({
+            workspace_id: workspaceId,
             repository_id: index % 2 === 0 ? api : zeta,
             delivery_id: `delivery-${index}`,
             routing_key: `legacy:delivery-${index}`,
@@ -62,6 +66,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
                     },
                   }
                 : { pullNumber: 100 + index, rawSecret: "decision-payload-secret" },
+            effective_config_hash: `legacy-${index}`,
+            inheritance_mode: "legacy",
             created_at: createdAt,
           })
           .returning("id")
@@ -75,6 +81,9 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
         const row = await db
           .insertInto("jobs")
           .values({
+            workspace_id: workspaceId,
+            provider: "github",
+            provider_connection_id: providerConnection.id,
             kind: "process_pull_request",
             status: "failed",
             payload: { webhookSecret: "job-payload-secret" },
@@ -93,7 +102,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
         .values({ worker_id: "worker-1", heartbeat_at: new Date(now.getTime() - 30_000) })
         .execute();
 
-      const overview = await readOperationsOverview(db, {
+      const overview = await readOperationsOverview(db, workspaceId, {
         githubOrganization: "aCmE",
         githubAppId: "123",
         now,
@@ -174,11 +183,14 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
 
   it("returns null pull numbers for missing, malformed, fractional, and out-of-range legacy JSON", async () => {
     await withPostgresTestDatabase(async (db) => {
-      const installation = await db
-        .insertInto("installations")
+      const workspaceId = await ensureLocalWorkspace(db);
+      const providerConnection = await db
+        .insertInto("provider_connections")
         .values({
-          github_installation_id: "99",
-          account_login: "acme",
+          workspace_id: workspaceId,
+          provider: "github",
+          external_connection_id: "99",
+          workspace_login: "acme",
           account_type: "Organization",
           status: "active",
           permissions: {},
@@ -187,7 +199,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
         .executeTakeFirstOrThrow();
       const repositoryId = await seedRepository(
         db,
-        installation.id,
+        workspaceId,
+        providerConnection.id,
         "101",
         "api",
         "shadow",
@@ -205,6 +218,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
         await db
           .insertInto("routing_decisions")
           .values({
+            workspace_id: workspaceId,
             repository_id: repositoryId,
             delivery_id: `legacy-${index}`,
             routing_key: `legacy:legacy-${index}`,
@@ -219,12 +233,14 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
             selected_reviewers: JSON.stringify([]),
             no_human_reason: null,
             details: fixture.details,
+            effective_config_hash: `legacy-${index}`,
+            inheritance_mode: "legacy",
             created_at: new Date(now.getTime() + index * 1_000),
           })
           .execute();
       }
 
-      const overview = await readOperationsOverview(db, {
+      const overview = await readOperationsOverview(db, workspaceId, {
         githubOrganization: "ACME",
         githubAppId: "123",
         now,
@@ -243,12 +259,13 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
 
   it("keeps a stale heartbeat visible while marking the worker unavailable", async () => {
     await withPostgresTestDatabase(async (db) => {
+      const workspaceId = await ensureLocalWorkspace(db);
       await db
         .insertInto("worker_heartbeat")
         .values({ worker_id: "worker-1", heartbeat_at: new Date(now.getTime() - 30_001) })
         .execute();
 
-      const overview = await readOperationsOverview(db, {
+      const overview = await readOperationsOverview(db, workspaceId, {
         githubOrganization: "acme",
         githubAppId: "123",
         now,
@@ -267,8 +284,9 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
 
 async function seedRepository(
   db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0],
-  installationId: string,
-  githubRepositoryId: string,
+  workspaceId: string,
+  providerConnectionId: string,
+  externalRepositoryId: string,
   name: string,
   mode: "shadow" | "enforce",
   configState: string,
@@ -276,8 +294,10 @@ async function seedRepository(
   const repository = await db
     .insertInto("repositories")
     .values({
-      installation_id: installationId,
-      github_repository_id: githubRepositoryId,
+      workspace_id: workspaceId,
+      provider: "github",
+      provider_connection_id: providerConnectionId,
+      external_repository_id: externalRepositoryId,
       owner: "acme",
       name,
       default_branch: "main",

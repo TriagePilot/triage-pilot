@@ -5,6 +5,7 @@ import {
   type HumanReviewPolicyJobPayload,
   type NormalizedChangeRequestEvent,
   type RoutingJobPayload,
+  type WorkspaceId,
 } from "@triagepilot/contracts";
 import type { GitHubWebhookInput } from "@triagepilot/provider-github";
 import type {
@@ -12,8 +13,6 @@ import type {
   GitHubId,
   GitHubRepositoryMetadata,
 } from "@triagepilot/shared";
-
-const SELF_HOSTED_WORKSPACE_ID = "ws_local";
 
 const githubIdSchema = z.number().int().safe().transform((id) => String(id));
 const accountSchema = z.object({ login: z.string(), type: z.string() });
@@ -41,6 +40,7 @@ interface IgnoredWebhookMetadata {
 
 export interface WebhookServices {
   githubOrganization: string;
+  workspaceId: WorkspaceId;
   getWebhookSecret(): Promise<string>;
   verifySignature(input: { body: string; secret: string; signature: string | null }): Promise<void>;
   normalizeGitHubWebhook(input: GitHubWebhookInput): NormalizedChangeRequestEvent | null;
@@ -51,7 +51,7 @@ export interface WebhookServices {
     hookId: string | null;
     installation: GitHubInstallationMetadata;
     repository: GitHubRepositoryMetadata;
-    payload: RoutingJobPayload;
+    payload: Omit<RoutingJobPayload, "workspaceId" | "providerConnectionId">;
   }): Promise<{ inserted: boolean; jobId: string | null }>;
   acceptHumanReviewPolicyDelivery(input: {
     deliveryId: string;
@@ -60,7 +60,7 @@ export interface WebhookServices {
     hookId?: string | null;
     installation: GitHubInstallationMetadata;
     repository: GitHubRepositoryMetadata;
-    payload: HumanReviewPolicyJobPayload;
+    payload: Omit<HumanReviewPolicyJobPayload, "workspaceId" | "providerConnectionId">;
   }): Promise<{ inserted: boolean; jobId: string | null }>;
   activateConfiguredInstallation(input: GitHubInstallationMetadata): Promise<void>;
   replaceInstallationRepositories(input: {
@@ -114,16 +114,14 @@ export function githubWebhookRoutes(services: WebhookServices) {
       }
 
       if (normalized.eventName === "change_request") {
-        const routingPayload: RoutingJobPayload = {
+        const routingPayload: Omit<RoutingJobPayload, "workspaceId" | "providerConnectionId"> = {
           kind: "process_change_request",
           deliveryId,
           eventName: `${normalized.eventName}.${normalized.eventAction}`,
-          workspaceId: SELF_HOSTED_WORKSPACE_ID,
-          providerConnectionId: normalized.externalConnectionId,
           changeRequest: normalized.changeRequest,
           isDraft: normalized.isDraft,
           routingKey: buildRoutingKey({
-            workspaceId: SELF_HOSTED_WORKSPACE_ID,
+            workspaceId: services.workspaceId,
             provider: normalized.provider,
             repositoryId: normalized.changeRequest.repository.externalId,
             changeRequestId: normalized.changeRequest.externalId,
@@ -145,11 +143,9 @@ export function githubWebhookRoutes(services: WebhookServices) {
           : c.json({ ok: true, duplicate: true as const }, 202);
       }
 
-      const reviewPolicyPayload: HumanReviewPolicyJobPayload = {
+      const reviewPolicyPayload: Omit<HumanReviewPolicyJobPayload, "workspaceId" | "providerConnectionId"> = {
         kind: "evaluate_human_review_policy",
         deliveryId,
-        workspaceId: SELF_HOSTED_WORKSPACE_ID,
-        providerConnectionId: normalized.externalConnectionId,
         changeRequest: {
           repository: normalized.changeRequest.repository,
           externalId: normalized.changeRequest.externalId,

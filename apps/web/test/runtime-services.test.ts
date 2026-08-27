@@ -1,13 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-
-const dbMocks = vi.hoisted(() => ({
-  acceptHumanReviewPolicyDelivery: vi.fn(),
-}));
-
-vi.mock("@triagepilot/db", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@triagepilot/db")>()),
-  acceptHumanReviewPolicyDelivery: dbMocks.acceptHumanReviewPolicyDelivery,
-}));
+import { ensureLocalWorkspace } from "@triagepilot/db";
 
 import { createWebRuntimeServices } from "../src/runtime-services";
 import { withPostgresTestDatabase } from "../../../packages/db/test/postgres";
@@ -15,7 +7,11 @@ import { withPostgresTestDatabase } from "../../../packages/db/test/postgres";
 describe("web runtime services", () => {
   it("delegates review policy acceptance to the database service", async () => {
     const db = new NoAccessDb();
-    const services = createWebRuntimeServices(runtimeInput(db as never, () => new Date()));
+    const acceptHumanReviewPolicyDelivery = vi.fn(async () => ({ inserted: true, jobId: "job-review-1" }));
+    const services = createWebRuntimeServices({
+      ...runtimeInput(db as never, () => new Date()),
+      repositories: { acceptHumanReviewPolicyDelivery } as never,
+    });
     const delivery = {
       deliveryId: "delivery-review-1",
       eventName: "pull_request_review",
@@ -24,8 +20,6 @@ describe("web runtime services", () => {
       payload: {
         kind: "evaluate_human_review_policy" as const,
         deliveryId: "delivery-review-1",
-        workspaceId: "ws_local",
-        providerConnectionId: "99",
         changeRequest: {
           repository: { provider: "github" as const, externalId: "101", owner: "acme", name: "api" },
           externalId: "7",
@@ -33,13 +27,27 @@ describe("web runtime services", () => {
         },
       },
     };
-    dbMocks.acceptHumanReviewPolicyDelivery.mockResolvedValueOnce({ inserted: true, jobId: "job-review-1" });
-
     await expect(services.acceptHumanReviewPolicyDelivery(delivery)).resolves.toEqual({
       inserted: true,
       jobId: "job-review-1",
     });
-    expect(dbMocks.acceptHumanReviewPolicyDelivery).toHaveBeenCalledWith(db, delivery);
+    expect(acceptHumanReviewPolicyDelivery).toHaveBeenCalledWith({
+      deliveryId: "delivery-review-1",
+      eventName: "pull_request_review",
+      connection: {
+        provider: "github",
+        externalConnectionId: "99",
+        workspaceLogin: "acme",
+        accountType: "Organization",
+      },
+      repository: {
+        provider: "github",
+        externalRepositoryId: "101",
+        owner: "acme",
+        name: "api",
+      },
+      payload: delivery.payload,
+    });
   });
 
   it("uses configured in-memory credentials without reading removed setup state", async () => {
@@ -55,11 +63,14 @@ describe("web runtime services", () => {
     "returns a secret-free overview and uses the 30-second heartbeat boundary",
     async () => {
       await withPostgresTestDatabase(async (db) => {
-        const installation = await db
-          .insertInto("installations")
+        const workspaceId = await ensureLocalWorkspace(db);
+        const connection = await db
+          .insertInto("provider_connections")
           .values({
-            github_installation_id: "9007199254740993",
-            account_login: "acme",
+            workspace_id: workspaceId,
+            provider: "github",
+            external_connection_id: "9007199254740993",
+            workspace_login: "acme",
             account_type: "Organization",
             status: "active",
             permissions: {},
@@ -69,8 +80,10 @@ describe("web runtime services", () => {
         const repository = await db
           .insertInto("repositories")
           .values({
-            installation_id: installation.id,
-            github_repository_id: "101",
+            workspace_id: workspaceId,
+            provider: "github",
+            provider_connection_id: connection.id,
+            external_repository_id: "101",
             owner: "acme",
             name: "api",
             default_branch: "main",
@@ -82,6 +95,7 @@ describe("web runtime services", () => {
         const decision = await db
           .insertInto("routing_decisions")
           .values({
+            workspace_id: workspaceId,
             repository_id: repository.id,
             delivery_id: "delivery-1",
             routing_key: "legacy:delivery-1",
@@ -96,6 +110,8 @@ describe("web runtime services", () => {
             selected_reviewers: JSON.stringify(["@team-a7f19c/reviewers", "@user-b4e82d"]),
             no_human_reason: null,
             details: { pullNumber: 7, privateKey: "raw-detail-secret" },
+            effective_config_hash: "legacy-test-hash",
+            inheritance_mode: "legacy",
             created_at: new Date("2026-08-18T10:00:00.000Z"),
           })
           .returning("id")
@@ -103,6 +119,9 @@ describe("web runtime services", () => {
         const job = await db
           .insertInto("jobs")
           .values({
+            workspace_id: workspaceId,
+            provider: "github",
+            provider_connection_id: connection.id,
             kind: "process_pull_request",
             status: "failed",
             payload: { webhookSecret: "raw-job-secret" },
@@ -119,7 +138,7 @@ describe("web runtime services", () => {
           .execute();
 
         let currentTime = new Date("2026-08-18T10:02:30.000Z");
-        const services = createWebRuntimeServices(runtimeInput(db, () => currentTime));
+        const services = createWebRuntimeServices(runtimeInput(db, () => currentTime, workspaceId));
         await expect(services.checkDatabase()).resolves.toBeUndefined();
         const overview = await services.listOperationsOverview();
 
@@ -191,9 +210,11 @@ describe("web runtime services", () => {
 function runtimeInput(
   db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0],
   now: () => Date,
+  workspaceId = "00000000-0000-4000-8000-000000000001",
 ) {
   return {
     db,
+    workspaceId,
     adminUsername: "admin",
     adminPassword: "correct-password",
     sessionSecret: "session-secret-value-that-is-long-enough",

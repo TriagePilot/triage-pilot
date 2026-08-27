@@ -25,18 +25,22 @@ describe("applyFixedRetention", () => {
       },
     };
 
-    await applyFixedRetention(db as never, new Date("2026-08-18T10:00:00.000Z"));
+    await applyFixedRetention(db as never, "00000000-0000-4000-8000-000000000001", new Date("2026-08-18T10:00:00.000Z"));
 
     expect(RECEIPT_AND_COMPLETED_JOB_DAYS).toBe(30);
     expect(DECISION_AND_FAILURE_DAYS).toBe(90);
     expect(deletes).toEqual([
       {
         table: "webhook_receipts",
-        conditions: [["created_at", "<", new Date("2026-07-19T10:00:00.000Z")]],
+        conditions: [
+          ["workspace_id", "=", "00000000-0000-4000-8000-000000000001"],
+          ["created_at", "<", new Date("2026-07-19T10:00:00.000Z")],
+        ],
       },
       {
         table: "jobs",
         conditions: [
+          ["workspace_id", "=", "00000000-0000-4000-8000-000000000001"],
           ["status", "=", "succeeded"],
           ["updated_at", "<", new Date("2026-07-19T10:00:00.000Z")],
         ],
@@ -44,13 +48,17 @@ describe("applyFixedRetention", () => {
       {
         table: "jobs",
         conditions: [
+          ["workspace_id", "=", "00000000-0000-4000-8000-000000000001"],
           ["status", "=", "failed"],
           ["updated_at", "<", new Date("2026-05-20T10:00:00.000Z")],
         ],
       },
       {
         table: "routing_decisions",
-        conditions: [["created_at", "<", new Date("2026-05-20T10:00:00.000Z")]],
+        conditions: [
+          ["workspace_id", "=", "00000000-0000-4000-8000-000000000001"],
+          ["created_at", "<", new Date("2026-05-20T10:00:00.000Z")],
+        ],
       },
     ]);
   });

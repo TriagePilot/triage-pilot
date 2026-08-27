@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { getConnInfo } from "@hono/node-server/conninfo";
-import { createDatabase } from "@triagepilot/db";
+import { createDatabase, ensureLocalWorkspace } from "@triagepilot/db";
 import { normalizeGitHubWebhook, verifyGitHubSignature } from "@triagepilot/provider-github";
 
 import { createWebApp, type StaticAsset } from "./app";
@@ -12,11 +12,13 @@ import { createWebRuntimeServices } from "./runtime-services";
 
 const env = await readWebRuntimeEnv(process.env);
 const db = createDatabase(env.databaseUrl);
+const workspaceId = await ensureLocalWorkspace(db);
 const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist/public");
 
 const app = createWebApp(
   createWebRuntimeServices({
     db,
+    workspaceId,
     adminUsername: env.adminUsername,
     adminPassword: env.adminPassword,
     sessionSecret: env.sessionSecret,

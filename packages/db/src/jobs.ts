@@ -1,4 +1,5 @@
 import type { Kysely } from "kysely";
+import type { ProviderConnectionId, ProviderKind, WorkspaceId } from "@triagepilot/contracts";
 
 import type { Database, JobRow } from "./kysely";
 
@@ -7,6 +8,9 @@ export type JobStatus = "queued" | "running" | "succeeded" | "failed";
 
 export interface JobRecord {
   id: string;
+  workspaceId: WorkspaceId;
+  provider: ProviderKind;
+  providerConnectionId: ProviderConnectionId;
   kind: JobKind;
   status: JobStatus;
   payload: unknown;
@@ -20,6 +24,8 @@ export interface JobRecord {
 }
 
 export interface EnqueueJobInput {
+  provider: ProviderKind;
+  providerConnectionId: ProviderConnectionId;
   kind: JobKind;
   payload: unknown;
   idempotencyKey: string;
@@ -29,6 +35,9 @@ export interface EnqueueJobInput {
 
 export interface JobLease {
   jobId: string;
+  workspaceId: WorkspaceId;
+  provider: ProviderKind;
+  providerConnectionId: ProviderConnectionId;
   lockedBy: string;
   attemptCount: number;
   maxAttempts: number;
@@ -41,9 +50,8 @@ export interface JobRecovery {
   maxAttempts: number;
 }
 
-export interface JobQueue {
+export interface WorkspaceJobQueue {
   enqueue(input: EnqueueJobInput): Promise<{ inserted: boolean; jobId: string }>;
-  claimNext(workerId: string, now: Date): Promise<JobRecord | null>;
   markSucceeded(lease: JobLease, now: Date): Promise<JobTransitionResult>;
   markFailed(
     lease: JobLease,
@@ -53,6 +61,10 @@ export interface JobQueue {
   ): Promise<JobTransitionResult>;
 }
 
+export interface JobClaimer {
+  claimNext(workerId: string, now: Date): Promise<JobRecord | null>;
+}
+
 export function buildNextRunAt(now: Date, attemptCount: number): Date {
   const delaySeconds = Math.min(900, 5 ** Math.max(1, attemptCount));
   return new Date(now.getTime() + delaySeconds * 1000);
@@ -60,6 +72,7 @@ export function buildNextRunAt(now: Date, attemptCount: number): Date {
 
 export async function recoverStaleJobs(
   db: Kysely<Database>,
+  workspaceId: WorkspaceId,
   now: Date,
   staleAfterMs = 15 * 60 * 1000,
 ): Promise<void> {
@@ -74,6 +87,7 @@ export async function recoverStaleJobs(
       last_error: "job lease expired after maximum attempts",
       updated_at: now,
     })
+    .where("workspace_id", "=", workspaceId)
     .where("status", "=", "running")
     .where("locked_at", "<", staleBefore)
     .whereRef("attempt_count", ">=", "max_attempts")
@@ -86,6 +100,7 @@ export async function recoverStaleJobs(
       locked_by: null,
       updated_at: now,
     })
+    .where("workspace_id", "=", workspaceId)
     .where("status", "=", "running")
     .where("locked_at", "<", staleBefore)
     .whereRef("attempt_count", "<", "max_attempts")
@@ -95,6 +110,9 @@ export async function recoverStaleJobs(
 function toJobRecord(row: JobRow): JobRecord {
   return {
     id: row.id,
+    workspaceId: row.workspace_id,
+    provider: row.provider,
+    providerConnectionId: row.provider_connection_id,
     kind: row.kind as JobKind,
     status: row.status,
     payload: row.payload,
@@ -108,40 +126,18 @@ function toJobRecord(row: JobRow): JobRecord {
   };
 }
 
-export function createJobQueue(db: Kysely<Database>): JobQueue {
+export function createJobClaimer(db: Kysely<Database>): JobClaimer {
   return {
-    async enqueue(input) {
-      const inserted = await db
-        .insertInto("jobs")
-        .values({
-          kind: input.kind,
-          payload: input.payload,
-          idempotency_key: input.idempotencyKey,
-          run_at: input.runAt ?? new Date(),
-          max_attempts: input.maxAttempts ?? 5,
-        })
-        .onConflict((oc) => oc.column("idempotency_key").doNothing())
-        .returning(["id"])
-        .executeTakeFirst();
-
-      if (inserted) return { inserted: true, jobId: inserted.id };
-
-      const existing = await db
-        .selectFrom("jobs")
-        .select(["id"])
-        .where("idempotency_key", "=", input.idempotencyKey)
-        .executeTakeFirstOrThrow();
-      return { inserted: false, jobId: existing.id };
-    },
-
     async claimNext(workerId, now) {
-      return db.transaction().execute(async (trx) => {
+      return await db.transaction().execute(async (trx) => {
         const job = await trx
           .selectFrom("jobs")
           .selectAll()
           .where("status", "=", "queued")
           .where("run_at", "<=", now)
           .orderBy("run_at", "asc")
+          .orderBy("created_at", "asc")
+          .orderBy("id", "asc")
           .forUpdate()
           .skipLocked()
           .executeTakeFirst();
@@ -158,18 +154,58 @@ export function createJobQueue(db: Kysely<Database>): JobQueue {
             updated_at: now,
           })
           .where("id", "=", job.id)
+          .where("workspace_id", "=", job.workspace_id)
           .returningAll()
           .executeTakeFirstOrThrow();
 
         return toJobRecord(claimed);
       });
     },
+  };
+}
+
+export function createWorkspaceJobQueue(
+  db: Kysely<Database>,
+  workspaceId: WorkspaceId,
+): WorkspaceJobQueue {
+  return {
+    async enqueue(input) {
+      const inserted = await db
+        .insertInto("jobs")
+        .values({
+          workspace_id: workspaceId,
+          provider: input.provider,
+          provider_connection_id: input.providerConnectionId,
+          kind: input.kind,
+          payload: input.payload,
+          idempotency_key: input.idempotencyKey,
+          run_at: input.runAt ?? new Date(),
+          max_attempts: input.maxAttempts ?? 5,
+        })
+        .onConflict((oc) => oc.columns(["workspace_id", "idempotency_key"]).doNothing())
+        .returning(["id"])
+        .executeTakeFirst();
+
+      if (inserted) return { inserted: true, jobId: inserted.id };
+
+      const existing = await db
+        .selectFrom("jobs")
+        .select(["id"])
+        .where("workspace_id", "=", workspaceId)
+        .where("idempotency_key", "=", input.idempotencyKey)
+        .executeTakeFirstOrThrow();
+      return { inserted: false, jobId: existing.id };
+    },
 
     async markSucceeded(lease, now) {
+      if (lease.workspaceId !== workspaceId) return { updated: false, reason: "stale_lease" };
       const updated = await db
         .updateTable("jobs")
         .set({ status: "succeeded", locked_at: null, locked_by: null, updated_at: now })
         .where("id", "=", lease.jobId)
+        .where("workspace_id", "=", workspaceId)
+        .where("provider", "=", lease.provider)
+        .where("provider_connection_id", "=", lease.providerConnectionId)
         .where("status", "=", "running")
         .where("locked_by", "=", lease.lockedBy)
         .where("attempt_count", "=", lease.attemptCount)
@@ -179,6 +215,7 @@ export function createJobQueue(db: Kysely<Database>): JobQueue {
     },
 
     async markFailed(lease, error, now, options) {
+      if (lease.workspaceId !== workspaceId) return { updated: false, reason: "stale_lease" };
       const recovery = options.recovery;
       const exhausted = recovery === undefined && (!options.retryable || lease.attemptCount >= lease.maxAttempts);
 
@@ -196,6 +233,9 @@ export function createJobQueue(db: Kysely<Database>): JobQueue {
           updated_at: now,
         })
         .where("id", "=", lease.jobId)
+        .where("workspace_id", "=", workspaceId)
+        .where("provider", "=", lease.provider)
+        .where("provider_connection_id", "=", lease.providerConnectionId)
         .where("status", "=", "running")
         .where("locked_by", "=", lease.lockedBy)
         .where("attempt_count", "=", lease.attemptCount)

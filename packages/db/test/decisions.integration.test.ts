@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   findLatestHumanReviewPolicyDecision,
+  ensureLocalWorkspace,
   markActionFailed,
   markActionSucceeded,
   persistDecision,
@@ -14,7 +15,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
   it("uses the delivery ID as a stable retry key while refreshing the decision", async () => {
     await withPostgresTestDatabase(async (db) => {
       const repositoryId = await seedRepository(db);
-      const first = await persistDecision(db, {
+      const first = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
         pullNumber: 7,
@@ -26,7 +27,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         noHumanReason: "risk_at_or_below_low_threshold",
         details: { attempt: 1 },
       });
-      const retried = await persistDecision(db, {
+      const retried = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
         pullNumber: 7,
@@ -62,7 +63,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
   it("returns a terminal succeeded outcome without rewriting the completed decision", async () => {
     await withPostgresTestDatabase(async (db) => {
       const repositoryId = await seedRepository(db);
-      const first = await persistDecision(db, {
+      const first = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
         pullNumber: 7,
@@ -75,9 +76,9 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         details: { attempt: 1 },
       });
       const appliedAt = new Date("2026-08-18T12:00:00.000Z");
-      await markActionSucceeded(db, first.decisionId, appliedAt);
+      await markActionSucceeded(db, await ensureLocalWorkspace(db), first.decisionId, appliedAt);
 
-      const retried = await persistDecision(db, {
+      const retried = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
         pullNumber: 7,
@@ -130,7 +131,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
   it("preserves the completed action identity when a retry calculates a different mode and action", async () => {
     await withPostgresTestDatabase(async (db) => {
       const repositoryId = await seedRepository(db);
-      const first = await persistDecision(db, {
+      const first = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
         pullNumber: 7,
@@ -143,9 +144,9 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         details: { routing: "original" },
       });
       const appliedAt = new Date("2026-08-18T12:00:00.000Z");
-      await markActionSucceeded(db, first.decisionId, appliedAt);
+      await markActionSucceeded(db, await ensureLocalWorkspace(db), first.decisionId, appliedAt);
 
-      const retried = await persistDecision(db, {
+      const retried = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
         pullNumber: 7,
@@ -197,7 +198,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
   it("records failure and success outcomes only for the named decision", async () => {
     await withPostgresTestDatabase(async (db) => {
       const repositoryId = await seedRepository(db);
-      const decision = await persistDecision(db, {
+      const decision = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
         pullNumber: 7,
@@ -208,7 +209,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         riskScore: 5,
         details: {},
       });
-      const untouched = await persistDecision(db, {
+      const untouched = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-2",
         pullNumber: 7,
@@ -221,7 +222,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       });
 
       const failedAt = new Date("2026-08-18T11:59:00.000Z");
-      await markActionFailed(db, decision.decisionId, "GitHub denied the action", failedAt);
+      await markActionFailed(db, await ensureLocalWorkspace(db), decision.decisionId, "GitHub denied the action", failedAt);
       await expect(readOutcome(db, decision.decisionId)).resolves.toEqual({
         action_status: "failed",
         action_error: "GitHub denied the action",
@@ -230,7 +231,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       });
 
       const appliedAt = new Date("2026-08-18T12:00:00.000Z");
-      await markActionSucceeded(db, decision.decisionId, appliedAt);
+      await markActionSucceeded(db, await ensureLocalWorkspace(db), decision.decisionId, appliedAt);
       await expect(readOutcome(db, decision.decisionId)).resolves.toEqual({
         action_status: "succeeded",
         action_error: null,
@@ -249,7 +250,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
   it("keeps the first success terminal across late failure and repeated success updates", async () => {
     await withPostgresTestDatabase(async (db) => {
       const repositoryId = await seedRepository(db);
-      const decision = await persistDecision(db, {
+      const decision = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
         pullNumber: 7,
@@ -261,10 +262,11 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         details: {},
       });
       const firstAppliedAt = new Date("2026-08-18T12:00:00.000Z");
-      await markActionSucceeded(db, decision.decisionId, firstAppliedAt);
+      await markActionSucceeded(db, await ensureLocalWorkspace(db), decision.decisionId, firstAppliedAt);
 
       await markActionFailed(
         db,
+        await ensureLocalWorkspace(db),
         decision.decisionId,
         "late failure",
         new Date("2026-08-18T12:01:00.000Z"),
@@ -276,7 +278,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         action_failed_at: null,
       });
 
-      await markActionSucceeded(db, decision.decisionId, new Date("2026-08-18T12:05:00.000Z"));
+      await markActionSucceeded(db, await ensureLocalWorkspace(db), decision.decisionId, new Date("2026-08-18T12:05:00.000Z"));
       await expect(readOutcome(db, decision.decisionId)).resolves.toEqual({
         action_status: "succeeded",
         action_error: null,
@@ -289,7 +291,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
   it("finds the latest policy decision for a pull request and updates its durable check state", async () => {
     await withPostgresTestDatabase(async (db) => {
       const repositoryId = await seedRepository(db);
-      const first = await persistDecision(db, {
+      const first = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
         pullNumber: 7,
@@ -301,14 +303,14 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         selectedReviewers: ["@user-d82a5f"],
         details: { routing: { requestedReviewerCount: 2 } },
       });
-      await recordPolicyCheck(db, {
+      await recordPolicyCheck(db, await ensureLocalWorkspace(db), {
         decisionId: first.decisionId,
         checkRunId: "42",
         state: "in_progress",
       });
 
       await expect(
-        findLatestHumanReviewPolicyDecision(db, { repositoryId, pullNumber: 7 }),
+        findLatestHumanReviewPolicyDecision(db, await ensureLocalWorkspace(db), { repositoryId, pullNumber: 7 }),
       ).resolves.toEqual({
         decisionId: first.decisionId,
         owner: "acme",
@@ -323,7 +325,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         policyCheckState: "in_progress",
       });
 
-      const latest = await persistDecision(db, {
+      const latest = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-2",
         pullNumber: 7,
@@ -334,16 +336,16 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         riskScore: 35,
         details: {},
       });
-      await updatePolicyCheckState(db, { decisionId: latest.decisionId, state: "failure" });
-      await updatePolicyCheckState(db, { decisionId: latest.decisionId, state: "success" });
-      await recordPolicyCheck(db, {
+      await updatePolicyCheckState(db, await ensureLocalWorkspace(db), { decisionId: latest.decisionId, state: "failure" });
+      await updatePolicyCheckState(db, await ensureLocalWorkspace(db), { decisionId: latest.decisionId, state: "success" });
+      await recordPolicyCheck(db, await ensureLocalWorkspace(db), {
         decisionId: latest.decisionId,
         checkRunId: "99",
         state: "in_progress",
       });
 
       await expect(
-        findLatestHumanReviewPolicyDecision(db, { repositoryId, pullNumber: 7 }),
+        findLatestHumanReviewPolicyDecision(db, await ensureLocalWorkspace(db), { repositoryId, pullNumber: 7 }),
       ).resolves.toEqual({
         decisionId: latest.decisionId,
         owner: "acme",
@@ -363,7 +365,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
   it("does not return a latest shadow decision for policy evaluation", async () => {
     await withPostgresTestDatabase(async (db) => {
       const repositoryId = await seedRepository(db);
-      await persistDecision(db, {
+      await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-enforce",
         pullNumber: 7,
@@ -375,7 +377,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         selectedReviewers: ["@user-d82a5f"],
         details: {},
       });
-      await persistDecision(db, {
+      await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-shadow",
         pullNumber: 7,
@@ -388,7 +390,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       });
 
       await expect(
-        findLatestHumanReviewPolicyDecision(db, { repositoryId, pullNumber: 7 }),
+        findLatestHumanReviewPolicyDecision(db, await ensureLocalWorkspace(db), { repositoryId, pullNumber: 7 }),
       ).resolves.toBeNull();
     });
   });
@@ -403,11 +405,14 @@ async function readOutcome(db: Parameters<Parameters<typeof withPostgresTestData
 }
 
 async function seedRepository(db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0]): Promise<string> {
-  const installation = await db
-    .insertInto("installations")
+  const workspaceId = await ensureLocalWorkspace(db);
+  const connection = await db
+    .insertInto("provider_connections")
     .values({
-      github_installation_id: "99",
-      account_login: "acme",
+      workspace_id: workspaceId,
+      provider: "github",
+      external_connection_id: "99",
+      workspace_login: "acme",
       account_type: "Organization",
       status: "active",
       permissions: {},
@@ -417,8 +422,10 @@ async function seedRepository(db: Parameters<Parameters<typeof withPostgresTestD
   const repository = await db
     .insertInto("repositories")
     .values({
-      installation_id: installation.id,
-      github_repository_id: "101",
+      workspace_id: workspaceId,
+      provider: "github",
+      provider_connection_id: connection.id,
+      external_repository_id: "101",
       owner: "acme",
       name: "api",
       default_branch: "main",

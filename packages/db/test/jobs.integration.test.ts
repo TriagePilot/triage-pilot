@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { createJobQueue, recoverStaleJobs } from "../src/jobs";
+import { createJobClaimer, createWorkspaceJobQueue, recoverStaleJobs } from "../src/jobs";
 import { readWorkerHeartbeat, updateWorkerHeartbeat } from "../src/heartbeat";
 import { applyFixedRetention } from "../src/retention";
+import { ensureLocalWorkspace } from "../src/workspaces";
 import { withPostgresTestDatabase } from "./postgres";
 
 const payload = {
@@ -25,9 +26,11 @@ const payload = {
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL job operations", () => {
   it("requeues transient failures with backoff and fails exhausted attempts", async () => {
     await withPostgresTestDatabase(async (db) => {
-      const queue = createJobQueue(db);
+      const { workspaceId, providerConnectionId, queue, claimer } = await createJobTestContext(db);
       const firstAttemptAt = new Date("2026-08-18T10:00:00.000Z");
       const { jobId } = await queue.enqueue({
+        provider: "github",
+        providerConnectionId,
         kind: "process_pull_request",
         payload,
         idempotencyKey: "routing:delivery-1",
@@ -35,7 +38,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL job operation
         maxAttempts: 2,
       });
 
-      const firstClaim = await queue.claimNext("worker-1", firstAttemptAt);
+      const firstClaim = await claimer.claimNext("worker-1", firstAttemptAt);
       expect(firstClaim).toMatchObject({
         id: jobId,
         attemptCount: 1,
@@ -60,7 +63,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL job operation
       });
 
       const secondAttemptAt = retry.run_at;
-      const secondClaim = await queue.claimNext("worker-1", secondAttemptAt);
+      const secondClaim = await claimer.claimNext("worker-1", secondAttemptAt);
       expect(secondClaim).toMatchObject({
         id: jobId,
         attemptCount: 2,
@@ -89,15 +92,17 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL job operation
 
   it("fails a non-retryable error immediately", async () => {
     await withPostgresTestDatabase(async (db) => {
-      const queue = createJobQueue(db);
+      const { workspaceId, providerConnectionId, queue, claimer } = await createJobTestContext(db);
       const now = new Date("2026-08-18T10:00:00.000Z");
       const { jobId } = await queue.enqueue({
+        provider: "github",
+        providerConnectionId,
         kind: "process_pull_request",
         payload,
         idempotencyKey: "routing:delivery-permanent",
         runAt: now,
       });
-      const claim = await queue.claimNext("worker-1", now);
+      const claim = await claimer.claimNext("worker-1", now);
 
       await expect(
         queue.markFailed(toLease(claim), "permission denied", now, { retryable: false }),
@@ -111,7 +116,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL job operation
 
   it("atomically queues an exhausted job so stale recovery can resume bounded finalization", async () => {
     await withPostgresTestDatabase(async (db) => {
-      const queue = createJobQueue(db);
+      const { workspaceId, providerConnectionId, queue, claimer } = await createJobTestContext(db);
       const now = new Date("2026-08-18T10:00:00.000Z");
       const recoveryPayload = {
         ...payload,
@@ -121,13 +126,15 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL job operation
         },
       };
       const { jobId } = await queue.enqueue({
+        provider: "github",
+        providerConnectionId,
         kind: "process_pull_request",
         payload,
         idempotencyKey: "routing:delivery-policy-recovery",
         runAt: now,
         maxAttempts: 1,
       });
-      const claim = await queue.claimNext("worker-1", now);
+      const claim = await claimer.claimNext("worker-1", now);
 
       await expect(
         queue.markFailed(toLease(claim), "GitHub unavailable", now, {
@@ -153,7 +160,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL job operation
       });
 
       const recoveryClaimedAt = new Date("2026-08-18T10:00:05.000Z");
-      await expect(queue.claimNext("worker-that-stopped", recoveryClaimedAt)).resolves.toMatchObject({
+      await expect(claimer.claimNext("worker-that-stopped", recoveryClaimedAt)).resolves.toMatchObject({
         id: jobId,
         status: "running",
         payload: recoveryPayload,
@@ -161,7 +168,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL job operation
         maxAttempts: 4,
       });
       const staleRecoveryAt = new Date("2026-08-18T10:16:00.000Z");
-      await recoverStaleJobs(db, staleRecoveryAt);
+      await recoverStaleJobs(db, workspaceId, staleRecoveryAt);
       await expect(
         db
           .selectFrom("jobs")
@@ -180,18 +187,20 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL job operation
 
   it("recovers stale running jobs and clears their locks", async () => {
     await withPostgresTestDatabase(async (db) => {
-      const queue = createJobQueue(db);
+      const { workspaceId, providerConnectionId, queue, claimer } = await createJobTestContext(db);
       const claimedAt = new Date("2026-08-18T10:00:00.000Z");
       const { jobId } = await queue.enqueue({
+        provider: "github",
+        providerConnectionId,
         kind: "process_pull_request",
         payload,
         idempotencyKey: "routing:delivery-stale",
         runAt: claimedAt,
       });
-      await queue.claimNext("worker-that-stopped", claimedAt);
+      await claimer.claimNext("worker-that-stopped", claimedAt);
 
       const quickRestartAt = new Date("2026-08-18T10:05:00.000Z");
-      await recoverStaleJobs(db, quickRestartAt);
+      await recoverStaleJobs(db, workspaceId, quickRestartAt);
       await expect(
         db
           .selectFrom("jobs")
@@ -201,7 +210,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL job operation
       ).resolves.toEqual({ status: "running", locked_at: claimedAt, locked_by: "worker-that-stopped" });
 
       const recoveredAt = new Date("2026-08-18T10:16:00.000Z");
-      await recoverStaleJobs(db, recoveredAt);
+      await recoverStaleJobs(db, workspaceId, recoveredAt);
 
       await expect(
         db
@@ -215,19 +224,21 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL job operation
 
   it("fails an exhausted stale claim instead of requeueing it", async () => {
     await withPostgresTestDatabase(async (db) => {
-      const queue = createJobQueue(db);
+      const { workspaceId, providerConnectionId, queue, claimer } = await createJobTestContext(db);
       const claimedAt = new Date("2026-08-18T10:00:00.000Z");
       const { jobId } = await queue.enqueue({
+        provider: "github",
+        providerConnectionId,
         kind: "process_pull_request",
         payload,
         idempotencyKey: "routing:delivery-exhausted-stale",
         runAt: claimedAt,
         maxAttempts: 1,
       });
-      await queue.claimNext("worker-that-stopped", claimedAt);
+      await claimer.claimNext("worker-that-stopped", claimedAt);
 
       const recoveredAt = new Date("2026-08-18T10:16:00.000Z");
-      await recoverStaleJobs(db, recoveredAt);
+      await recoverStaleJobs(db, workspaceId, recoveredAt);
 
       await expect(
         db
@@ -248,20 +259,22 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL job operation
 
   it("rejects obsolete lease transitions without corrupting a newer or succeeded attempt", async () => {
     await withPostgresTestDatabase(async (db) => {
-      const queue = createJobQueue(db);
+      const { workspaceId, providerConnectionId, queue, claimer } = await createJobTestContext(db);
       const firstClaimAt = new Date("2026-08-18T10:00:00.000Z");
       const { jobId } = await queue.enqueue({
+        provider: "github",
+        providerConnectionId,
         kind: "process_pull_request",
         payload,
         idempotencyKey: "routing:delivery-lease-race",
         runAt: firstClaimAt,
         maxAttempts: 3,
       });
-      const obsoleteLease = toLease(await queue.claimNext("worker-old", firstClaimAt));
+      const obsoleteLease = toLease(await claimer.claimNext("worker-old", firstClaimAt));
 
       const recoveredAt = new Date("2026-08-18T10:16:00.000Z");
-      await recoverStaleJobs(db, recoveredAt);
-      const currentLease = toLease(await queue.claimNext("worker-new", recoveredAt));
+      await recoverStaleJobs(db, workspaceId, recoveredAt);
+      const currentLease = toLease(await claimer.claimNext("worker-new", recoveredAt));
 
       await expect(queue.markSucceeded(obsoleteLease, new Date("2026-08-18T10:17:00.000Z"))).resolves.toEqual({
         updated: false,
@@ -332,6 +345,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL worker heartb
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL fixed retention", () => {
   it("deletes only expired terminal data and never active jobs", async () => {
     await withPostgresTestDatabase(async (db) => {
+      const { workspaceId, providerConnectionId } = await createJobTestContext(db);
       const now = new Date("2026-08-18T10:00:00.000Z");
       const old31Days = new Date("2026-07-18T09:59:59.000Z");
       const old91Days = new Date("2026-05-19T09:59:59.000Z");
@@ -340,30 +354,30 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL fixed retenti
       await db
         .insertInto("webhook_receipts")
         .values([
-          { delivery_id: "receipt-old", event_name: "pull_request", payload_summary: {}, created_at: old31Days },
-          { delivery_id: "receipt-recent", event_name: "pull_request", payload_summary: {}, created_at: recent },
+          { workspace_id: workspaceId, provider: "github", delivery_id: "receipt-old", event_name: "pull_request", payload_summary: {}, created_at: old31Days },
+          { workspace_id: workspaceId, provider: "github", delivery_id: "receipt-recent", event_name: "pull_request", payload_summary: {}, created_at: recent },
         ])
         .execute();
       await db
         .insertInto("jobs")
         .values([
-          buildJobRow("succeeded-old", "succeeded", old31Days),
-          buildJobRow("succeeded-recent", "succeeded", recent),
-          buildJobRow("failed-old", "failed", old91Days),
-          buildJobRow("failed-recent", "failed", recent),
-          buildJobRow("queued-old", "queued", old91Days),
-          { ...buildJobRow("running-old", "running", old91Days), locked_at: old91Days, locked_by: "worker-1" },
+          buildJobRow(workspaceId, providerConnectionId, "succeeded-old", "succeeded", old31Days),
+          buildJobRow(workspaceId, providerConnectionId, "succeeded-recent", "succeeded", recent),
+          buildJobRow(workspaceId, providerConnectionId, "failed-old", "failed", old91Days),
+          buildJobRow(workspaceId, providerConnectionId, "failed-recent", "failed", recent),
+          buildJobRow(workspaceId, providerConnectionId, "queued-old", "queued", old91Days),
+          { ...buildJobRow(workspaceId, providerConnectionId, "running-old", "running", old91Days), locked_at: old91Days, locked_by: "worker-1" },
         ])
         .execute();
       await db
         .insertInto("routing_decisions")
         .values([
-          buildDecisionRow("decision-old", old91Days),
-          buildDecisionRow("decision-recent", recent),
+          buildDecisionRow(workspaceId, "decision-old", old91Days),
+          buildDecisionRow(workspaceId, "decision-recent", recent),
         ])
         .execute();
 
-      await applyFixedRetention(db, now);
+      await applyFixedRetention(db, workspaceId, now);
 
       await expect(
         db.selectFrom("webhook_receipts").select("delivery_id").orderBy("delivery_id").execute(),
@@ -381,8 +395,11 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL fixed retenti
   });
 });
 
-function buildJobRow(idempotencyKey: string, status: "queued" | "running" | "succeeded" | "failed", at: Date) {
+function buildJobRow(workspaceId: string, providerConnectionId: string, idempotencyKey: string, status: "queued" | "running" | "succeeded" | "failed", at: Date) {
   return {
+    workspace_id: workspaceId,
+    provider: "github" as const,
+    provider_connection_id: providerConnectionId,
     kind: "process_pull_request",
     status,
     payload,
@@ -393,18 +410,54 @@ function buildJobRow(idempotencyKey: string, status: "queued" | "running" | "suc
   };
 }
 
-function buildDecisionRow(deliveryId: string, createdAt: Date) {
+function buildDecisionRow(workspaceId: string, deliveryId: string, createdAt: Date) {
   return {
+    workspace_id: workspaceId,
     delivery_id: deliveryId,
     routing_key: `legacy:${deliveryId}`,
     action: "request_human_review",
     risk_score: 40,
     details: {},
+    effective_config_hash: "legacy-test-hash",
+    inheritance_mode: "legacy" as const,
     created_at: createdAt,
   };
 }
 
-function toLease(job: Awaited<ReturnType<ReturnType<typeof createJobQueue>["claimNext"]>>) {
+function toLease(job: Awaited<ReturnType<ReturnType<typeof createJobClaimer>["claimNext"]>>) {
   if (!job || job.lockedBy === null) throw new Error("expected a claimed job");
-  return { jobId: job.id, lockedBy: job.lockedBy, attemptCount: job.attemptCount, maxAttempts: job.maxAttempts };
+  return {
+    jobId: job.id,
+    workspaceId: job.workspaceId,
+    provider: job.provider,
+    providerConnectionId: job.providerConnectionId,
+    lockedBy: job.lockedBy,
+    attemptCount: job.attemptCount,
+    maxAttempts: job.maxAttempts,
+  };
+}
+
+async function createJobTestContext(db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0]) {
+  const workspaceId = await ensureLocalWorkspace(db);
+  const existing = await db.selectFrom("provider_connections")
+    .select("id")
+    .where("workspace_id", "=", workspaceId)
+    .where("provider", "=", "github")
+    .where("external_connection_id", "=", "99")
+    .executeTakeFirst();
+  const providerConnectionId = existing?.id ?? (await db.insertInto("provider_connections").values({
+    workspace_id: workspaceId,
+    provider: "github",
+    external_connection_id: "99",
+    workspace_login: "acme",
+    account_type: "Organization",
+    status: "active",
+    permissions: {},
+  }).returning("id").executeTakeFirstOrThrow()).id;
+  return {
+    workspaceId,
+    providerConnectionId,
+    queue: createWorkspaceJobQueue(db, workspaceId),
+    claimer: createJobClaimer(db),
+  };
 }

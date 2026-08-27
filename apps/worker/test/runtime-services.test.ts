@@ -945,7 +945,7 @@ function policyStateDatabase(input: {
             select: () => ({
               where: () => ({
                 where: () => ({
-                  where: () => ({ executeTakeFirst: async () => ({ id: "repository-row-1" }) }),
+                  where: () => ({ executeTakeFirst: async () => ({ repositoryId: "repository-row-1", externalConnectionId: "123" }) }),
                 }),
               }),
             }),
@@ -1008,7 +1008,7 @@ function knownRepositoryDatabase(recordedCheckRunId?: string) {
               where: () => ({
                 where: () => ({
                   where: () => ({
-                    executeTakeFirst: async () => ({ id: "repository-row-1" }),
+                    executeTakeFirst: async () => ({ repositoryId: "repository-row-1", externalConnectionId: "123" }),
                   }),
                 }),
               }),
@@ -1071,7 +1071,7 @@ function evaluationPolicyDatabase(input: {
             select: () => ({
               where: () => ({
                 where: () => ({
-                  where: () => ({ executeTakeFirst: async () => ({ id: "repository-row-1" }) }),
+                  where: () => ({ executeTakeFirst: async () => ({ repositoryId: "repository-row-1", externalConnectionId: "123" }) }),
                 }),
               }),
             }),

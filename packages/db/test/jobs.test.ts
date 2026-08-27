@@ -14,6 +14,9 @@ describe("buildNextRunAt", () => {
   it("defines the job record consumed by worker processes", () => {
     const job: JobRecord = {
       id: "job_1",
+      workspaceId: "00000000-0000-4000-8000-000000000001",
+      provider: "github",
+      providerConnectionId: "00000000-0000-4000-8000-000000000002",
       kind: "process_pull_request",
       status: "queued",
       payload: { pullNumber: 7 },

@@ -15,13 +15,14 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         order by table_name
       `.execute(db);
       expect(result.rows.map((row) => row.table_name)).toEqual([
-        "installations",
         "jobs",
+        "provider_connections",
         "repositories",
         "routing_decisions",
         "schema_migrations",
         "webhook_receipts",
         "worker_heartbeat",
+        "workspaces",
       ]);
       const repositories = await sql<{ column_name: string }>`
         select column_name from information_schema.columns
@@ -30,8 +31,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
       `.execute(db);
       expect(repositories.rows.map((row) => row.column_name)).toEqual([
         "id",
-        "installation_id",
-        "github_repository_id",
+        "provider_connection_id",
+        "external_repository_id",
         "owner",
         "name",
         "default_branch",
@@ -39,6 +40,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         "created_at",
         "updated_at",
         "last_config_mode",
+        "workspace_id",
+        "provider",
       ]);
       const decision = await sql<{ column_name: string }>`
         select column_name from information_schema.columns
@@ -57,6 +60,11 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
           "routing_key",
           "policy_check_run_id",
           "policy_check_state",
+          "workspace_id",
+          "effective_config_hash",
+          "inheritance_mode",
+          "config_diagnostics",
+          "config_sources",
         ]),
       );
       const migrations = await sql<{ name: string }>`select name from schema_migrations order by name`.execute(db);
@@ -65,6 +73,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         { name: "0002_selected_reviewers.sql" },
         { name: "0003_human_review_policy.sql" },
         { name: "0004_semantic_routing_deduplication.sql" },
+        { name: "0005_workspace_scope.sql" },
       ]);
     });
   });

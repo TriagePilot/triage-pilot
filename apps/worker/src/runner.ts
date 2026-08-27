@@ -1,4 +1,5 @@
-import type { JobLease, JobQueue, JobRecord, JobTransitionResult } from "@triagepilot/db";
+import type { JobClaimer, JobLease, JobRecord, JobTransitionResult, WorkspaceJobQueue } from "@triagepilot/db";
+import type { WorkspaceId } from "@triagepilot/contracts";
 import type { HumanReviewPolicyJobPayload } from "@triagepilot/contracts";
 
 import type { RoutingJobMessage, RoutingJobServices } from "./processor";
@@ -18,7 +19,8 @@ interface PolicyCheckFailureServices {
 }
 
 export interface WorkerRunnerInput {
-  queue: JobQueue;
+  jobClaimer: JobClaimer;
+  workspaceQueue(workspaceId: WorkspaceId): WorkspaceJobQueue;
   workerId: string;
   now: Date;
   processRoutingJob(message: RoutingJobMessage, services: RoutingJobServices): Promise<void>;
@@ -31,8 +33,9 @@ export interface WorkerRunnerInput {
 }
 
 export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> {
-  const job = await input.queue.claimNext(input.workerId, input.now);
+  const job = await input.jobClaimer.claimNext(input.workerId, input.now);
   if (!job) return false;
+  const queue = input.workspaceQueue(job.workspaceId);
   const lease = toJobLease(job);
   let routingServices: RoutingJobServices | null = null;
   let humanReviewPolicyServices: HumanReviewPolicyServices | null = null;
@@ -45,7 +48,7 @@ export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> 
       if (recovery === null) {
         await input.processRoutingJob(message, routingServices);
       } else {
-        await recoverPolicyCheckFailure(input.queue, lease, routingServices, recovery);
+        await recoverPolicyCheckFailure(queue, lease, routingServices, recovery);
         return true;
       }
     } else if (job.kind === "evaluate_human_review_policy") {
@@ -58,7 +61,7 @@ export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> 
       if (recovery === null) {
         await input.processHumanReviewPolicyJob(message, humanReviewPolicyServices);
       } else {
-        await recoverPolicyCheckFailure(input.queue, lease, humanReviewPolicyServices, recovery);
+        await recoverPolicyCheckFailure(queue, lease, humanReviewPolicyServices, recovery);
         return true;
       }
     } else {
@@ -83,7 +86,7 @@ export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> 
       const decisionId = humanReviewPolicyServices?.policyCheckFailureDecisionId?.();
       if (decisionId) recovery.decisionId = decisionId;
       assertLeaseUpdated(
-        await input.queue.markFailed(lease, classified.message, new Date(), {
+        await queue.markFailed(lease, classified.message, new Date(), {
           retryable: true,
           recovery: {
             payload: { ...(job.payload as object), policyCheckFailureRecovery: recovery },
@@ -95,7 +98,7 @@ export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> 
       return true;
     }
     assertLeaseUpdated(
-      await input.queue.markFailed(lease, classified.message, new Date(), {
+      await queue.markFailed(lease, classified.message, new Date(), {
         retryable,
       }),
       lease,
@@ -103,12 +106,12 @@ export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> 
     return true;
   }
 
-  assertLeaseUpdated(await input.queue.markSucceeded(lease, new Date()), lease);
+  assertLeaseUpdated(await queue.markSucceeded(lease, new Date()), lease);
   return true;
 }
 
 async function recoverPolicyCheckFailure(
-  queue: JobQueue,
+  queue: WorkspaceJobQueue,
   lease: JobLease,
   services: PolicyCheckFailureServices,
   recovery: PolicyCheckFailureRecovery,
@@ -148,7 +151,15 @@ async function recoverPolicyCheckFailure(
 
 function toJobLease(job: JobRecord): JobLease {
   if (job.lockedBy === null) throw new StaleJobLeaseError(`claimed job ${job.id} has no lock owner`);
-  return { jobId: job.id, lockedBy: job.lockedBy, attemptCount: job.attemptCount, maxAttempts: job.maxAttempts };
+  return {
+    jobId: job.id,
+    workspaceId: job.workspaceId,
+    provider: job.provider,
+    providerConnectionId: job.providerConnectionId,
+    lockedBy: job.lockedBy,
+    attemptCount: job.attemptCount,
+    maxAttempts: job.maxAttempts,
+  };
 }
 
 function assertLeaseUpdated(result: JobTransitionResult, lease: JobLease): void {
@@ -160,7 +171,7 @@ function parseRoutingJobPayload(job: JobRecord): RoutingJobMessage {
   if (!isRoutingJobMessage(payload)) {
     throw new PermanentJobError("routing job payload is malformed");
   }
-  return payload;
+  return { ...payload, workspaceId: job.workspaceId, providerConnectionId: job.providerConnectionId };
 }
 
 function parseHumanReviewPolicyJobPayload(job: JobRecord): HumanReviewPolicyJobPayload {
@@ -168,7 +179,7 @@ function parseHumanReviewPolicyJobPayload(job: JobRecord): HumanReviewPolicyJobP
   if (!isHumanReviewPolicyJobPayload(payload)) {
     throw new PermanentJobError("human-review policy job payload is malformed");
   }
-  return payload;
+  return { ...payload, workspaceId: job.workspaceId, providerConnectionId: job.providerConnectionId };
 }
 
 function parsePolicyCheckFailureRecovery(payload: unknown): PolicyCheckFailureRecovery | null {

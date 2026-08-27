@@ -1,5 +1,5 @@
 import { sql, type Kysely } from "kysely";
-import type { ActionStatus, RepositoryMode, RiskTier, RoutingAction, ScoreComponent } from "@triagepilot/contracts";
+import type { ActionStatus, RepositoryMode, RiskTier, RoutingAction, ScoreComponent, WorkspaceId } from "@triagepilot/contracts";
 
 import type { Database } from "./kysely";
 
@@ -77,20 +77,23 @@ export interface ReadOperationsOverviewInput {
 
 export async function readOperationsOverview(
   db: Kysely<Database>,
+  workspaceId: WorkspaceId,
   input: ReadOperationsOverviewInput,
 ): Promise<OperationsOverview> {
-  const configuredOrganization = sql<boolean>`lower(installations.account_login) = lower(${input.githubOrganization})`;
+  const configuredOrganization = sql<boolean>`lower(provider_connections.workspace_login) = lower(${input.githubOrganization})`;
   const [installation, repositories, decisions, jobFailures, actionFailures, heartbeat] =
     await Promise.all([
       db
-        .selectFrom("installations")
-        .select("github_installation_id")
+        .selectFrom("provider_connections")
+        .select("external_connection_id")
+        .where("workspace_id", "=", workspaceId)
+        .where("provider", "=", "github")
         .where("status", "=", "active")
-        .where(sql<boolean>`lower(account_login) = lower(${input.githubOrganization})`)
+        .where(sql<boolean>`lower(workspace_login) = lower(${input.githubOrganization})`)
         .executeTakeFirst(),
       db
         .selectFrom("repositories")
-        .innerJoin("installations", "installations.id", "repositories.installation_id")
+        .innerJoin("provider_connections", "provider_connections.id", "repositories.provider_connection_id")
         .select([
           "repositories.id",
           "repositories.owner",
@@ -98,7 +101,9 @@ export async function readOperationsOverview(
           "repositories.config_state",
           "repositories.last_config_mode",
         ])
-        .where("installations.status", "=", "active")
+        .where("repositories.workspace_id", "=", workspaceId)
+        .whereRef("provider_connections.workspace_id", "=", "repositories.workspace_id")
+        .where("provider_connections.status", "=", "active")
         .where(configuredOrganization)
         .orderBy("repositories.owner", "asc")
         .orderBy("repositories.name", "asc")
@@ -106,7 +111,7 @@ export async function readOperationsOverview(
       db
         .selectFrom("routing_decisions")
         .innerJoin("repositories", "repositories.id", "routing_decisions.repository_id")
-        .innerJoin("installations", "installations.id", "repositories.installation_id")
+        .innerJoin("provider_connections", "provider_connections.id", "repositories.provider_connection_id")
         .select([
           "routing_decisions.id",
           "repositories.owner",
@@ -132,7 +137,10 @@ export async function readOperationsOverview(
             else null
           end`.as("pull_number"),
         ])
-        .where("installations.status", "=", "active")
+        .where("routing_decisions.workspace_id", "=", workspaceId)
+        .whereRef("repositories.workspace_id", "=", "routing_decisions.workspace_id")
+        .whereRef("provider_connections.workspace_id", "=", "repositories.workspace_id")
+        .where("provider_connections.status", "=", "active")
         .where(configuredOrganization)
         .orderBy("routing_decisions.created_at", "desc")
         .orderBy("routing_decisions.id", "desc")
@@ -141,6 +149,7 @@ export async function readOperationsOverview(
       db
         .selectFrom("jobs")
         .select(["id", "last_error", "updated_at"])
+        .where("workspace_id", "=", workspaceId)
         .where("status", "=", "failed")
         .orderBy("updated_at", "desc")
         .orderBy("id", "desc")
@@ -149,7 +158,7 @@ export async function readOperationsOverview(
       db
         .selectFrom("routing_decisions")
         .innerJoin("repositories", "repositories.id", "routing_decisions.repository_id")
-        .innerJoin("installations", "installations.id", "repositories.installation_id")
+        .innerJoin("provider_connections", "provider_connections.id", "repositories.provider_connection_id")
         .select([
           "routing_decisions.id",
           "repositories.owner",
@@ -157,9 +166,12 @@ export async function readOperationsOverview(
           "routing_decisions.action_error",
           "routing_decisions.action_failed_at",
         ])
+        .where("routing_decisions.workspace_id", "=", workspaceId)
+        .whereRef("repositories.workspace_id", "=", "routing_decisions.workspace_id")
+        .whereRef("provider_connections.workspace_id", "=", "repositories.workspace_id")
         .where("routing_decisions.action_status", "=", "failed")
         .where("routing_decisions.action_failed_at", "is not", null)
-        .where("installations.status", "=", "active")
+        .where("provider_connections.status", "=", "active")
         .where(configuredOrganization)
         .orderBy("routing_decisions.action_failed_at", "desc")
         .orderBy("routing_decisions.id", "desc")
@@ -176,7 +188,7 @@ export async function readOperationsOverview(
     githubApp: {
       appId: input.githubAppId,
       configured: input.githubAppId.length > 0,
-      installationId: installation?.github_installation_id ?? null,
+      installationId: installation?.external_connection_id ?? null,
     },
     repositories: repositories.map((repository) => ({
       id: repository.id,
