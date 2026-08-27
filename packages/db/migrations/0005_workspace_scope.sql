@@ -24,6 +24,8 @@ alter table provider_connections
   foreign key (workspace_id) references workspaces(id) on delete cascade;
 alter table provider_connections
   add constraint provider_connections_workspace_id_key unique (workspace_id, id);
+alter table provider_connections
+  add constraint provider_connections_workspace_provider_id_key unique (workspace_id, provider, id);
 alter table provider_connections drop constraint installations_github_installation_id_key;
 alter table provider_connections
   add constraint provider_connections_workspace_external_key
@@ -54,8 +56,8 @@ alter table repositories
   foreign key (workspace_id) references workspaces(id) on delete cascade;
 alter table repositories
   add constraint repositories_workspace_provider_connection_fkey
-  foreign key (workspace_id, provider_connection_id)
-  references provider_connections(workspace_id, id) on delete cascade;
+  foreign key (workspace_id, provider, provider_connection_id)
+  references provider_connections(workspace_id, provider, id) on delete cascade;
 alter table repositories
   add constraint repositories_workspace_id_key unique (workspace_id, id);
 alter table repositories
@@ -140,8 +142,8 @@ alter table jobs
   foreign key (workspace_id) references workspaces(id) on delete cascade;
 alter table jobs
   add constraint jobs_workspace_provider_connection_fkey
-  foreign key (workspace_id, provider_connection_id)
-  references provider_connections(workspace_id, id) on delete cascade;
+  foreign key (workspace_id, provider, provider_connection_id)
+  references provider_connections(workspace_id, provider, id) on delete cascade;
 alter table jobs
   add constraint jobs_workspace_id_key unique (workspace_id, id);
 alter table jobs

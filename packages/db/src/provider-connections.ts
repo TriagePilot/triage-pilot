@@ -51,6 +51,7 @@ export async function replaceProviderConnectionRepositories(
   workspaceId: WorkspaceId,
   input: ConfiguredProviderConnectionInput,
 ): Promise<void> {
+  assertRepositoryProviders(input.provider, input.repositories);
   await db.transaction().execute(async (trx) => {
     const providerConnectionId = await upsertActiveProviderConnection(trx, workspaceId, input);
     for (const repository of input.repositories) {
@@ -77,6 +78,7 @@ export async function updateProviderConnectionRepositories(
   workspaceId: WorkspaceId,
   input: ProviderConnectionRepositoryUpdateInput,
 ): Promise<void> {
+  assertRepositoryProviders(input.provider, input.repositoriesAdded);
   await db.transaction().execute(async (trx) => {
     await lockProviderConnectionProjection(trx, workspaceId);
     const connection = await trx
@@ -159,6 +161,7 @@ export async function upsertDeliveryRepository(
   connection: ProviderConnectionMetadata,
   repository: ProviderRepositoryMetadata,
 ): Promise<{ providerConnectionId: ProviderConnectionId; repositoryId: string }> {
+  assertRepositoryProviders(connection.provider, [repository]);
   const providerConnectionId = await upsertActiveProviderConnection(trx, workspaceId, connection);
   const repositoryId = await upsertRepository(trx, workspaceId, providerConnectionId, repository);
   return { providerConnectionId, repositoryId };
@@ -258,4 +261,13 @@ async function lockProviderConnectionProjection(
   workspaceId: WorkspaceId,
 ): Promise<void> {
   await sql`select pg_advisory_xact_lock(hashtextextended(${workspaceId}, 764737450))`.execute(trx);
+}
+
+function assertRepositoryProviders(
+  connectionProvider: ProviderKind,
+  repositories: ProviderRepositoryMetadata[],
+): void {
+  if (repositories.some((repository) => repository.provider !== connectionProvider)) {
+    throw new Error("repository provider must match its provider connection");
+  }
 }

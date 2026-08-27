@@ -128,6 +128,41 @@ describe("runWorkerOnce", () => {
     expect(queue.markFailed).not.toHaveBeenCalled();
   });
 
+  it("uses the claimed provider instead of the stored routing payload provider", async () => {
+    const queue = buildQueueWithJob();
+    queue.claimNext.mockResolvedValue({
+      ...jobRecord,
+      provider: "gitlab",
+      status: "running",
+      payload: {
+        ...routingJobPayload,
+        workspaceId: "stored-payload-workspace",
+        providerConnectionId: 99,
+      },
+    });
+    const processRoutingJob = vi.fn(async () => {});
+
+    await runWorkerOnce({
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
+      workerId: "worker-1",
+      now: new Date("2026-08-18T10:00:00.000Z"),
+      processRoutingJob,
+      buildRoutingServices: vi.fn(() => ({}) as never),
+    });
+
+    expect(processRoutingJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: "ws_local",
+        providerConnectionId: "123",
+        changeRequest: expect.objectContaining({
+          repository: expect.objectContaining({ provider: "gitlab" }),
+        }),
+      }),
+      {},
+    );
+  });
+
   it("dispatches a valid human-review policy job and marks it succeeded", async () => {
     const queue = buildQueueWithJob();
     queue.claimNext.mockResolvedValue({
@@ -166,6 +201,38 @@ describe("runWorkerOnce", () => {
     expect(processRoutingJob).not.toHaveBeenCalled();
     expect(queue.markSucceeded).toHaveBeenCalledWith(jobLease, expect.any(Date));
     expect(queue.markFailed).not.toHaveBeenCalled();
+  });
+
+  it("uses the claimed provider instead of the stored review payload provider", async () => {
+    const queue = buildQueueWithJob();
+    queue.claimNext.mockResolvedValue({
+      ...jobRecord,
+      provider: "gitlab",
+      kind: "evaluate_human_review_policy",
+      status: "running",
+      payload: policyJobPayload,
+    });
+    const processHumanReviewPolicyJob = vi.fn(async () => {});
+
+    await runWorkerOnce({
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
+      workerId: "worker-1",
+      now: new Date("2026-08-18T10:00:00.000Z"),
+      processRoutingJob: vi.fn(async () => {}),
+      buildRoutingServices: vi.fn(() => ({}) as never),
+      processHumanReviewPolicyJob,
+      buildHumanReviewPolicyServices: vi.fn(() => ({}) as never),
+    });
+
+    expect(processHumanReviewPolicyJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        changeRequest: expect.objectContaining({
+          repository: expect.objectContaining({ provider: "gitlab" }),
+        }),
+      }),
+      {},
+    );
   });
 
   it.each([
@@ -505,7 +572,7 @@ describe("runWorkerOnce", () => {
     queue.claimNext.mockResolvedValue({
       ...jobRecord,
       status: "running",
-      payload: { ...(jobRecord.payload as object), providerConnectionId: 99 },
+      payload: { ...(jobRecord.payload as object), eventName: 99 },
     });
     const processRoutingJob = vi.fn(async () => {});
 
@@ -564,7 +631,6 @@ describe("runWorkerOnce", () => {
   });
 
   it.each([
-    ["provider connection ID", { providerConnectionId: 99 }],
     ["repository ID", { changeRequest: {
       ...routingJobPayload.changeRequest,
       repository: { ...routingJobPayload.changeRequest.repository, externalId: "" },

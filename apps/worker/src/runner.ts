@@ -167,19 +167,45 @@ function assertLeaseUpdated(result: JobTransitionResult, lease: JobLease): void 
 }
 
 function parseRoutingJobPayload(job: JobRecord): RoutingJobMessage {
-  const payload = job.payload;
+  const payload = withClaimedScope(job);
   if (!isRoutingJobMessage(payload)) {
     throw new PermanentJobError("routing job payload is malformed");
   }
-  return { ...payload, workspaceId: job.workspaceId, providerConnectionId: job.providerConnectionId };
+  return payload;
 }
 
 function parseHumanReviewPolicyJobPayload(job: JobRecord): HumanReviewPolicyJobPayload {
-  const payload = job.payload;
+  const payload = withClaimedScope(job);
   if (!isHumanReviewPolicyJobPayload(payload)) {
     throw new PermanentJobError("human-review policy job payload is malformed");
   }
-  return { ...payload, workspaceId: job.workspaceId, providerConnectionId: job.providerConnectionId };
+  return payload;
+}
+
+function withClaimedScope(job: JobRecord): unknown {
+  if (!isRecord(job.payload)) return job.payload;
+  const changeRequest = job.payload.changeRequest;
+  if (!isRecord(changeRequest)) {
+    return {
+      ...job.payload,
+      workspaceId: job.workspaceId,
+      providerConnectionId: job.providerConnectionId,
+    };
+  }
+  const repository = changeRequest.repository;
+  return {
+    ...job.payload,
+    workspaceId: job.workspaceId,
+    providerConnectionId: job.providerConnectionId,
+    changeRequest: {
+      ...changeRequest,
+      ...(isRecord(repository) ? { repository: { ...repository, provider: job.provider } } : {}),
+    },
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function parsePolicyCheckFailureRecovery(payload: unknown): PolicyCheckFailureRecovery | null {

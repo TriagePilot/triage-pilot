@@ -83,6 +83,9 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace persistence is
         updated: false,
         reason: "stale_lease",
       });
+      await expect(
+        repositoriesB.jobs.markFailed(toLease(claimedA), "wrong workspace", now, { retryable: false }),
+      ).resolves.toEqual({ updated: false, reason: "stale_lease" });
 
       const old = new Date("2026-04-01T00:00:00.000Z");
       await db.updateTable("routing_decisions").set({ created_at: old }).execute();
@@ -100,6 +103,192 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace persistence is
       expect(overview.repositories).toHaveLength(1);
       expect(overview.decisions).toHaveLength(1);
       expect(overview.decisions[0]?.id).toBe(decisionB.decisionId);
+    });
+  });
+
+  it("isolates decision reads and every decision state mutation", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceA = await ensureLocalWorkspace(db);
+      const workspaceB = await createWorkspace(db, "workspace-b");
+      await seedConnectionAndRepository(db, workspaceA, "github", "99", "200", "api-a");
+      await seedConnectionAndRepository(db, workspaceB, "github", "99", "200", "api-b");
+      const repositoryA = await repositoryId(db, workspaceA, "github", "200");
+      const repositoryB = await repositoryId(db, workspaceB, "github", "200");
+      const repositoriesA = createWorkspaceRepositories(db, workspaceA);
+      const repositoriesB = createWorkspaceRepositories(db, workspaceB);
+      const now = new Date("2026-08-27T10:00:00.000Z");
+      const decisionA = await repositoriesA.persistDecision(decision(repositoryA, "delivery-a", "routing-a"));
+      const decisionB = await repositoriesB.persistDecision(decision(repositoryB, "delivery-b", "routing-b"));
+
+      await expect(repositoriesA.findLatestHumanReviewPolicyDecision({
+        repositoryId: repositoryB,
+        pullNumber: 7,
+      })).resolves.toBeNull();
+      await repositoriesA.recordPolicyCheck({ decisionId: decisionB.decisionId, checkRunId: "41", state: "in_progress" });
+      await repositoriesA.updatePolicyCheckState({ decisionId: decisionB.decisionId, state: "success" });
+      await repositoriesA.markActionSucceeded(decisionB.decisionId, now);
+
+      await repositoriesA.recordPolicyCheck({ decisionId: decisionA.decisionId, checkRunId: "42", state: "in_progress" });
+      await repositoriesA.updatePolicyCheckState({ decisionId: decisionA.decisionId, state: "success" });
+      await repositoriesA.markActionSucceeded(decisionA.decisionId, now);
+
+      await expect(repositoriesA.findLatestHumanReviewPolicyDecision({
+        repositoryId: repositoryA,
+        pullNumber: 7,
+      })).resolves.toEqual(expect.objectContaining({
+        decisionId: decisionA.decisionId,
+        policyCheckRunId: "42",
+        policyCheckState: "success",
+      }));
+      await expect(db.selectFrom("routing_decisions")
+        .select(["workspace_id", "action_status", "policy_check_run_id", "policy_check_state"])
+        .where("id", "=", decisionB.decisionId)
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+        workspace_id: workspaceB,
+        action_status: "pending",
+        policy_check_run_id: null,
+        policy_check_state: "not_started",
+      });
+    });
+  });
+
+  it("recovers stale jobs only in the bound workspace", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceA = await ensureLocalWorkspace(db);
+      const workspaceB = await createWorkspace(db, "workspace-b");
+      const connectionA = await seedConnectionAndRepository(db, workspaceA, "github", "99", "200", "api-a");
+      const connectionB = await seedConnectionAndRepository(db, workspaceB, "github", "99", "200", "api-b");
+      const repositoriesA = createWorkspaceRepositories(db, workspaceA);
+      const repositoriesB = createWorkspaceRepositories(db, workspaceB);
+      const claimedAt = new Date("2026-08-27T10:00:00.000Z");
+
+      await repositoriesA.jobs.enqueue(job("stale-a", connectionA, claimedAt));
+      await repositoriesB.jobs.enqueue(job("stale-b", connectionB, claimedAt));
+      const claimer = createJobClaimer(db);
+      expect((await claimer.claimNext("worker-a", claimedAt))?.workspaceId).toBe(workspaceA);
+      expect((await claimer.claimNext("worker-b", claimedAt))?.workspaceId).toBe(workspaceB);
+
+      await repositoriesA.recoverStaleJobs(new Date("2026-08-27T10:16:00.000Z"));
+
+      await expect(db.selectFrom("jobs")
+        .select(["workspace_id", "status", "locked_by"])
+        .orderBy("idempotency_key")
+        .execute()).resolves.toEqual([
+        { workspace_id: workspaceA, status: "queued", locked_by: null },
+        { workspace_id: workspaceB, status: "running", locked_by: "worker-b" },
+      ]);
+    });
+  });
+
+  it("binds both delivery acceptors to their requested workspace", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceA = await ensureLocalWorkspace(db);
+      const workspaceB = await createWorkspace(db, "workspace-b");
+      const repositoriesA = createWorkspaceRepositories(db, workspaceA);
+      const repositoriesB = createWorkspaceRepositories(db, workspaceB);
+
+      await expect(repositoriesA.acceptRoutingDelivery(routingDelivery("same-delivery", "same-routing")))
+        .resolves.toMatchObject({ inserted: true });
+      await expect(repositoriesB.acceptRoutingDelivery(routingDelivery("same-delivery", "same-routing")))
+        .resolves.toMatchObject({ inserted: true });
+      await expect(repositoriesA.acceptHumanReviewPolicyDelivery(reviewDelivery("same-review")))
+        .resolves.toMatchObject({ inserted: true });
+      await expect(repositoriesB.acceptHumanReviewPolicyDelivery(reviewDelivery("same-review")))
+        .resolves.toMatchObject({ inserted: true });
+
+      await expect(db.selectFrom("webhook_receipts")
+        .select(["workspace_id", db.fn.count("id").as("count")])
+        .groupBy("workspace_id")
+        .orderBy("workspace_id")
+        .execute()).resolves.toEqual(expect.arrayContaining([
+        { workspace_id: workspaceA, count: "2" },
+        { workspace_id: workspaceB, count: "2" },
+      ]));
+      await expect(db.selectFrom("jobs")
+        .select(["workspace_id", db.fn.count("id").as("count")])
+        .groupBy("workspace_id")
+        .orderBy("workspace_id")
+        .execute()).resolves.toEqual(expect.arrayContaining([
+        { workspace_id: workspaceA, count: "2" },
+        { workspace_id: workspaceB, count: "2" },
+      ]));
+    });
+  });
+
+  it("isolates every provider-connection projection mutation", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceA = await ensureLocalWorkspace(db);
+      const workspaceB = await createWorkspace(db, "workspace-b");
+      await seedConnectionAndRepository(db, workspaceA, "github", "99", "200", "api-a");
+      await seedConnectionAndRepository(db, workspaceB, "github", "99", "200", "api-b");
+      const repositoriesA = createWorkspaceRepositories(db, workspaceA);
+
+      await expect(repositoriesA.replaceProviderConnectionRepositories({
+        ...providerConnection("100", "a-mismatch"),
+        repositories: [{ ...providerRepository("201", "mismatch"), provider: "gitlab" }],
+      })).rejects.toThrow("provider must match");
+      await expect(repositoryExternalIds(db, workspaceA)).resolves.toEqual(["200"]);
+      await expect(repositoryExternalIds(db, workspaceB)).resolves.toEqual(["200"]);
+
+      await repositoriesA.activateConfiguredProviderConnection(providerConnection("101", "a-activate"));
+      await expect(providerConnectionState(db, workspaceA)).resolves.toEqual({
+        external_connection_id: "101",
+        workspace_login: "a-activate",
+        status: "active",
+      });
+      await expect(providerConnectionState(db, workspaceB)).resolves.toEqual({
+        external_connection_id: "99",
+        workspace_login: "acme",
+        status: "active",
+      });
+
+      await repositoriesA.upsertConfiguredProviderConnection({
+        ...providerConnection("102", "a-upsert"),
+        repositories: [providerRepository("202", "upserted")],
+      });
+      await expect(providerConnectionState(db, workspaceA)).resolves.toEqual({
+        external_connection_id: "102",
+        workspace_login: "a-upsert",
+        status: "active",
+      });
+      await expect(repositoryExternalIds(db, workspaceA)).resolves.toEqual(["202"]);
+      await repositoriesA.replaceProviderConnectionRepositories({
+        ...providerConnection("103", "a-replace"),
+        repositories: [providerRepository("203", "replace-one"), providerRepository("204", "replace-two")],
+      });
+      await expect(providerConnectionState(db, workspaceA)).resolves.toEqual({
+        external_connection_id: "103",
+        workspace_login: "a-replace",
+        status: "active",
+      });
+      await expect(repositoryExternalIds(db, workspaceA)).resolves.toEqual(["203", "204"]);
+      await repositoriesA.updateProviderConnectionRepositories({
+        ...providerConnection("103", "a-update"),
+        repositoriesAdded: [providerRepository("205", "added")],
+        repositoryIdsRemoved: ["203"],
+      });
+
+      await expect(repositoryExternalIds(db, workspaceA)).resolves.toEqual(["204", "205"]);
+      await expect(repositoryExternalIds(db, workspaceB)).resolves.toEqual(["200"]);
+      await repositoriesA.suspendConfiguredProviderConnection(providerConnection("103", "a-suspend"));
+      await expect(providerConnectionState(db, workspaceA)).resolves.toEqual({
+        external_connection_id: "103",
+        workspace_login: "a-suspend",
+        status: "suspended",
+      });
+      await expect(providerConnectionState(db, workspaceB)).resolves.toEqual({
+        external_connection_id: "99",
+        workspace_login: "acme",
+        status: "active",
+      });
+      await repositoriesA.deleteConfiguredProviderConnection({ provider: "github", externalConnectionId: "103" });
+      await expect(providerConnectionState(db, workspaceA)).resolves.toBeUndefined();
+      await expect(providerConnectionState(db, workspaceB)).resolves.toEqual({
+        external_connection_id: "99",
+        workspace_login: "acme",
+        status: "active",
+      });
+      await expect(repositoryExternalIds(db, workspaceB)).resolves.toEqual(["200"]);
     });
   });
 });
@@ -200,6 +389,83 @@ function decision(repositoryId: string, deliveryId: string, routingKey: string) 
     riskScore: 5,
     details: { fixture: true },
   };
+}
+
+function providerConnection(externalConnectionId: string, workspaceLogin: string) {
+  return {
+    provider: "github" as const,
+    externalConnectionId,
+    workspaceLogin,
+    accountType: "Organization",
+  };
+}
+
+function providerRepository(externalRepositoryId: string, name: string) {
+  return { provider: "github" as const, externalRepositoryId, owner: "acme", name };
+}
+
+function routingDelivery(deliveryId: string, routingKey: string) {
+  return {
+    deliveryId,
+    eventName: "pull_request",
+    eventAction: "opened",
+    hookId: "hook-1",
+    connection: providerConnection("99", "acme"),
+    repository: providerRepository("200", "api"),
+    payload: {
+      kind: "process_change_request" as const,
+      deliveryId,
+      eventName: "change_request.opened",
+      changeRequest: {
+        repository: { provider: "github" as const, externalId: "200", owner: "acme", name: "api" },
+        externalId: "7",
+        number: 7,
+        baseRevision: "base-1",
+        headRevision: "head-1",
+      },
+      isDraft: false,
+      routingKey,
+    },
+  };
+}
+
+function reviewDelivery(deliveryId: string) {
+  return {
+    deliveryId,
+    eventName: "pull_request_review",
+    connection: providerConnection("99", "acme"),
+    repository: providerRepository("200", "api"),
+    payload: {
+      kind: "evaluate_human_review_policy" as const,
+      deliveryId,
+      changeRequest: {
+        repository: { provider: "github" as const, externalId: "200", owner: "acme", name: "api" },
+        externalId: "7",
+        number: 7,
+      },
+    },
+  };
+}
+
+async function providerConnectionState(
+  db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0],
+  workspaceId: WorkspaceId,
+) {
+  return await db.selectFrom("provider_connections")
+    .select(["external_connection_id", "workspace_login", "status"])
+    .where("workspace_id", "=", workspaceId)
+    .executeTakeFirst();
+}
+
+async function repositoryExternalIds(
+  db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0],
+  workspaceId: WorkspaceId,
+) {
+  return (await db.selectFrom("repositories")
+    .select("external_repository_id")
+    .where("workspace_id", "=", workspaceId)
+    .orderBy("external_repository_id")
+    .execute()).map((repository) => repository.external_repository_id);
 }
 
 function toLease(job: Awaited<ReturnType<ReturnType<typeof createJobClaimer>["claimNext"]>>) {

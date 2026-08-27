@@ -316,6 +316,22 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL job operation
       });
     });
   });
+
+  it("rejects a job whose provider does not own the provider connection", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const { providerConnectionId, queue } = await createJobTestContext(db);
+
+      await expect(queue.enqueue({
+        provider: "gitlab",
+        providerConnectionId,
+        kind: "process_pull_request",
+        payload,
+        idempotencyKey: "routing:provider-mismatch",
+      })).rejects.toThrow();
+
+      await expect(db.selectFrom("jobs").select("id").execute()).resolves.toEqual([]);
+    });
+  });
 });
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL worker heartbeat", () => {

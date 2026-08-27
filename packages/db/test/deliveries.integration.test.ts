@@ -60,6 +60,25 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("delivery ingestion", () 
     });
   });
 
+  it("rejects a repository whose provider differs from its connection", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const repositories = createWorkspaceRepositories(db, await ensureLocalWorkspace(db));
+      const input = deliveryInput();
+
+      await expect(repositories.acceptRoutingDelivery({
+        ...input,
+        repository: { ...input.repository, provider: "gitlab" },
+      })).rejects.toThrow("provider must match");
+
+      await expectCounts(db, {
+        webhook_receipts: 0,
+        jobs: 0,
+        provider_connections: 0,
+        repositories: 0,
+      });
+    });
+  });
+
   it("creates one receipt and policy-evaluation job for concurrent duplicate review deliveries", async () => {
     await withPostgresTestDatabase(async (db) => {
       const repositories = createWorkspaceRepositories(db, await ensureLocalWorkspace(db));

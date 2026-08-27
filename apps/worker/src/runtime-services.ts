@@ -149,6 +149,7 @@ export function createWorkerRoutingServiceFactory(input: {
             last_config_mode: state.mode,
             updated_at: new Date(),
           })
+          .where("workspace_id", "=", message.workspaceId)
           .where("id", "=", await repositoryId())
           .execute();
       },

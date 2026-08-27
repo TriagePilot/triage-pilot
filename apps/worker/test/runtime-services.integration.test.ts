@@ -95,8 +95,22 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
         .returning("id")
         .executeTakeFirstOrThrow();
       const scopedMessage = { ...message, workspaceId, providerConnectionId: connection.id };
+      const scopedDb = db.withPlugin({
+        transformQuery(args) {
+          const query = JSON.stringify(args.node);
+          if (
+            args.node.kind === "UpdateQueryNode" &&
+            query.includes('"name":"repositories"') &&
+            !query.includes('"name":"workspace_id"')
+          ) throw new Error("repository update omitted workspace scope");
+          return args.node;
+        },
+        async transformResult(args) {
+          return args.result;
+        },
+      });
       const services = createWorkerRoutingServiceFactory({
-        db,
+        db: scopedDb,
         github: {
           appId: "123",
           privateKey: "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----",
