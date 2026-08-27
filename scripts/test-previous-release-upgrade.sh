@@ -156,6 +156,10 @@ openssl rand -hex 24 > "$admin_password_file"
 openssl rand -hex 32 > "$session_secret_file"
 
 mkdir -p "$previous_checkout"
+if ! git -C "$repository_root" cat-file -e "${previous_release_commit}^{commit}" 2>/dev/null; then
+  echo "Previous release commit ${previous_release_commit} is unavailable in this checkout. Fetch full history first." >&2
+  exit 1
+fi
 git -C "$repository_root" archive "$previous_release_commit" | tar -xf - -C "$previous_checkout"
 
 if [[ -z "$current_image_provided" ]]; then

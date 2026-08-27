@@ -9,6 +9,8 @@ jobs:
   build_verify:
     name: Build and verify release artifacts
     runs-on: ubuntu-latest
+    env:
+      TRIAGEPILOT_UPGRADE_PREVIOUS_RELEASE_COMMIT: 9d58fcffb04b381293c4730f947f7d7a4fad4782
     permissions:
       contents: read
     services:
@@ -51,6 +53,10 @@ jobs:
         name: Validate annotated tag and synchronized version
         run: |
           set -Eeuo pipefail
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected an exact annotated vX.Y.Z tag, got ${GITHUB_REF_NAME}." >&2
+            exit 1
+          fi
           ref_object_type="$(git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(objecttype)')"
           if [[ "$ref_object_type" != "tag" ]]; then
             echo "Release tags must be annotated; ${GITHUB_REF_NAME} is ${ref_object_type:-missing}." >&2
@@ -58,11 +64,6 @@ jobs:
           fi
 
           version="${GITHUB_REF_NAME#v}"
-          if [[ -z "$version" || "$version" == "$GITHUB_REF_NAME" ]]; then
-            echo "Expected a vX.Y.Z tag, got ${GITHUB_REF_NAME}." >&2
-            exit 1
-          fi
-
           package_version="$(node --input-type=module -e "import { readFileSync } from 'node:fs'; const manifest = JSON.parse(readFileSync('package.json', 'utf8')); process.stdout.write(manifest.version);")"
           dockerfile_version="$(sed -n 's/^ARG TRIAGEPILOT_VERSION=//p' Dockerfile)"
           if [[ "$package_version" != "$version" ]]; then
@@ -91,6 +92,8 @@ jobs:
       - run: pnpm db:migrate
         env:
           DATABASE_URL: postgres://triagepilot:triagepilot@localhost:5432/triagepilot
+      - name: Assert previous-release baseline is available
+        run: git cat-file -e "${TRIAGEPILOT_UPGRADE_PREVIOUS_RELEASE_COMMIT}^{commit}"
       - run: pnpm check:package-boundary
       - run: pnpm check:public-boundary
       - run: docker compose config
@@ -124,7 +127,7 @@ jobs:
       - run: pnpm smoke:compose
 
       - name: Scan tracked history for secrets
-        uses: docker://ghcr.io/gitleaks/gitleaks:v8.30.1
+        uses: docker://ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
         with:
           args: git --no-banner --redact .
 
@@ -245,22 +248,12 @@ jobs:
       - name: Revalidate downloaded release manifest
         run: |
           set -Eeuo pipefail
-          node --input-type=module <<'NODE'
-          import { readFileSync } from "node:fs";
-          import { validateReleaseManifest } from "./scripts/create-release-manifest.mjs";
-
-          const manifest = JSON.parse(readFileSync("artifacts/release-manifest.json", "utf8"));
-          const metadata = JSON.parse(readFileSync("artifacts/container/metadata.json", "utf8"));
-          const digest = metadata["containerimage.digest"] ?? metadata["containerimage.descriptor"]?.digest;
-          if (!digest) throw new Error("Buildx metadata did not contain a container digest.");
-
-          validateReleaseManifest(manifest, {
-            version: "${{ needs.build_verify.outputs.version }}",
-            gitCommit: "${{ needs.build_verify.outputs.git_commit }}",
-            databaseMigration: "0006_decision_outbox.sql",
-            containerDigest: digest,
-          });
-          NODE
+          node scripts/verify-release-artifacts.mjs \
+            --artifacts-dir artifacts \
+            --version "${{ needs.build_verify.outputs.version }}" \
+            --git-commit "${{ needs.build_verify.outputs.git_commit }}" \
+            --database-migration 0006_decision_outbox.sql \
+            --container-digest "${{ needs.build_verify.outputs.container_digest }}"
 
       - name: Publish container image
         run: |
