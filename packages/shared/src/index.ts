@@ -43,8 +43,9 @@ export function buildRoutingKey(input: {
   pullNumber: number;
   baseSha: string;
   headSha: string;
+  isDraft?: boolean;
 }): string {
-  return `routing:${input.repositoryId}:${input.pullNumber}:${input.baseSha}:${input.headSha}`;
+  return `routing:${input.repositoryId}:${input.pullNumber}:${input.baseSha}:${input.headSha}:${input.isDraft ? "draft" : "ready"}`;
 }
 
 export function legacyRoutingKey(deliveryId: string): string {
