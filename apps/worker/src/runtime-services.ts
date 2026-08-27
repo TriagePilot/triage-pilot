@@ -5,7 +5,15 @@ import {
   type GitHubAppCredentials,
 } from "@triagepilot/provider-github";
 import { resolveConfiguration as resolveEffectiveConfiguration } from "@triagepilot/config";
-import { trustedBaseSha, type DecisionEventSink, type HumanReviewPolicyJobPayload, type ScoreComponent } from "@triagepilot/contracts";
+import {
+  trustedBaseSha,
+  type Clock,
+  type ConfigurationSource,
+  type CredentialProvider,
+  type DecisionEventSink,
+  type HumanReviewPolicyJobPayload,
+  type ScoreComponent,
+} from "@triagepilot/contracts";
 import {
   createWorkspaceJobQueue,
   findLatestHumanReviewPolicyDecision,
@@ -31,16 +39,41 @@ import type { HumanReviewPolicyServices } from "./review-policy-processor";
 
 type Requester = Awaited<ReturnType<typeof createInstallationRequester>>;
 type DatabaseClient = ReturnType<typeof createDatabase>;
+type AdapterFactory = (requester: Requester) => GitHubAdapter;
+type ConfigurationSourceFactory = (requester: Requester) => ConfigurationSource;
+
+interface WorkerServiceFactoryInput {
+  db: DatabaseClient;
+  github?: GitHubAppCredentials;
+  credentialProvider?: CredentialProvider<GitHubAppCredentials>;
+  createRequester?: typeof createInstallationRequester;
+  createAdapter?: AdapterFactory;
+  createConfigurationSource?: ConfigurationSourceFactory;
+  clock?: Clock;
+}
 
 export function createNoopDecisionEventSink(): DecisionEventSink {
   return { async emit() {} };
 }
 
-export function createWorkerRoutingServiceFactory(input: {
-  db: DatabaseClient;
-  github: GitHubAppCredentials;
-  createRequester?: typeof createInstallationRequester;
-}) {
+function staticCredentialProvider(
+  github: GitHubAppCredentials | undefined,
+): CredentialProvider<GitHubAppCredentials> {
+  if (github === undefined) {
+    throw new Error("GitHub credential provider is required");
+  }
+  return {
+    async getCredential() {
+      return github;
+    },
+  };
+}
+
+export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInput) {
+  const credentialProvider = input.credentialProvider ?? staticCredentialProvider(input.github);
+  const createAdapter = input.createAdapter ?? ((requester: Requester) => new GitHubAdapter(requester));
+  const createConfigurationSource =
+    input.createConfigurationSource ?? ((requester: Requester) => new GitHubConfigurationSource(requester));
   return (message: RoutingJobMessage) => {
     const { changeRequest } = message;
     const { repository } = changeRequest;
@@ -48,13 +81,17 @@ export function createWorkerRoutingServiceFactory(input: {
     let knownRepositoryPromise: Promise<KnownRepository> | null = null;
     let pullRequestPromise: Promise<unknown> | null = null;
     let persistedDecisionId: string | null = null;
-    const clock = { now: () => new Date() };
+    const clock = input.clock ?? { now: () => new Date() };
 
     async function requester(): Promise<Requester> {
       await repositoryId();
+      const credentials = await credentialProvider.getCredential({
+        workspaceId: message.workspaceId,
+        providerConnectionId: message.providerConnectionId,
+      });
       requesterPromise ??= (input.createRequester ?? createInstallationRequester)({
-        appId: input.github.appId,
-        privateKey: input.github.privateKey,
+        appId: credentials.appId,
+        privateKey: credentials.privateKey,
         installationId: toSafeInteger((await knownRepository()).externalConnectionId),
       });
       return requesterPromise;
@@ -89,7 +126,7 @@ export function createWorkerRoutingServiceFactory(input: {
           workspaceId: message.workspaceId,
           repository,
           trustedRevision,
-          source: new GitHubConfigurationSource(await requester()),
+          source: createConfigurationSource(await requester()),
           allowOrganizationEnforce: false,
         });
         await input.db
@@ -146,7 +183,7 @@ export function createWorkerRoutingServiceFactory(input: {
         },
 
         async fetchCurrentRevisionApprovals() {
-          const reviews = await new GitHubAdapter(await requester()).listPullRequestReviews({
+          const reviews = await createAdapter(await requester()).listPullRequestReviews({
             pullRequest: { owner: repository.owner, repo: repository.name, pullNumber: changeRequest.number },
           });
           return activeApprovedReviewers(reviews.map(toReviewMetadata));
@@ -169,7 +206,7 @@ export function createWorkerRoutingServiceFactory(input: {
             throw new PermanentJobError("pull request head changed before enforce actions");
           }
 
-          const adapter = new GitHubAdapter(githubRequester);
+          const adapter = createAdapter(githubRequester);
           const route = action.action === "policy_approval"
             ? "no_human"
             : action.action === "no_eligible_reviewer"
@@ -187,7 +224,10 @@ export function createWorkerRoutingServiceFactory(input: {
             adapter,
             checkRun,
             decisionId: action.decisionId,
-            appId: toSafeInteger(input.github.appId),
+            appId: toSafeInteger((await credentialProvider.getCredential({
+              workspaceId: message.workspaceId,
+              providerConnectionId: message.providerConnectionId,
+            })).appId),
             state: evaluation.state,
             summary: evaluation.summary,
           });
@@ -308,7 +348,7 @@ export function createWorkerRoutingServiceFactory(input: {
           changeRequest.headRevision,
         );
         if (persistedDecisionId === null) return;
-        const adapter = new GitHubAdapter(await requester());
+        const adapter = createAdapter(await requester());
         const checkRun = { owner: repository.owner, repo: repository.name, headSha: changeRequest.headRevision };
         const recordedCheckRunId = await findRecordedPolicyCheckRunId(
           input.db,
@@ -320,7 +360,10 @@ export function createWorkerRoutingServiceFactory(input: {
           ? await adapter.findHumanReviewPolicyCheck({
               checkRun,
               decisionId: persistedDecisionId,
-              appId: toSafeInteger(input.github.appId),
+              appId: toSafeInteger((await credentialProvider.getCredential({
+                workspaceId: message.workspaceId,
+                providerConnectionId: message.providerConnectionId,
+              })).appId),
             })
           : null;
         const checkRunId = recordedCheckRunId ?? recovered?.checkRunId ?? null;
@@ -343,7 +386,7 @@ export function createWorkerRoutingServiceFactory(input: {
       async fetchConfig(_job?: RoutingJobMessage) {
         const trustedRevision = trustedBaseSha(message) ?? readNestedString(await pullRequest(), ["base", "sha"]);
         if (!trustedRevision) throw new Error("pull request base SHA is unavailable");
-        const document = await new GitHubConfigurationSource(await requester()).loadRepository({
+        const document = await createConfigurationSource(await requester()).loadRepository({
           workspaceId: message.workspaceId,
           repository,
           trustedRevision,
@@ -479,11 +522,9 @@ function labelForRiskComponent(reason: string): string {
   return labels[reason] ?? reason.replaceAll("_", " ");
 }
 
-export function createWorkerHumanReviewPolicyServiceFactory(input: {
-  db: DatabaseClient;
-  github: GitHubAppCredentials;
-  createRequester?: typeof createInstallationRequester;
-}) {
+export function createWorkerHumanReviewPolicyServiceFactory(input: WorkerServiceFactoryInput) {
+  const credentialProvider = input.credentialProvider ?? staticCredentialProvider(input.github);
+  const createAdapter = input.createAdapter ?? ((requester: Requester) => new GitHubAdapter(requester));
   return (message: HumanReviewPolicyJobPayload) => {
     const { changeRequest } = message;
     const { repository } = changeRequest;
@@ -502,9 +543,13 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
 
     async function requester(): Promise<Requester> {
       await repositoryId();
+      const credentials = await credentialProvider.getCredential({
+        workspaceId: message.workspaceId,
+        providerConnectionId: message.providerConnectionId,
+      });
       requesterPromise ??= (input.createRequester ?? createInstallationRequester)({
-        appId: input.github.appId,
-        privateKey: input.github.privateKey,
+        appId: credentials.appId,
+        privateKey: credentials.privateKey,
         installationId: toSafeInteger((await knownRepository()).externalConnectionId),
       });
       return requesterPromise;
@@ -572,14 +617,14 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
         },
 
         async fetchReviews() {
-          const reviews = await new GitHubAdapter(await requester()).listPullRequestReviews({ pullRequest: pullRequestRef() });
+          const reviews = await createAdapter(await requester()).listPullRequestReviews({ pullRequest: pullRequestRef() });
           return reviews.map(toReviewMetadata);
         },
 
         async updatePolicyCheck(check) {
         if (check.state === "in_progress") {
           if (check.decision.policyCheckState === "failure") return;
-          const adapter = new GitHubAdapter(await requester());
+          const adapter = createAdapter(await requester());
           const checkRun = {
             owner: check.decision.repository.owner,
             repo: check.decision.repository.name,
@@ -588,7 +633,10 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
           const existing = await adapter.findHumanReviewPolicyCheck({
             checkRun,
             decisionId: check.decision.decisionId,
-            appId: toSafeInteger(input.github.appId),
+            appId: toSafeInteger((await credentialProvider.getCredential({
+              workspaceId: message.workspaceId,
+              providerConnectionId: message.providerConnectionId,
+            })).appId),
           });
           if (existing?.state === "failure") {
             await updatePolicyCheckState(input.db, message.workspaceId, {
@@ -623,7 +671,7 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
           });
           return;
         }
-        const adapter = new GitHubAdapter(await requester());
+        const adapter = createAdapter(await requester());
         const checkRun = {
           owner: check.decision.repository.owner,
           repo: check.decision.repository.name,
@@ -632,7 +680,10 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
         const existing = await adapter.findHumanReviewPolicyCheck({
           checkRun,
           decisionId: check.decision.decisionId,
-          appId: toSafeInteger(input.github.appId),
+          appId: toSafeInteger((await credentialProvider.getCredential({
+            workspaceId: message.workspaceId,
+            providerConnectionId: message.providerConnectionId,
+          })).appId),
         });
         if (existing?.state === "failure") {
           await recordPolicyCheck(input.db, message.workspaceId, {
@@ -681,12 +732,15 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
             })
           : await findDecision();
         if (!decision || decision.policyCheckState === "failure") return;
-        const adapter = new GitHubAdapter(await requester());
+        const adapter = createAdapter(await requester());
         const checkRun = { owner: decision.owner, repo: decision.repo, headSha: decision.headSha };
         const recovered = await adapter.findHumanReviewPolicyCheck({
           checkRun,
           decisionId: decision.decisionId,
-          appId: toSafeInteger(input.github.appId),
+          appId: toSafeInteger((await credentialProvider.getCredential({
+            workspaceId: message.workspaceId,
+            providerConnectionId: message.providerConnectionId,
+          })).appId),
         });
         if (recovered?.state === "failure") {
           await recordPolicyCheck(input.db, message.workspaceId, {
@@ -722,7 +776,7 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: {
         return { state: state.state, headSha: state.currentHeadRevision };
       },
       async fetchReviews(_job?: HumanReviewPolicyJobPayload) {
-        return new GitHubAdapter(await requester()).listPullRequestReviews({ pullRequest: pullRequestRef() });
+        return createAdapter(await requester()).listPullRequestReviews({ pullRequest: pullRequestRef() });
       },
       async updateCheck(check: {
         decision: Awaited<ReturnType<typeof findDecision>> extends infer T ? NonNullable<T> : never;

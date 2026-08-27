@@ -5,6 +5,7 @@ import {
 } from "@triagepilot/db";
 import type { WorkspaceId } from "@triagepilot/contracts";
 import type { GitHubAppCredentialShape } from "@triagepilot/provider-github";
+import { formatLog } from "@triagepilot/shared";
 import { sql } from "kysely";
 
 import type { WebServices } from "./app";
@@ -96,7 +97,16 @@ export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebSer
     },
 
     logIgnoredWebhook(metadata) {
-      console.warn(JSON.stringify({ message: "ignored out-of-scope GitHub webhook", ...metadata }));
+      console.warn(formatLog({
+        level: "warn",
+        event: "ignored_out_of_scope_github_webhook",
+        service: "web",
+        workspaceId: input.workspaceId,
+        provider: "github",
+        deliveryId: metadata.deliveryId,
+        providerAccountType: metadata.accountType,
+        providerAccountLogin: metadata.accountLogin,
+      }));
     },
 
     async listOperationsOverview() {

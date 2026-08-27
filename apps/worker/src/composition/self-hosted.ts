@@ -1,0 +1,191 @@
+import { resolveConfiguration } from "@triagepilot/config";
+import type {
+  Clock,
+  ConfigurationDocument,
+  ConfigurationSource,
+  DecisionEventSink,
+  RepositoryRef,
+  WorkspaceId,
+} from "@triagepilot/contracts";
+import {
+  createDatabase,
+  createDecisionOutboxRepository,
+  createJobClaimer,
+  createWorkspaceRepositories,
+  ensureLocalWorkspace,
+  publishDecisionOutbox,
+  updateWorkerHeartbeat,
+  type WorkspaceRepositories,
+} from "@triagepilot/db";
+import {
+  createInstallationRequester,
+  GitHubAdapter,
+  GitHubConfigurationSource,
+  GitHubCredentialProvider,
+} from "@triagepilot/provider-github";
+
+import type { WorkerEnv } from "../env";
+import { runDecisionOutboxDrain, runWorkerMaintenance, runWorkerStartup } from "../maintenance";
+import type { RoutingJobMessage, RoutingJobServices } from "../processor";
+import { processRoutingJob } from "../processor";
+import { processHumanReviewPolicyJob } from "../review-policy-processor";
+import type { HumanReviewPolicyServices } from "../review-policy-processor";
+import { runWorkerOnce } from "../runner";
+import {
+  createNoopDecisionEventSink,
+  createWorkerHumanReviewPolicyServiceFactory,
+  createWorkerRoutingServiceFactory,
+} from "../runtime-services";
+
+type DatabaseClient = ReturnType<typeof createDatabase>;
+type RequesterFactory = typeof createInstallationRequester;
+
+export interface SelfHostedConfigurationProbeInput {
+  repositoryDocument: string | null;
+}
+
+export interface SelfHostedConfigurationProbe {
+  allowOrganizationEnforce: false;
+  resolve(input: SelfHostedConfigurationProbeInput): ReturnType<typeof resolveConfiguration>;
+}
+
+export interface SelfHostedWorkerCompositionDependencies {
+  createRequester?: RequesterFactory;
+  clock?: Clock;
+  decisionEventSink?: DecisionEventSink;
+}
+
+export interface SelfHostedWorkerComposition {
+  db: DatabaseClient;
+  workspaceId: WorkspaceId;
+  localRepositories: WorkspaceRepositories;
+  jobClaimer: ReturnType<typeof createJobClaimer>;
+  configuration: SelfHostedConfigurationProbe;
+  buildRoutingServices(message: RoutingJobMessage): RoutingJobServices;
+  buildHumanReviewPolicyServices(message: Parameters<typeof processHumanReviewPolicyJob>[0]): HumanReviewPolicyServices;
+  runOnce(now: Date): Promise<boolean>;
+  runStartup(now: Date): ReturnType<typeof runWorkerStartup>;
+  runMaintenance(state: Awaited<ReturnType<typeof runWorkerStartup>>, now: Date): ReturnType<typeof runWorkerMaintenance>;
+  drainDecisionOutbox(now: Date): ReturnType<typeof runDecisionOutboxDrain>;
+  close(): Promise<void>;
+}
+
+export async function createSelfHostedWorkerComposition(
+  env: WorkerEnv,
+  dependencies: SelfHostedWorkerCompositionDependencies = {},
+): Promise<SelfHostedWorkerComposition> {
+  const db = createDatabase(env.databaseUrl);
+  const workspaceId = await ensureLocalWorkspace(db);
+  const localRepositories = createWorkspaceRepositories(db, workspaceId);
+  const decisionOutbox = createDecisionOutboxRepository(db, workspaceId);
+  const jobClaimer = createJobClaimer(db);
+  const clock = dependencies.clock ?? { now: () => new Date() };
+  const decisionEventSink = dependencies.decisionEventSink ?? createNoopDecisionEventSink();
+  const credentialProvider = new GitHubCredentialProvider(env.github);
+  const createRequester = dependencies.createRequester ?? createInstallationRequester;
+  const buildRoutingServices = createWorkerRoutingServiceFactory({
+    db,
+    credentialProvider,
+    createRequester,
+    createAdapter: (requester) => new GitHubAdapter(requester),
+    createConfigurationSource: (requester) => new GitHubConfigurationSource(requester),
+    clock,
+  });
+  const buildHumanReviewPolicyServices = createWorkerHumanReviewPolicyServiceFactory({
+    db,
+    credentialProvider,
+    createRequester,
+    createAdapter: (requester) => new GitHubAdapter(requester),
+  });
+  const maintenanceServices = {
+    async recoverStaleJobs(now: Date) {
+      await localRepositories.recoverStaleJobs(now);
+    },
+    async applyRetention(now: Date) {
+      await localRepositories.applyFixedRetention(now);
+    },
+    async updateHeartbeat(now: Date) {
+      await updateWorkerHeartbeat(db, { workerId: env.workerId, now });
+    },
+    async drainDecisionOutbox(now: Date) {
+      await publishDecisionOutbox({ repository: decisionOutbox, sink: decisionEventSink, limit: 25, now });
+    },
+  };
+
+  return {
+    db,
+    workspaceId,
+    localRepositories,
+    jobClaimer,
+    configuration: createSelfHostedConfigurationProbe(workspaceId),
+    buildRoutingServices,
+    buildHumanReviewPolicyServices,
+    runOnce(now) {
+      return runWorkerOnce({
+        jobClaimer,
+        workspaceQueue: (claimedWorkspaceId) => createWorkspaceRepositories(db, claimedWorkspaceId).jobs,
+        workerId: env.workerId,
+        now,
+        processRoutingJob,
+        buildRoutingServices,
+        processHumanReviewPolicyJob,
+        buildHumanReviewPolicyServices,
+      });
+    },
+    runStartup(now) {
+      return runWorkerStartup(maintenanceServices, now);
+    },
+    runMaintenance(state, now) {
+      return runWorkerMaintenance(state, maintenanceServices, now);
+    },
+    drainDecisionOutbox(now) {
+      return runDecisionOutboxDrain(maintenanceServices, now);
+    },
+    close: () => db.destroy(),
+  };
+}
+
+function createSelfHostedConfigurationProbe(workspaceId: WorkspaceId): SelfHostedConfigurationProbe {
+  return {
+    allowOrganizationEnforce: false,
+    resolve(input) {
+      return resolveConfiguration({
+        workspaceId,
+        repository: probeRepository(),
+        trustedRevision: "self-hosted-probe",
+        source: new ProbeConfigurationSource(input.repositoryDocument),
+        allowOrganizationEnforce: false,
+      });
+    },
+  };
+}
+
+function probeRepository(): RepositoryRef {
+  return {
+    provider: "github",
+    externalId: "self-hosted-probe-repository",
+    owner: "self-hosted",
+    name: "probe",
+  };
+}
+
+class ProbeConfigurationSource implements ConfigurationSource {
+  constructor(private readonly repositoryDocument: string | null) {}
+
+  async loadOrganization(_workspaceId: WorkspaceId): Promise<null> {
+    return null;
+  }
+
+  async loadRepository(input: {
+    workspaceId: WorkspaceId;
+    repository: RepositoryRef;
+    trustedRevision: string;
+  }): Promise<ConfigurationDocument | null> {
+    if (this.repositoryDocument === null) return null;
+    return {
+      content: this.repositoryDocument,
+      revision: input.trustedRevision,
+      path: ".triagepilot.yml",
+    };
+  }
+}

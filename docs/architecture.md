@@ -4,8 +4,8 @@ TriagePilot is a TypeScript monorepo with two portable Node.js processes and Pos
 
 ## Processes
 
-- `apps/web` serves the administrator login and read-only operations UI, receives GitHub webhooks, verifies signatures and organization scope, and inserts each webhook receipt and routing or human-review-policy job in one transaction.
-- `apps/worker` claims jobs from PostgreSQL, creates GitHub App installation tokens, reads repository data, computes and stores routing decisions, applies actions only for explicit enforce configuration, evaluates required human-review policy checks, recovers interrupted jobs, updates its heartbeat, and removes expired data.
+- `apps/web` serves the administrator login and read-only operations UI, receives GitHub webhooks, verifies signatures and organization scope, and inserts each webhook receipt and routing or human-review-policy job in one transaction. Its self-hosted composition root creates the database client, ensures the persisted local workspace, wires the workspace repositories, and supplies GitHub webhook verification and normalization from `packages/provider-github`.
+- `apps/worker` claims jobs from PostgreSQL, creates GitHub App installation tokens, reads repository data, computes and stores routing decisions, applies actions only for explicit enforce configuration, evaluates required human-review policy checks, recovers interrupted jobs, updates its heartbeat, and removes expired data. Its self-hosted composition root creates the same persisted local workspace, workspace-bound repositories, GitHub credential provider, GitHub configuration source and adapter factories, and a local no-op decision-event sink for draining the decision outbox.
 
 ## Packages
 
@@ -19,8 +19,8 @@ TriagePilot is a TypeScript monorepo with two portable Node.js processes and Pos
 
 1. GitHub sends a signed webhook to `apps/web`.
 2. The web process accepts only routing-relevant pull-request actions from the configured organization. It records every accepted delivery ID with its action and hook ID, but creates at most one routing job for a repository, pull request, signed base SHA, and head SHA in a transaction.
-3. The worker claims the job with PostgreSQL row locking and obtains an installation token.
-4. The worker reads `.triagepilot.yml`, falling back to `.github/triagepilot.yml`, from the signed base SHA. The head SHA is reserved for checks and pull-request action targeting. An unmerged pull request therefore cannot enable writes by changing its own configuration. For a pre-upgrade queued job without a base SHA, the worker resolves the current pull request's `base.sha` before the configuration read and never substitutes the head SHA.
+3. The worker claims the job with PostgreSQL row locking and obtains GitHub App credentials from environment or mounted-file runtime configuration through the self-hosted credential provider. Credentials are not stored in PostgreSQL.
+4. The worker reads `.triagepilot.yml`, falling back to `.github/triagepilot.yml`, from the signed base SHA. The self-hosted composition provides no organization configuration source and sets `allowOrganizationEnforce` to `false`, so missing configuration stays in shadow mode and only trusted repository configuration can authorize writes. The head SHA is reserved for checks and pull-request action targeting. An unmerged pull request therefore cannot enable writes by changing its own configuration. For a pre-upgrade queued job without a base SHA, the worker resolves the current pull request's `base.sha` before the configuration read and never substitutes the head SHA.
 5. Pure packages parse the configuration and calculate a routing decision without fetching raw diff contents. Low-risk decisions select no human reviewers, medium-risk decisions select one, and high-risk decisions select at most the configured cap of one or two. Reviewer targets are individual GitHub users; team handles are invalid configuration.
 6. The worker stores the selected reviewer list, requested count, and any eligibility shortfall with the intended action. The legacy first-reviewer field remains populated for compatibility.
 7. Shadow mode stops without a GitHub write. For enforce mode, the worker makes one fresh pull-request read immediately before beginning the action sequence and compares the current head SHA with the signed event head SHA. A mismatch becomes a permanent action failure before any check, label, comment, reviewer, or approval write. A matching action synchronizes exactly one managed `triagepilot:risk-low`, `triagepilot:risk-medium`, or `triagepilot:risk-high` label while leaving other labels untouched.
@@ -30,6 +30,6 @@ In enforce mode, TriagePilot also creates `triagepilot/human-review-policy` on t
 
 PostgreSQL contains the organization installation, repositories, webhook receipts, jobs, routing decisions with action outcomes, and one current worker heartbeat. Administrator and GitHub credentials remain in environment variables or mounted files and are not stored in PostgreSQL.
 
-Routing decisions and action outcomes are the product audit record; there is no separate general audit-event subsystem.
+Routing decisions and action outcomes are the product audit record; there is no separate general audit-event subsystem. Decision events are staged in PostgreSQL with the routing decision and drained from the local decision outbox by the worker. The self-hosted runtime uses a no-op local sink, so analytics delivery failures cannot block routing or maintenance.
 
 Provider-specific deployment adapters and private operational material are intentionally outside this repository.

@@ -1,77 +1,38 @@
 import { pathToFileURL } from "node:url";
 
-import {
-  createJobClaimer,
-  createDatabase,
-  createDecisionOutboxRepository,
-  createWorkspaceRepositories,
-  ensureLocalWorkspace,
-  publishDecisionOutbox,
-  updateWorkerHeartbeat,
-} from "@triagepilot/db";
 import { formatLog } from "@triagepilot/shared";
 
+import { createSelfHostedWorkerComposition } from "./composition/self-hosted";
 import { readWorkerEnv } from "./env";
-import { runDecisionOutboxDrain, runWorkerMaintenance, runWorkerStartup } from "./maintenance";
-import { processRoutingJob } from "./processor";
-import { processHumanReviewPolicyJob } from "./review-policy-processor";
-import { runWorkerOnce } from "./runner";
-import {
-  createNoopDecisionEventSink,
-  createWorkerHumanReviewPolicyServiceFactory,
-  createWorkerRoutingServiceFactory,
-} from "./runtime-services";
 
 export async function runWorkerProcess(source: NodeJS.ProcessEnv = process.env): Promise<void> {
   const env = await readWorkerEnv(source);
-  const db = createDatabase(env.databaseUrl);
+  const composition = await createSelfHostedWorkerComposition(env);
 
   try {
-    const workspaceId = await ensureLocalWorkspace(db);
-    const localRepositories = createWorkspaceRepositories(db, workspaceId);
-    const decisionOutbox = createDecisionOutboxRepository(db, workspaceId);
-    const jobClaimer = createJobClaimer(db);
-    const decisionEventSink = createNoopDecisionEventSink();
-    const buildRoutingServices = createWorkerRoutingServiceFactory({ db, github: env.github });
-    const buildHumanReviewPolicyServices = createWorkerHumanReviewPolicyServiceFactory({ db, github: env.github });
-    const maintenanceServices = {
-      async recoverStaleJobs(now: Date) {
-        await localRepositories.recoverStaleJobs(now);
-      },
-      async applyRetention(now: Date) {
-        await localRepositories.applyFixedRetention(now);
-      },
-      async updateHeartbeat(now: Date) {
-        await updateWorkerHeartbeat(db, { workerId: env.workerId, now });
-      },
-      async drainDecisionOutbox(now: Date) {
-        await publishDecisionOutbox({ repository: decisionOutbox, sink: decisionEventSink, limit: 25, now });
-      },
-    };
-    let maintenanceState = await runWorkerStartup(maintenanceServices, new Date());
-    console.log(formatLog({ level: "info", event: "worker_started", service: "worker" }));
+    let maintenanceState = await composition.runStartup(new Date());
+    console.log(formatLog({
+      level: "info",
+      event: "worker_started",
+      service: "worker",
+      workspaceId: composition.workspaceId,
+      provider: "github",
+    }));
 
     for (;;) {
       const now = new Date();
       try {
-        maintenanceState = await runWorkerMaintenance(maintenanceState, maintenanceServices, now);
-        await runWorkerOnce({
-          jobClaimer,
-          workspaceQueue: (claimedWorkspaceId) => createWorkspaceRepositories(db, claimedWorkspaceId).jobs,
-          workerId: env.workerId,
-          now,
-          processRoutingJob,
-          buildRoutingServices,
-          processHumanReviewPolicyJob,
-          buildHumanReviewPolicyServices,
-        });
-        await runDecisionOutboxDrain(maintenanceServices, new Date());
+        maintenanceState = await composition.runMaintenance(maintenanceState, now);
+        await composition.runOnce(now);
+        await composition.drainDecisionOutbox(new Date());
       } catch (error) {
         console.error(
           formatLog({
             level: "error",
             event: "worker_cycle_failed",
             service: "worker",
+            workspaceId: composition.workspaceId,
+            provider: "github",
             message: error instanceof Error ? error.message : "worker cycle failed",
           }),
         );
@@ -79,7 +40,7 @@ export async function runWorkerProcess(source: NodeJS.ProcessEnv = process.env):
       await new Promise((resolve) => setTimeout(resolve, env.pollMs));
     }
   } finally {
-    await db.destroy();
+    await composition.close();
   }
 }
 
