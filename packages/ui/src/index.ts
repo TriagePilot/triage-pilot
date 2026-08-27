@@ -1,11 +1,11 @@
 export {
   OperationsDashboard,
   type OperationsDashboardProps,
-} from "./components/OperationsDashboard";
+} from "./components/OperationsDashboard.js";
 export {
   EffectiveConfiguration,
   type EffectiveConfigurationProps,
-} from "./components/EffectiveConfiguration";
+} from "./components/EffectiveConfiguration.js";
 export type {
   ActionFailureOverview,
   AuthorizationCapabilities,
@@ -20,4 +20,4 @@ export type {
   RepositoryOverview,
   RiskBreakdown,
   WorkspaceContext,
-} from "./api";
+} from "./api.js";

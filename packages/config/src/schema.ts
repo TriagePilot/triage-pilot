@@ -2,7 +2,7 @@ import { parse } from "yaml";
 import { z } from "zod";
 
 import type { RepositoryMode } from "@triagepilot/contracts";
-import { normalizeScalarKey, normalizeSetKey } from "./inheritance";
+import { normalizeScalarKey, normalizeSetKey } from "./inheritance.js";
 
 export interface ConfigDiagnostic {
   path: string;

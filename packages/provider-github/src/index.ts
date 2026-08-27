@@ -6,7 +6,7 @@ export {
   type PullRequestRef,
   type PullRequestReview,
   type RepositoryRef,
-} from "./adapter";
+} from "./adapter.js";
 export {
   GitHubCredentialProvider,
   loadGitHubAppCredentials,
@@ -15,10 +15,10 @@ export {
   validateGitHubAppCredentialsShape,
   type GitHubAppCredentials,
   type GitHubAppCredentialShape,
-} from "./credentials";
+} from "./credentials.js";
 export {
   normalizeGitHubWebhook,
   type GitHubWebhookInput,
   type NormalizedGitHubWebhookEvent,
-} from "./normalization";
-export { verifyGitHubSignature } from "./webhook";
+} from "./normalization.js";
+export { verifyGitHubSignature } from "./webhook.js";

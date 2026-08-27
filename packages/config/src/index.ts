@@ -1,10 +1,10 @@
-export { mergeConfiguration } from "./inheritance";
+export { mergeConfiguration } from "./inheritance.js";
 export {
   resolveConfiguration,
   type EffectiveConfigurationProvenance,
   type EffectiveConfigurationResult,
   type ResolveConfigurationInput,
-} from "./resolver";
+} from "./resolver.js";
 export {
   parseConfigurationDocument,
   parseTriagePilotConfig,
@@ -13,4 +13,4 @@ export {
   type ConfigParseResult,
   type ConfigurationDocumentValue,
   type TriagePilotConfig,
-} from "./schema";
+} from "./schema.js";

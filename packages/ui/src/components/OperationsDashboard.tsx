@@ -6,7 +6,7 @@ import type {
   OperationsApiClient,
   OperationsOverview,
   WorkspaceContext,
-} from "../api";
+} from "../api.js";
 
 export interface OperationsDashboardProps {
   api: OperationsApiClient;

@@ -1,7 +1,7 @@
 import type { Kysely } from "kysely";
 import type { ProviderConnectionId, ProviderKind, WorkspaceId } from "@triagepilot/contracts";
 
-import type { Database, JobRow } from "./kysely";
+import type { Database, JobRow } from "./kysely.js";
 
 export type JobKind = "process_pull_request" | "evaluate_human_review_policy";
 export type JobStatus = "queued" | "running" | "succeeded" | "failed";

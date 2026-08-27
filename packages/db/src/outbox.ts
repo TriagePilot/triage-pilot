@@ -1,8 +1,8 @@
 import type { Kysely, Selectable, Transaction } from "kysely";
 import type { DecisionEventSink, DecisionEventV1, WorkspaceId } from "@triagepilot/contracts";
 
-import { buildNextRunAt } from "./jobs";
-import type { Database, DecisionOutboxTable } from "./kysely";
+import { buildNextRunAt } from "./jobs.js";
+import type { Database, DecisionOutboxTable } from "./kysely.js";
 
 type DatabaseExecutor = Kysely<Database> | Transaction<Database>;
 const DECISION_OUTBOX_LEASE_MS = 15 * 60 * 1000;

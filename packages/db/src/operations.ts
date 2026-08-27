@@ -1,7 +1,7 @@
 import { sql, type Kysely } from "kysely";
 import type { ActionStatus, RepositoryMode, RiskTier, RoutingAction, ScoreComponent, WorkspaceId } from "@triagepilot/contracts";
 
-import type { Database } from "./kysely";
+import type { Database } from "./kysely.js";
 
 type PolicyCheckState = "not_started" | "in_progress" | "success" | "failure";
 

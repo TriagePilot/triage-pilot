@@ -10,14 +10,14 @@ import {
   sourceTreeFor,
   type ConfigurationSourceTree,
   type ConfigurationValueSource,
-} from "./inheritance";
+} from "./inheritance.js";
 import {
   parseConfigurationDocument,
   validateFinalConfiguration,
   type ConfigDiagnostic,
   type ConfigurationDocumentValue,
   type TriagePilotConfig,
-} from "./schema";
+} from "./schema.js";
 
 export interface EffectiveConfigurationProvenance {
   organizationVersion: string | null;

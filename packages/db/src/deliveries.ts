@@ -1,8 +1,8 @@
 import type { Kysely } from "kysely";
 import { legacyRoutingKey, type HumanReviewPolicyJobPayload, type RoutingJobPayload, type WorkspaceId } from "@triagepilot/contracts";
 
-import { upsertDeliveryRepository, type ProviderConnectionMetadata, type ProviderRepositoryMetadata } from "./provider-connections";
-import type { Database } from "./kysely";
+import { upsertDeliveryRepository, type ProviderConnectionMetadata, type ProviderRepositoryMetadata } from "./provider-connections.js";
+import type { Database } from "./kysely.js";
 
 export interface RoutingDeliveryInput {
   deliveryId: string;

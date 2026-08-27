@@ -1,7 +1,7 @@
 import type { Kysely } from "kysely";
 import type { WorkspaceId } from "@triagepilot/contracts";
 
-import type { Database } from "./kysely";
+import type { Database } from "./kysely.js";
 
 export const RECEIPT_AND_COMPLETED_JOB_DAYS = 30;
 export const DECISION_AND_FAILURE_DAYS = 90;

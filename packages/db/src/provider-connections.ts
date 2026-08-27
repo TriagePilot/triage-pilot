@@ -1,7 +1,7 @@
 import { sql, type Kysely, type Transaction } from "kysely";
 import type { ProviderConnectionId, ProviderKind, RepositoryId, WorkspaceId } from "@triagepilot/contracts";
 
-import type { Database } from "./kysely";
+import type { Database } from "./kysely.js";
 
 type DatabaseExecutor = Kysely<Database> | Transaction<Database>;
 

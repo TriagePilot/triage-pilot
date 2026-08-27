@@ -1,18 +1,28 @@
 {
   "name": "@triagepilot/application",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
   },
+  "files": ["dist", "LICENSE"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json --noEmit"
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "prepack": "node ../../scripts/prepare-package.mjs --package .",
+    "postpack": "node ../../scripts/prepare-package.mjs --package . --cleanup"
   },
   "dependencies": {
-    "@triagepilot/config": "workspace:*",
-    "@triagepilot/contracts": "workspace:*",
-    "@triagepilot/core": "workspace:*"
+    "@triagepilot/config": "workspace:0.1.0",
+    "@triagepilot/contracts": "workspace:0.1.0",
+    "@triagepilot/core": "workspace:0.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

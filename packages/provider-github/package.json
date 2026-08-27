@@ -1,20 +1,30 @@
 {
   "name": "@triagepilot/provider-github",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
   },
+  "files": ["dist", "LICENSE"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json --noEmit"
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "prepack": "node ../../scripts/prepare-package.mjs --package .",
+    "postpack": "node ../../scripts/prepare-package.mjs --package . --cleanup"
   },
   "dependencies": {
-    "@triagepilot/contracts": "workspace:*",
-    "@triagepilot/shared": "workspace:*",
+    "@types/node": "^22.10.2",
+    "@triagepilot/contracts": "workspace:0.1.0",
     "@octokit/app": "^15.1.2",
     "@octokit/request": "^9.1.4",
     "zod": "^3.24.1"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

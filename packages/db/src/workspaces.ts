@@ -1,7 +1,7 @@
 import type { Kysely } from "kysely";
 import type { WorkspaceId } from "@triagepilot/contracts";
 
-import type { Database } from "./kysely";
+import type { Database } from "./kysely.js";
 import {
   findLatestHumanReviewPolicyDecision,
   markActionFailed,
@@ -12,15 +12,15 @@ import {
   type DecisionInput,
   type HumanReviewPolicyDecision,
   type PersistedDecision,
-} from "./decisions";
+} from "./decisions.js";
 import {
   acceptHumanReviewPolicyDelivery,
   acceptRoutingDelivery,
   type HumanReviewPolicyDeliveryInput,
   type RoutingDeliveryInput,
-} from "./deliveries";
-import { createWorkspaceJobQueue, recoverStaleJobs, type WorkspaceJobQueue } from "./jobs";
-import { readOperationsOverview, type OperationsOverview, type ReadOperationsOverviewInput } from "./operations";
+} from "./deliveries.js";
+import { createWorkspaceJobQueue, recoverStaleJobs, type WorkspaceJobQueue } from "./jobs.js";
+import { readOperationsOverview, type OperationsOverview, type ReadOperationsOverviewInput } from "./operations.js";
 import {
   activateConfiguredProviderConnection,
   deleteConfiguredProviderConnection,
@@ -31,8 +31,8 @@ import {
   type ConfiguredProviderConnectionInput,
   type ProviderConnectionMetadata,
   type ProviderConnectionRepositoryUpdateInput,
-} from "./provider-connections";
-import { applyFixedRetention } from "./retention";
+} from "./provider-connections.js";
+import { applyFixedRetention } from "./retention.js";
 
 export const LOCAL_WORKSPACE_EXTERNAL_KEY = "self-hosted";
 

@@ -6,7 +6,7 @@ import type {
   NavigationHost,
   OperationsApiClient,
   WorkspaceContext,
-} from "../api";
+} from "../api.js";
 
 export interface EffectiveConfigurationProps {
   api: OperationsApiClient;

@@ -21,6 +21,8 @@ COPY . .
 RUN pnpm build
 
 FROM base AS runtime
+ARG TRIAGEPILOT_VERSION=0.1.0
+LABEL org.opencontainers.image.version=$TRIAGEPILOT_VERSION
 ENV NODE_ENV=production
 COPY --from=build /app /app
 EXPOSE 8787

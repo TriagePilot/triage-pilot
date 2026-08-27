@@ -12,8 +12,8 @@ export {
   type JobTransitionResult,
   type WorkspaceJobQueue,
   recoverStaleJobs,
-} from "./jobs";
-export { createDatabase } from "./database";
+} from "./jobs.js";
+export { createDatabase } from "./database.js";
 export {
   markActionFailed,
   markActionSucceeded,
@@ -25,7 +25,7 @@ export {
   type DecisionInput,
   type HumanReviewPolicyDecision,
   type PersistedDecision,
-} from "./decisions";
+} from "./decisions.js";
 export {
   claimDecisionEvents,
   createDecisionOutboxRepository,
@@ -34,14 +34,14 @@ export {
   stageDecisionEvent,
   type DecisionOutboxRecord,
   type DecisionOutboxRepository,
-} from "./outbox";
+} from "./outbox.js";
 export {
   acceptHumanReviewPolicyDelivery,
   acceptRoutingDelivery,
   type HumanReviewPolicyDeliveryInput,
   type RoutingDeliveryInput,
-} from "./deliveries";
-export { readWorkerHeartbeat, updateWorkerHeartbeat, type WorkerHeartbeat } from "./heartbeat";
+} from "./deliveries.js";
+export { readWorkerHeartbeat, updateWorkerHeartbeat, type WorkerHeartbeat } from "./heartbeat.js";
 export {
   readOperationsOverview,
   type ActionFailureOverview,
@@ -50,7 +50,7 @@ export {
   type OperationsOverview,
   type ReadOperationsOverviewInput,
   type RepositoryOverview,
-} from "./operations";
+} from "./operations.js";
 export {
   activateConfiguredProviderConnection,
   deleteConfiguredProviderConnection,
@@ -62,17 +62,17 @@ export {
   type ProviderConnectionMetadata,
   type ProviderConnectionRepositoryUpdateInput,
   type ProviderRepositoryMetadata,
-} from "./provider-connections";
+} from "./provider-connections.js";
 export {
   applyFixedRetention,
   DECISION_AND_FAILURE_DAYS,
   RECEIPT_AND_COMPLETED_JOB_DAYS,
-} from "./retention";
-export { runMigrations } from "./migrate";
-export type { Database, DecisionOutboxTable, WorkerHeartbeatTable } from "./kysely";
+} from "./retention.js";
+export { runMigrations } from "./migrate.js";
+export type { Database, DecisionOutboxTable, WorkerHeartbeatTable } from "./kysely.js";
 export {
   createWorkspaceRepositories,
   ensureLocalWorkspace,
   LOCAL_WORKSPACE_EXTERNAL_KEY,
   type WorkspaceRepositories,
-} from "./workspaces";
+} from "./workspaces.js";

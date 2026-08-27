@@ -6,7 +6,7 @@ import type {
   ProviderKind,
   RepositoryId,
   WorkspaceId,
-} from "./ids";
+} from "./ids.js";
 
 export type RiskTier = "low" | "medium" | "high";
 

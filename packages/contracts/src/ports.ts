@@ -1,12 +1,12 @@
 import type {
   DecisionEventV1,
-} from "./events";
+} from "./events.js";
 import type {
   ProviderConnectionId,
   ProviderKind,
   RepositoryRef,
   WorkspaceId,
-} from "./ids";
+} from "./ids.js";
 
 export interface ConfigurationDocument {
   content: string;

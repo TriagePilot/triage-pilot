@@ -6,9 +6,9 @@ import type {
   RiskTier,
   WorkspaceId,
 } from "@triagepilot/contracts";
-import { HUMAN_REVIEW_POLICY_CHECK_NAME } from "@triagepilot/shared";
 
 const PAGE_SIZE = 100;
+const HUMAN_REVIEW_POLICY_CHECK_NAME = "triagepilot/human-review-policy";
 const RISK_LABELS: Record<RiskTier, { name: string; color: string; description: string }> = {
   low: { name: "triagepilot:risk-low", color: "0e8a16", description: "TriagePilot risk: low" },
   medium: { name: "triagepilot:risk-medium", color: "fbca04", description: "TriagePilot risk: medium" },

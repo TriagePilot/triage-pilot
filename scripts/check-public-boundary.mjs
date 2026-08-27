@@ -9,8 +9,12 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024;
 const CONTENT_EXCLUDED_PATHS = new Set([
+  "AGENTS.md",
+  "LICENSE",
   "docs/specs/2026-07-07-open-source-self-hosting-design.md",
+  "docs/specs/2026-08-26-commercial-saas-extension-design.md",
   "pnpm-lock.yaml",
+  "scripts/check-public-boundary.mjs",
 ]);
 
 const forbiddenPaths = [
@@ -28,6 +32,12 @@ const forbiddenContent = [
   { rule: "content:provider-config", pattern: new RegExp(["wrangler", "\\.toml"].join(""), "i") },
   { rule: "content:provider-queue", pattern: new RegExp(["cloudflare", "\\s+queues"].join(""), "i") },
   { rule: "content:provider-cron", pattern: new RegExp(["cloudflare", "\\s+cron"].join(""), "i") },
+  { rule: "content:commercial", pattern: /\bcommercial\b/i },
+  { rule: "content:enterprise", pattern: /\benterprise\b/i },
+  { rule: "content:tenant-id", pattern: /\btenant[_ -]?id\b/i },
+  { rule: "content:stripe", pattern: /\bstripe\b/i },
+  { rule: "content:private-deployment", pattern: /\bprivate deployment\b/i },
+  { rule: "content:secret-manager", pattern: /\bsecret[ -]?manager\b/i },
 ];
 
 export function findPathViolations(path) {

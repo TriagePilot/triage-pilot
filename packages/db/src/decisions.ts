@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { sql, type Kysely, type Transaction } from "kysely";
 import { legacyRoutingKey, type ActionStatus, type DecisionEventV1, type RepositoryMode, type RoutingAction, type WorkspaceId } from "@triagepilot/contracts";
 
-import type { Database } from "./kysely";
-import { stageDecisionEvent } from "./outbox";
+import type { Database } from "./kysely.js";
+import { stageDecisionEvent } from "./outbox.js";
 
 export interface DecisionInput {
   repositoryId: string;
