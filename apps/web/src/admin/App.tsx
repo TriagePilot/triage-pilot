@@ -569,7 +569,15 @@ function RoutingDecisionRow({
       <td><span className="data-text">{labelFor(decision.action)}</span><span className="cell-detail">{decision.mode}</span></td>
       <td><HumanReviewStatusChip state={decision.policyCheckState} /></td>
       <td><StatusChip value={decision.actionStatus} />{decision.actionError ? <span className="cell-error">{decision.actionError}</span> : null}</td>
-      <td className="data-text">{decision.selectedReviewers.join(", ") || "—"}</td>
+      <td>
+        <span className="data-text">{decision.selectedReviewers.join(", ") || "—"}</span>
+        {decision.requestedReviewerCount !== null && decision.requestedReviewerCount > 0 ? (
+          <span className="cell-detail">
+            {decision.selectedReviewers.length} of {decision.requestedReviewerCount} required
+            {decision.reviewerShortfall ? ` · shortfall ${decision.reviewerShortfall}` : ""}
+          </span>
+        ) : null}
+      </td>
       <td><time dateTime={decision.createdAt}>{formatDate(decision.createdAt)}</time></td>
       <td>{action}</td>
     </tr>

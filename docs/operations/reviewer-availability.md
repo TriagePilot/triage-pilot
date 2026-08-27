@@ -12,11 +12,11 @@ An absence is active precisely when `start <= now < end`. It is upcoming before 
 
 ## Effect on routing and policy
 
-New routing decisions exclude active absences before the normal load-aware reviewer selection. Availability does not make anyone eligible, expand an ownership rule to its fallback, change risk, or otherwise alter repository configuration semantics.
+New routing decisions exclude active absences before the normal load-aware reviewer selection. Availability does not make anyone eligible outside the configured ownership rules and fallback pool, change risk, or otherwise alter repository configuration semantics. When active absences leave too few matching ownership reviewers, configured fallback reviewers may fill the remaining quota without displacing another available matching owner.
 
 At an absence start, TriagePilot evaluates only the latest open routed head whose human-review policy remains unsatisfied. It uses the decision's originally stored ownership-eligible pool, not later repository configuration. It does not replace an absent reviewer who already has an effective GitHub approval. An outstanding review request or a changes-requested review may be replaced.
 
-Replacement selection excludes the pull-request author, people with effective approvals, people already in the current reviewer cohort, and people who are currently absent, then applies the existing deterministic, load-aware choice. If no eligible replacement remains after those exclusions within the original pool, TriagePilot records `no_replacement_available`, leaves the required approval count unchanged, and—in enforce mode—fails the human-review policy check with that reason. It never lowers the required count or selects someone outside the original eligible pool.
+Replacement selection excludes the pull-request author, people with effective approvals, people already in the current reviewer cohort, and people who are currently absent. It prefers another available reviewer from the original matching ownership rules, then uses the deterministic, load-aware choice within that preferred pool; configured fallbacks are considered only when the preferred pool is exhausted. If no eligible replacement remains after those exclusions within the original pool, TriagePilot records `no_replacement_available`, leaves the required approval count unchanged, and—in enforce mode—fails the human-review policy check with that reason. It never lowers the required count or selects someone outside the original eligible pool.
 
 ## Enforce mode and retries
 

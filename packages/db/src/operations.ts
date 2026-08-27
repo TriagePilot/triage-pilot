@@ -28,6 +28,8 @@ export interface DecisionOverview {
   riskBreakdown: RiskBreakdown | null;
   selectedReviewer: string | null;
   selectedReviewers: string[];
+  requestedReviewerCount: number | null;
+  reviewerShortfall: number | null;
   createdAt: string;
 }
 
@@ -153,23 +155,28 @@ export async function readOperationsOverview(
       configState: repository.config_state,
       mode: repository.last_config_mode,
     })),
-    decisions: decisions.map((decision) => ({
-      id: decision.id,
-      repository: `${decision.owner}/${decision.name}`,
-      pullNumber: decision.pull_number,
-      headSha: decision.head_sha,
-      runCount: Number(decision.run_count),
-      mode: decision.mode,
-      action: decision.action as RoutingAction,
-      actionStatus: decision.action_status,
-      actionError: decision.action_error,
-      policyCheckState: normalizePolicyCheckState(decision.policy_check_state),
-      riskScore: decision.risk_score,
-      riskBreakdown: readRiskBreakdown(decision.details),
-      selectedReviewer: decision.selected_reviewer,
-      selectedReviewers: readSelectedReviewers(decision.selected_reviewers, decision.selected_reviewer),
-      createdAt: decision.created_at.toISOString(),
-    })),
+    decisions: decisions.map((decision) => {
+      const selectedReviewers = readSelectedReviewers(decision.selected_reviewers, decision.selected_reviewer);
+      const reviewerRequirement = readReviewerRequirement(decision.details, selectedReviewers.length);
+      return {
+        id: decision.id,
+        repository: `${decision.owner}/${decision.name}`,
+        pullNumber: decision.pull_number,
+        headSha: decision.head_sha,
+        runCount: Number(decision.run_count),
+        mode: decision.mode,
+        action: decision.action as RoutingAction,
+        actionStatus: decision.action_status,
+        actionError: decision.action_error,
+        policyCheckState: normalizePolicyCheckState(decision.policy_check_state),
+        riskScore: decision.risk_score,
+        riskBreakdown: readRiskBreakdown(decision.details),
+        selectedReviewer: decision.selected_reviewer,
+        selectedReviewers,
+        ...reviewerRequirement,
+        createdAt: decision.created_at.toISOString(),
+      };
+    }),
     failures: {
       jobs: jobFailures.map((failure) => ({
         id: failure.id,
@@ -353,4 +360,26 @@ function readSelectedReviewers(value: unknown, legacyReviewer: string | null): s
     return value.filter((reviewer): reviewer is string => typeof reviewer === "string").slice(0, 2);
   }
   return legacyReviewer ? [legacyReviewer] : [];
+}
+
+function readReviewerRequirement(
+  details: unknown,
+  selectedReviewerCount: number,
+): Pick<DecisionOverview, "requestedReviewerCount" | "reviewerShortfall"> {
+  const routing = readRecord(readRecord(details)?.routing);
+  const requestedReviewerCount = routing?.requestedReviewerCount;
+  if (
+    requestedReviewerCount !== 0 &&
+    requestedReviewerCount !== 1 &&
+    requestedReviewerCount !== 2
+  ) {
+    return { requestedReviewerCount: null, reviewerShortfall: null };
+  }
+
+  const recordedShortfall = routing?.reviewerShortfall;
+  const reviewerShortfall =
+    typeof recordedShortfall === "number" && Number.isInteger(recordedShortfall) && recordedShortfall >= 0
+      ? recordedShortfall
+      : Math.max(requestedReviewerCount - selectedReviewerCount, 0);
+  return { requestedReviewerCount, reviewerShortfall };
 }

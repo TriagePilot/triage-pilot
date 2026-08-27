@@ -255,6 +255,8 @@ function decision(overrides: Partial<OperationsOverview["decisions"][number]>): 
     riskBreakdown: null,
     selectedReviewer: null,
     selectedReviewers: [],
+    requestedReviewerCount: null,
+    reviewerShortfall: null,
     createdAt: "2026-08-18T11:00:00.000Z",
     ...overrides,
   };

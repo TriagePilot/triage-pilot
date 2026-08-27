@@ -65,4 +65,22 @@ describe("reviewer availability", () => {
       selectLowestLoadReviewers(input.originalEligibleReviewers.slice(0, 3), input.load, input.selectionKey, 1)[0],
     );
   });
+
+  it("prefers another matched owner over a lower-load fallback replacement", () => {
+    expect(selectAvailabilityReplacement({
+      originalEligibleReviewers: ["@user-unavailable", "@user-owner", "@user-fallback"],
+      originalPreferredReviewers: ["@user-unavailable", "@user-owner"],
+      unavailableReviewer: "@user-unavailable",
+      author: "@user-author",
+      approvedReviewers: [],
+      currentReviewers: ["@user-unavailable"],
+      absences: [],
+      now: new Date("2026-10-01T08:00:00.000Z"),
+      load: { "@user-owner": 5, "@user-fallback": 0 },
+      selectionKey: "acme/api#2674",
+    })).toMatchObject({
+      candidates: ["@user-fallback", "@user-owner"],
+      replacementReviewer: "@user-owner",
+    });
+  });
 });

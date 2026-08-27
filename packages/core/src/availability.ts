@@ -27,6 +27,7 @@ export function availableReviewerHandlesAt(input: {
 
 export function selectAvailabilityReplacement(input: {
   originalEligibleReviewers: string[];
+  originalPreferredReviewers?: string[];
   unavailableReviewer: string;
   author: string;
   approvedReviewers: string[];
@@ -48,7 +49,15 @@ export function selectAvailabilityReplacement(input: {
     .filter((reviewer) => reviewer !== unavailableReviewer && reviewer !== author)
     .filter((reviewer) => !approvedReviewers.has(reviewer) && !currentReviewers.has(reviewer))
     .sort();
-  const replacementReviewer = selectLowestLoadReviewers(candidates, input.load, input.selectionKey, 1)[0] ?? null;
+  const preferredReviewerSet = new Set(uniqueReviewers(
+    input.originalPreferredReviewers ?? input.originalEligibleReviewers,
+  ));
+  const preferredCandidates = candidates.filter((reviewer) => preferredReviewerSet.has(reviewer));
+  const fallbackCandidates = candidates.filter((reviewer) => !preferredReviewerSet.has(reviewer));
+  const replacementReviewer =
+    selectLowestLoadReviewers(preferredCandidates, input.load, input.selectionKey, 1)[0] ??
+    selectLowestLoadReviewers(fallbackCandidates, input.load, input.selectionKey, 1)[0] ??
+    null;
 
   return { candidates, replacementReviewer };
 }

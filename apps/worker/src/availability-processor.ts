@@ -196,6 +196,7 @@ async function processCandidate(
   });
   const selection = selectAvailabilityReplacement({
     originalEligibleReviewers: candidate.originalEligibleReviewers,
+    originalPreferredReviewers: candidate.originalPreferredReviewers,
     unavailableReviewer: activation.reviewerHandle,
     author: pullRequest.authorHandle,
     approvedReviewers,

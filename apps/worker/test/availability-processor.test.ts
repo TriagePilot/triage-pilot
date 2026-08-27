@@ -28,6 +28,7 @@ const candidate: ReviewerReplacementCandidate = {
   mode: "enforce",
   selectedReviewers: ["@user-d82a5f"],
   originalEligibleReviewers: ["@user-d82a5f", "@user-c91e46"],
+  originalPreferredReviewers: ["@user-d82a5f", "@user-c91e46"],
   requiredApprovalCount: 1,
   policyCheckRunId: "check-1",
   policyCheckState: "in_progress",

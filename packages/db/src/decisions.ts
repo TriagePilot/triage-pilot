@@ -50,6 +50,7 @@ export interface ReviewerReplacementCandidate {
   mode: RepositoryMode;
   selectedReviewers: string[];
   originalEligibleReviewers: string[];
+  originalPreferredReviewers: string[];
   requiredApprovalCount: number;
   policyCheckRunId: string | null;
   policyCheckState: HumanReviewPolicyDecision["policyCheckState"];
@@ -257,6 +258,7 @@ export async function findReviewerReplacementCandidates(
       mode: decision.mode,
       selectedReviewers,
       originalEligibleReviewers: original.eligibleReviewers,
+      originalPreferredReviewers: original.preferredReviewers,
       requiredApprovalCount: original.requestedReviewerCount,
       policyCheckRunId: decision.policyCheckRunId,
       policyCheckState: decision.policyCheckState,
@@ -335,6 +337,7 @@ async function findRecordedReviewerReplacementCandidates(
       mode: decision.mode,
       selectedReviewers,
       originalEligibleReviewers: original.eligibleReviewers,
+      originalPreferredReviewers: original.preferredReviewers,
       requiredApprovalCount: original.requestedReviewerCount,
       policyCheckRunId: decision.policyCheckRunId,
       policyCheckState: decision.policyCheckState,
@@ -410,7 +413,7 @@ function parseStrictReviewerArray(value: unknown): string[] | null {
 
 function parseOriginalReviewerPool(
   details: unknown,
-): { eligibleReviewers: string[]; requestedReviewerCount: number } | null {
+): { eligibleReviewers: string[]; preferredReviewers: string[]; requestedReviewerCount: number } | null {
   if (
     typeof details !== "object" ||
     details === null ||
@@ -425,13 +428,17 @@ function parseOriginalReviewerPool(
   ) return null;
 
   const eligibleReviewers = parseReviewerList(details.ownership.eligibleReviewers);
+  const preferredReviewers = "preferredReviewers" in details.ownership
+    ? parseReviewerList(details.ownership.preferredReviewers)
+    : eligibleReviewers;
   const requestedReviewerCount = details.routing.requestedReviewerCount;
   if (
     eligibleReviewers === null ||
+    preferredReviewers === null ||
     (requestedReviewerCount !== 1 && requestedReviewerCount !== 2)
   ) return null;
 
-  return { eligibleReviewers, requestedReviewerCount };
+  return { eligibleReviewers, preferredReviewers, requestedReviewerCount };
 }
 
 function parseReviewerList(value: unknown): string[] | null {

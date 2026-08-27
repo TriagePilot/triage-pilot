@@ -523,6 +523,49 @@ ownership:
     expect(services.applyDecisionActions).not.toHaveBeenCalled();
   });
 
+  it("fills a high-risk reviewer quota from fallbacks when a matched owner is the author", async () => {
+    const services = buildRoutingServices({
+      config: `
+version: 1
+mode: shadow
+routing:
+  high_risk_reviewers: 2
+risk:
+  thresholds: { low: 15, high: 90 }
+  paths:
+    - pattern: README.md
+      weight: 100
+      tag: critical
+ownership:
+  rules:
+    - paths: [README.md]
+      reviewers: ["@user-c91e46", "@user-b4e82d"]
+  fallback_reviewers: ["@user-d82a5f"]
+`,
+    });
+    services.getReviewerLoad.mockResolvedValueOnce({
+      "@user-b4e82d": 5,
+      "@user-d82a5f": 0,
+    });
+
+    await processRoutingJob(message, services);
+
+    expect(services.persistDecision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selectedReviewers: ["@user-b4e82d", "@user-d82a5f"],
+        details: expect.objectContaining({
+          ownership: expect.objectContaining({
+            eligibleReviewers: ["@user-c91e46", "@user-b4e82d", "@user-d82a5f"],
+          }),
+          routing: expect.objectContaining({
+            requestedReviewerCount: 2,
+            reviewerShortfall: 0,
+          }),
+        }),
+      }),
+    );
+  });
+
   it("routes an oversized shadow pull request to two reviewers without writing to GitHub", async () => {
     const services = buildRoutingServices({
       config: `
