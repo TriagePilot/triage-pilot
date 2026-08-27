@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { fetchOperationsOverview, getSession, login, logout } from "../src/admin/api";
+import { fetchOperationsOverview, getSession, login, logout, rerunRouting } from "../src/admin/api";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -74,6 +74,25 @@ describe("admin API", () => {
       status: 401,
       message: "The administrator session has expired.",
     });
+  });
+
+  it("queues a routing run with same-origin credentials", async () => {
+    const calls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push([input, init]);
+      return Response.json({ status: "queued", jobId: "job-recovery-1" }, { status: 202 });
+    });
+
+    await expect(rerunRouting({ pullRequestUrl: "https://github.com/acme/api/pull/7" })).resolves.toEqual({
+      status: "queued",
+      jobId: "job-recovery-1",
+    });
+    expect(calls).toEqual([["/api/operations/routing-runs", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pullRequestUrl: "https://github.com/acme/api/pull/7" }),
+    }]]);
   });
 });
 

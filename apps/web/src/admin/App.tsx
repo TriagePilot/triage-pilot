@@ -7,6 +7,7 @@ import {
   getSession,
   login,
   logout,
+  rerunRouting,
   type AvailabilityOverview,
   type OperationsOverview,
 } from "./api";
@@ -137,6 +138,7 @@ export function App() {
       overview={overview}
       availability={availability}
       onAvailabilityChange={setAvailability}
+      onOverviewRefresh={loadOverview}
       onAvailabilitySessionExpired={showSignedOut}
       error={error}
       onLogout={handleLogout}
@@ -214,12 +216,46 @@ interface DashboardProps {
   overview: OperationsOverview;
   availability: AvailabilityOverview;
   onAvailabilityChange(availability: AvailabilityOverview): void;
+  onOverviewRefresh?(): Promise<void>;
   onAvailabilitySessionExpired?(message: string): void;
   error?: string | null;
   onLogout(): Promise<void>;
 }
 
-export function Dashboard({ username, overview, availability, onAvailabilityChange, onAvailabilitySessionExpired, error, onLogout }: DashboardProps) {
+export function Dashboard({ username, overview, availability, onAvailabilityChange, onOverviewRefresh, onAvailabilitySessionExpired, error, onLogout }: DashboardProps) {
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const [pendingGroup, setPendingGroup] = useState<string | null>(null);
+  const [missingPullRequestUrl, setMissingPullRequestUrl] = useState("");
+  const [routingNotice, setRoutingNotice] = useState<{ tone: "success" | "danger"; message: string } | null>(null);
+  const decisionGroups = groupRoutingDecisions(overview.decisions);
+
+  async function queueRoutingRun(request: Parameters<typeof rerunRouting>[0], groupKey: string) {
+    setPendingGroup(groupKey);
+    setRoutingNotice(null);
+    try {
+      await rerunRouting(request);
+      setRoutingNotice({ tone: "success", message: "Routing run queued. The new revision will appear after the worker processes it." });
+      if ("pullRequestUrl" in request) setMissingPullRequestUrl("");
+    } catch (caught) {
+      if (caught instanceof AdminApiError && caught.status === 401) {
+        onAvailabilitySessionExpired?.(caught.message);
+        return;
+      }
+      setRoutingNotice({ tone: "danger", message: messageFrom(caught, "Could not queue the routing run.") });
+    } finally {
+      setPendingGroup(null);
+    }
+  }
+
+  function toggleHistory(groupKey: string) {
+    setExpandedGroups((current) => {
+      const next = new Set(current);
+      if (next.has(groupKey)) next.delete(groupKey);
+      else next.add(groupKey);
+      return next;
+    });
+  }
+
   return (
     <main className="shell" aria-labelledby="dashboard-title">
       <header className="topbar">
@@ -305,7 +341,38 @@ export function Dashboard({ username, overview, availability, onAvailabilityChan
         </div>
       </DataSection>
 
-      <DataSection id="decisions" title="Recent routing decisions" count={overview.decisions.length}>
+      <DataSection id="decisions" title="Recent routing decisions" count={decisionGroups.length}>
+        <form
+          className="routing-recovery-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void queueRoutingRun({ pullRequestUrl: missingPullRequestUrl }, "missing-pr");
+          }}
+        >
+          <div>
+            <label htmlFor="missing-pull-request-url">Run missing pull request</label>
+            <span className="cell-detail">Use this when no routing decision exists yet.</span>
+          </div>
+          <input
+            id="missing-pull-request-url"
+            type="url"
+            required
+            placeholder="https://github.com/owner/repository/pull/123"
+            value={missingPullRequestUrl}
+            onChange={(event) => setMissingPullRequestUrl(event.target.value)}
+          />
+          <button type="submit" disabled={pendingGroup !== null}>Run routing</button>
+        </form>
+        {routingNotice ? (
+          <div role={routingNotice.tone === "danger" ? "alert" : "status"} className={`notice notice--${routingNotice.tone} routing-notice`}>
+            <span>{routingNotice.message}</span>
+            {routingNotice.tone === "success" && onOverviewRefresh ? (
+              <button className="button--quiet button--compact" type="button" onClick={() => void onOverviewRefresh()}>
+                Refresh ledger
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         <div
           className="table-scroll"
           role="region"
@@ -317,57 +384,47 @@ export function Dashboard({ username, overview, availability, onAvailabilityChan
             <thead>
               <tr>
                 <th scope="col">Pull request</th>
+                <th scope="col">Runs</th>
                 <th scope="col">Risk</th>
                 <th scope="col">Route</th>
                 <th scope="col">Human review</th>
                 <th scope="col">Outcome</th>
                 <th scope="col">Reviewers</th>
                 <th scope="col">Recorded</th>
+                <th scope="col">Action</th>
               </tr>
             </thead>
             <tbody>
-              {overview.decisions.length === 0 ? (
-                <EmptyRow columns={7}>No routing decisions have been recorded yet.</EmptyRow>
+              {decisionGroups.length === 0 ? (
+                <EmptyRow columns={9}>No routing decisions have been recorded yet.</EmptyRow>
               ) : (
-                overview.decisions.map((decision) => (
-                  <tr key={decision.id}>
-                    <th scope="row">
-                      <span className="data-text">{decision.repository}</span>
-                      <span className="cell-detail">
-                        {decision.pullNumber === null ? (
-                          "—"
-                        ) : (
-                          <a
-                            href={`https://github.com/${decision.repository}/pull/${decision.pullNumber}`}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            #{decision.pullNumber}
-                          </a>
-                        )}
-                      </span>
-                    </th>
-                    <td>
-                      <span className="data-text">{decision.riskScore}</span>
-                      <RiskBreakdown breakdown={decision.riskBreakdown} />
-                    </td>
-                    <td>
-                      <span className="data-text">{labelFor(decision.action)}</span>
-                      <span className="cell-detail">{decision.mode}</span>
-                    </td>
-                    <td>
-                      <HumanReviewStatusChip state={decision.policyCheckState} />
-                    </td>
-                    <td>
-                      <StatusChip value={decision.actionStatus} />
-                      {decision.actionError ? <span className="cell-error">{decision.actionError}</span> : null}
-                    </td>
-                    <td className="data-text">{decision.selectedReviewers.join(", ") || "—"}</td>
-                    <td>
-                      <time dateTime={decision.createdAt}>{formatDate(decision.createdAt)}</time>
-                    </td>
-                  </tr>
-                ))
+                decisionGroups.flatMap((group) => {
+                  const expanded = expandedGroups.has(group.key);
+                  const latest = group.decisions[0]!;
+                  return [
+                    <RoutingDecisionRow
+                      key={latest.id}
+                      decision={latest}
+                      runCount={latest.runCount}
+                      historyAvailable={group.decisions.length > 1}
+                      expanded={expanded}
+                      onToggle={() => toggleHistory(group.key)}
+                      action={latest.pullNumber === null ? null : (
+                        <button
+                          className="button--compact"
+                          type="button"
+                          disabled={pendingGroup !== null}
+                          onClick={() => void queueRoutingRun({ decisionId: latest.id }, group.key)}
+                        >
+                          Re-run routing
+                        </button>
+                      )}
+                    />,
+                    ...(expanded ? group.decisions.slice(1).map((decision) => (
+                      <RoutingDecisionRow key={decision.id} decision={decision} historical />
+                    )) : []),
+                  ];
+                })
               )}
             </tbody>
           </table>
@@ -453,6 +510,74 @@ export function Dashboard({ username, overview, availability, onAvailabilityChan
       </div>
     </main>
   );
+}
+
+type RoutingDecision = OperationsOverview["decisions"][number];
+
+function groupRoutingDecisions(decisions: RoutingDecision[]): Array<{ key: string; decisions: RoutingDecision[] }> {
+  const groups = new Map<string, RoutingDecision[]>();
+  for (const decision of decisions) {
+    const key = decision.pullNumber === null
+      ? `legacy:${decision.id}`
+      : `${decision.repository}#${decision.pullNumber}`.toLowerCase();
+    const group = groups.get(key);
+    if (group) group.push(decision);
+    else groups.set(key, [decision]);
+  }
+  return [...groups].map(([key, groupedDecisions]) => ({ key, decisions: groupedDecisions }));
+}
+
+function RoutingDecisionRow({
+  decision,
+  runCount,
+  historyAvailable = false,
+  expanded = false,
+  onToggle,
+  action = null,
+  historical = false,
+}: {
+  decision: RoutingDecision;
+  runCount?: number;
+  historyAvailable?: boolean;
+  expanded?: boolean;
+  onToggle?: () => void;
+  action?: React.ReactNode;
+  historical?: boolean;
+}) {
+  return (
+    <tr className={historical ? "routing-history-row" : undefined}>
+      <th scope="row">
+        <span className="data-text">{historical ? "Revision" : decision.repository}</span>
+        <span className="cell-detail">
+          {historical ? formatHeadSha(decision.headSha) : decision.pullNumber === null ? "—" : (
+            <a href={`https://github.com/${decision.repository}/pull/${decision.pullNumber}`} target="_blank" rel="noreferrer">
+              #{decision.pullNumber}
+            </a>
+          )}
+        </span>
+        {!historical && decision.headSha ? <span className="cell-detail">{formatHeadSha(decision.headSha)}</span> : null}
+      </th>
+      <td>
+        {historical ? <span className="cell-detail">Earlier</span> : <span className="run-count">{runCount} {runCount === 1 ? "run" : "runs"}</span>}
+        {!historical && historyAvailable ? (
+          <button className="button--link" type="button" aria-expanded={expanded} onClick={onToggle}>
+            {expanded ? "Hide history" : "Show history"}
+          </button>
+        ) : null}
+      </td>
+      <td><span className="data-text">{decision.riskScore}</span><RiskBreakdown breakdown={decision.riskBreakdown} /></td>
+      <td><span className="data-text">{labelFor(decision.action)}</span><span className="cell-detail">{decision.mode}</span></td>
+      <td><HumanReviewStatusChip state={decision.policyCheckState} /></td>
+      <td><StatusChip value={decision.actionStatus} />{decision.actionError ? <span className="cell-error">{decision.actionError}</span> : null}</td>
+      <td className="data-text">{decision.selectedReviewers.join(", ") || "—"}</td>
+      <td><time dateTime={decision.createdAt}>{formatDate(decision.createdAt)}</time></td>
+      <td>{action}</td>
+    </tr>
+  );
+}
+
+function formatHeadSha(headSha: string | null): string {
+  return headSha ? `Head ${headSha.slice(0, 12)}` : "Head unavailable";
 }
 
 function RiskBreakdown({

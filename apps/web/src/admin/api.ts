@@ -52,6 +52,25 @@ export async function fetchOperationsOverview(): Promise<OperationsOverview> {
   return response.json() as Promise<OperationsOverview>;
 }
 
+export type RoutingRunRequest = { decisionId: string } | { pullRequestUrl: string };
+
+export async function rerunRouting(request: RoutingRunRequest): Promise<{ status: "queued"; jobId: string }> {
+  const response = await fetch("/api/operations/routing-runs", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (response.status === 401) {
+    throw new AdminApiError("The administrator session has expired.", response.status);
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { message?: string } | null;
+    throw new AdminApiError(body?.message ?? "Could not queue the routing run.", response.status);
+  }
+  return response.json() as Promise<{ status: "queued"; jobId: string }>;
+}
+
 export interface AbsenceFormInput {
   reviewerHandle: string;
   startLocal: string;

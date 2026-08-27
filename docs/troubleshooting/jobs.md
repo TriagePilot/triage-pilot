@@ -30,3 +30,9 @@ docker compose exec postgres psql -U triagepilot triagepilot -c \
 ```
 
 An absent or stale heartbeat means the dashboard reports the worker as unavailable. Check `docker compose ps worker` and the worker logs before retrying failed work; transient failures are retried automatically, while exhausted and permanent failures remain visible for 90 days. `pull request head changed before enforce actions` is an intentional permanent failure: the delayed job made no GitHub writes because its signed event head was no longer current. A subsequent GitHub event for the new head creates separate work.
+
+## Recover missing or stalled routing
+
+In the administrator operations ledger, routing decisions are grouped by pull request. Expand a group to inspect its recent revisions, or use **Re-run routing** to fetch the pull request's current GitHub state and enqueue a new routing revision. If the pull request has no recorded decision, paste its GitHub URL into **Run missing pull request**.
+
+Recovery is available only for open pull requests in active configured repositories. It creates an operator job, not a synthetic webhook receipt, and follows the normal repository configuration contract. Shadow mode therefore remains write-free, and draft pull requests are still governed by `routing.include_draft_pull_requests`.

@@ -59,6 +59,11 @@ export {
 } from "./deliveries";
 export { readWorkerHeartbeat, updateWorkerHeartbeat, type WorkerHeartbeat } from "./heartbeat";
 export {
+  findRoutingRecoveryTarget,
+  type FindRoutingRecoveryTargetInput,
+  type RoutingRecoveryTarget,
+} from "./routing-recovery";
+export {
   readOperationsOverview,
   type ActionFailureOverview,
   type DecisionOverview,
