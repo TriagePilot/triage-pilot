@@ -143,6 +143,7 @@ export function githubWebhookRoutes(services: WebhookServices) {
           pullNumber: payload.pull_request.number,
           baseSha: payload.pull_request.base.sha,
           headSha: payload.pull_request.head.sha,
+          isDraft: payload.pull_request.draft,
         }),
       };
       const accepted = await services.acceptRoutingDelivery({
