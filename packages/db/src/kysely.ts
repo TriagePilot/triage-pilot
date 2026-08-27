@@ -87,6 +87,37 @@ export interface WorkerHeartbeatTable {
   heartbeat_at: Timestamp;
 }
 
+export interface OrganizationSettingsTable {
+  id: ColumnType<boolean, boolean | undefined, boolean>;
+  timezone: Generated<string>;
+  updated_at: Timestamp;
+}
+
+export interface ReviewerAbsencesTable {
+  id: Generated<string>;
+  reviewer_handle: string;
+  start_at: Timestamp;
+  end_at: Timestamp;
+  status: Generated<"scheduled" | "cancelled">;
+  revision: Generated<number>;
+  cancelled_at: NullableTimestamp;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface ReviewerReplacementsTable {
+  id: Generated<string>;
+  absence_id: string;
+  absence_revision: number;
+  decision_id: string;
+  unavailable_reviewer: string;
+  replacement_reviewer: string | null;
+  outcome: string;
+  reason: string;
+  started_at: Timestamp;
+  completed_at: Timestamp;
+}
+
 export interface Database {
   installations: InstallationsTable;
   repositories: RepositoriesTable;
@@ -94,6 +125,9 @@ export interface Database {
   jobs: JobsTable;
   routing_decisions: RoutingDecisionsTable;
   worker_heartbeat: WorkerHeartbeatTable;
+  organization_settings: OrganizationSettingsTable;
+  reviewer_absences: ReviewerAbsencesTable;
+  reviewer_replacements: ReviewerReplacementsTable;
 }
 
 export type JobRow = Selectable<JobsTable>;

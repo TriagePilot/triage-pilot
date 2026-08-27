@@ -1,5 +1,12 @@
 import { parseTriagePilotConfig } from "@triagepilot/config";
-import { decideRouting, matchOwnership, scorePullRequestRisk, type ChangedFileMetadata } from "@triagepilot/core";
+import {
+  availableReviewerHandlesAt,
+  decideRouting,
+  matchOwnership,
+  scorePullRequestRisk,
+  type ChangedFileMetadata,
+} from "@triagepilot/core";
+import type { ReviewerAbsenceWindow } from "@triagepilot/db";
 import {
   legacyRoutingKey,
   type ActionStatus,
@@ -25,6 +32,11 @@ export interface RoutingJobServices {
     targetBranchName: string;
   }>;
   fetchActiveApprovedReviewers(input: RoutingJobMessage): Promise<string[]>;
+  now(): Date;
+  listReviewerAbsences(input: {
+    reviewers: string[];
+    endingAfter: Date;
+  }): Promise<ReviewerAbsenceWindow[]>;
   enqueueHumanReviewPolicyEvaluation(
     input: Omit<HumanReviewPolicyJobPayload, "kind">,
   ): Promise<void>;
@@ -115,9 +127,27 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
     rules: configResult.config.ownership.rules,
     fallbackReviewers: configResult.config.ownership.fallbackReviewers,
   });
+  const availabilityEvaluatedAt = services.now();
+  const absenceWindows = await services.listReviewerAbsences({
+    reviewers: ownership.eligibleReviewers,
+    endingAfter: availabilityEvaluatedAt,
+  });
+  const canonicalEligibleReviewers = availableReviewerHandlesAt({
+    reviewers: ownership.eligibleReviewers,
+    absences: [],
+    now: availabilityEvaluatedAt,
+  });
+  const availableEligibleReviewers = availableReviewerHandlesAt({
+    reviewers: ownership.eligibleReviewers,
+    absences: absenceWindows,
+    now: availabilityEvaluatedAt,
+  });
+  const excludedReviewers = canonicalEligibleReviewers.filter(
+    (reviewer) => !availableEligibleReviewers.includes(reviewer),
+  );
   const reviewerLoad = await services.getReviewerLoad({
     installationId: message.installationId,
-    reviewers: ownership.eligibleReviewers,
+    reviewers: availableEligibleReviewers,
   });
   const risk = scorePullRequestRisk({
     files: changedFiles,
@@ -130,7 +160,7 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
   const routing = decideRouting({
     risk,
     author: pullRequestMetadata.authorHandle,
-    eligibleReviewers: ownership.eligibleReviewers,
+    eligibleReviewers: availableEligibleReviewers,
     existingApprovedReviewers,
     load: reviewerLoad,
     highRiskReviewers: configResult.config.routing.highRiskReviewers,
@@ -146,7 +176,16 @@ export async function processRoutingJob(message: RoutingJobMessage, services: Ro
     action: routing.action,
     actionStatus: publicMode === "enforce" && routing.action !== "no_eligible_reviewer" ? "pending" : "not_applied",
     riskScore: risk.score,
-    details: { pullNumber: message.pullNumber, risk, ownership, routing },
+    details: {
+      pullNumber: message.pullNumber,
+      risk,
+      ownership,
+      availability: {
+        evaluatedAt: availabilityEvaluatedAt.toISOString(),
+        excludedReviewers,
+      },
+      routing,
+    },
   };
   if (routing.selectedReviewers.length > 0) decisionInput.selectedReviewers = routing.selectedReviewers;
   if (routing.noHumanReason) decisionInput.noHumanReason = routing.noHumanReason;

@@ -1,6 +1,7 @@
 import type { JobLease, JobQueue, JobRecord, JobTransitionResult } from "@triagepilot/db";
-import type { HumanReviewPolicyJobPayload } from "@triagepilot/shared";
+import type { HumanReviewPolicyJobPayload, ReviewerAbsenceActivationJobPayload } from "@triagepilot/shared";
 
+import type { ReviewerAvailabilityServices } from "./availability-processor";
 import type { RoutingJobMessage, RoutingJobServices } from "./processor";
 import type { HumanReviewPolicyServices } from "./review-policy-processor";
 import { classifyWorkerError, PermanentJobError, StaleJobLeaseError } from "./errors";
@@ -28,6 +29,13 @@ export interface WorkerRunnerInput {
     services: HumanReviewPolicyServices,
   ): Promise<void>;
   buildHumanReviewPolicyServices?(message: HumanReviewPolicyJobPayload): HumanReviewPolicyServices;
+  processReviewerAbsenceActivationJob?(
+    message: ReviewerAbsenceActivationJobPayload,
+    services: ReviewerAvailabilityServices,
+  ): Promise<void>;
+  buildReviewerAvailabilityServices?(
+    message: ReviewerAbsenceActivationJobPayload,
+  ): ReviewerAvailabilityServices;
 }
 
 export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> {
@@ -61,6 +69,13 @@ export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> 
         await recoverPolicyCheckFailure(input.queue, lease, humanReviewPolicyServices, recovery);
         return true;
       }
+    } else if (job.kind === "activate_reviewer_absence") {
+      const message = parseReviewerAbsenceActivationJobPayload(job);
+      if (!input.processReviewerAbsenceActivationJob || !input.buildReviewerAvailabilityServices) {
+        throw new PermanentJobError("reviewer availability processor is not configured");
+      }
+      const services = input.buildReviewerAvailabilityServices(message);
+      await input.processReviewerAbsenceActivationJob(message, services);
     } else {
       throw new PermanentJobError(`unsupported job kind: ${String(job.kind)}`);
     }
@@ -171,6 +186,14 @@ function parseHumanReviewPolicyJobPayload(job: JobRecord): HumanReviewPolicyJobP
   return payload;
 }
 
+function parseReviewerAbsenceActivationJobPayload(job: JobRecord): ReviewerAbsenceActivationJobPayload {
+  const payload = job.payload;
+  if (!isReviewerAbsenceActivationJobPayload(payload)) {
+    throw new PermanentJobError("reviewer absence activation job payload is malformed");
+  }
+  return payload;
+}
+
 function parsePolicyCheckFailureRecovery(payload: unknown): PolicyCheckFailureRecovery | null {
   if (typeof payload !== "object" || payload === null || !("policyCheckFailureRecovery" in payload)) return null;
   const recovery = payload.policyCheckFailureRecovery;
@@ -227,6 +250,18 @@ function isHumanReviewPolicyJobPayload(value: unknown): value is HumanReviewPoli
     isNonEmptyString(payload.repo) &&
     Number.isSafeInteger(payload.pullNumber) &&
     Number(payload.pullNumber) > 0
+  );
+}
+
+function isReviewerAbsenceActivationJobPayload(value: unknown): value is ReviewerAbsenceActivationJobPayload {
+  if (typeof value !== "object" || value === null) return false;
+  const payload = value as Record<string, unknown>;
+  return (
+    payload.kind === "activate_reviewer_absence" &&
+    typeof payload.absenceId === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(payload.absenceId) &&
+    Number.isSafeInteger(payload.expectedRevision) &&
+    Number(payload.expectedRevision) > 0
   );
 }
 

@@ -13,15 +13,43 @@ export {
 } from "./jobs";
 export { createDatabase } from "./database";
 export {
+  ReviewerAbsenceConflictError,
+  ReviewerAbsenceNotFoundError,
+  ReviewerAbsenceRevisionError,
+  ReviewerAbsenceValidationError,
+  cancelReviewerAbsence,
+  createReviewerAbsence,
+  findReviewerReplacementOutcome,
+  listReviewerAbsenceWindows,
+  loadReviewerAbsenceActivation,
+  normalizeReviewerHandle,
+  readAvailabilityOverview,
+  recordReviewerReplacement,
+  updateOrganizationTimezone,
+  updateReviewerAbsence,
+  type AvailabilityOverview,
+  type RecordReviewerReplacementInput,
+  type RecordReviewerReplacementResult,
+  type ReviewerAbsenceActivation,
+  type ReviewerAbsenceMutation,
+  type ReviewerAbsenceStatus,
+  type ReviewerAbsenceView,
+  type ReviewerAbsenceWindow,
+  type ReviewerReplacementOutcome,
+  type ReviewerReplacementView,
+} from "./availability";
+export {
   markActionFailed,
   markActionSucceeded,
   findLatestHumanReviewPolicyDecision,
+  findReviewerReplacementCandidates,
   persistDecision,
   recordPolicyCheck,
   updatePolicyCheckState,
   type DecisionInput,
   type HumanReviewPolicyDecision,
   type PersistedDecision,
+  type ReviewerReplacementCandidate,
 } from "./decisions";
 export {
   acceptHumanReviewPolicyDelivery,

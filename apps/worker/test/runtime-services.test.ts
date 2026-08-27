@@ -1,10 +1,13 @@
-import { describe, expect, it, vi } from "vitest";
-import type { HumanReviewPolicyDecision } from "@triagepilot/db";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as database from "@triagepilot/db";
+import type { HumanReviewPolicyDecision, ReviewerReplacementCandidate } from "@triagepilot/db";
 
 import {
   createWorkerHumanReviewPolicyServiceFactory,
+  createWorkerReviewerAvailabilityServiceFactory,
   createWorkerRoutingServiceFactory,
 } from "../src/runtime-services";
+import { processReviewerAbsenceActivationJob } from "../src/availability-processor";
 import { PermanentJobError } from "../src/errors";
 import type { RoutingJobMessage } from "../src/processor";
 import { processHumanReviewPolicyJob } from "../src/review-policy-processor";
@@ -31,6 +34,268 @@ const policyMessage = {
   repo: "api",
   pullNumber: 7,
 };
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe("worker reviewer-availability runtime", () => {
+  it("recreates an installation requester after transient requester construction failure", async () => {
+    const candidate = reviewerReplacementCandidate();
+    const request = vi.fn(async () => ({
+      data: {
+        state: "open",
+        head: { sha: candidate.headSha },
+        user: { login: "user-author" },
+      },
+    }));
+    const createRequester = vi.fn()
+      .mockRejectedValueOnce(new Error("installation token unavailable"))
+      .mockResolvedValue({ request });
+    const services = createWorkerReviewerAvailabilityServiceFactory({
+      db: {} as never,
+      github: { appId: "123", privateKey: "test-private-key" },
+      createRequester: createRequester as never,
+    })({
+      kind: "activate_reviewer_absence",
+      absenceId: "018f4f38-63ee-7ced-9af8-c1783f8cf021",
+      expectedRevision: 1,
+    });
+
+    await expect(services.fetchPullRequest(candidate)).rejects.toThrow("installation token unavailable");
+    await expect(services.fetchPullRequest(candidate)).resolves.toEqual({
+      state: "open",
+      headSha: candidate.headSha,
+      authorHandle: "@user-author",
+    });
+    expect(createRequester).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails the stored policy check when decision-scoped GitHub discovery returns no match", async () => {
+    const candidate = reviewerReplacementCandidate();
+    const request = vi.fn(async (route: string, parameters: Record<string, unknown>) => {
+      if (route === "GET /repos/{owner}/{repo}/commits/{ref}/check-runs") {
+        return { data: { check_runs: [] } };
+      }
+      if (route === "PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}") {
+        return { data: parameters };
+      }
+      throw new Error(`unexpected GitHub route: ${route}`);
+    });
+    const services = createWorkerReviewerAvailabilityServiceFactory({
+      db: knownRepositoryDatabase() as never,
+      github: { appId: "123", privateKey: "test-private-key" },
+      createRequester: vi.fn(async () => ({ request })) as never,
+    })({
+      kind: "activate_reviewer_absence",
+      absenceId: "018f4f38-63ee-7ced-9af8-c1783f8cf021",
+      expectedRevision: 1,
+    });
+
+    await services.failPolicyCheck(candidate, "replacement unavailable");
+
+    expect(request).toHaveBeenLastCalledWith(
+      "PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}",
+      expect.objectContaining({
+        owner: candidate.owner,
+        repo: candidate.repo,
+        check_run_id: "71",
+        conclusion: "failure",
+      }),
+    );
+  });
+
+  it("reconciles a partially applied reviewer replacement without duplicate writes", async () => {
+    const harness = buildAvailabilityRetryHarness({ failFirstRequestResponse: true });
+
+    await expect(processReviewerAbsenceActivationJob(harness.activation, harness.services)).rejects.toThrow(
+      "transient response failure",
+    );
+    await expect(
+      processReviewerAbsenceActivationJob(harness.activation, harness.services),
+    ).resolves.toBeUndefined();
+
+    expect(harness.mutationCalls("DELETE")).toHaveLength(1);
+    expect(harness.mutationCalls("POST")).toHaveLength(1);
+    expect(harness.recordReplacement).toHaveBeenCalledTimes(1);
+    expect(harness.recordReplacement).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      outcome: "replaced",
+      replacementReviewer: "@user-f30c8a",
+      replaceCohort: true,
+    }));
+    expect(database.findLatestHumanReviewPolicyDecision).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists a replacement on retry when GitHub writes succeeded before a database failure", async () => {
+    const harness = buildAvailabilityRetryHarness({ failFirstRecord: true });
+
+    await expect(
+      processReviewerAbsenceActivationJob(harness.activation, harness.services),
+    ).rejects.toThrow("database record failed");
+    await expect(
+      processReviewerAbsenceActivationJob(harness.activation, harness.services),
+    ).resolves.toBeUndefined();
+
+    expect(harness.mutationCalls("DELETE")).toHaveLength(1);
+    expect(harness.mutationCalls("POST")).toHaveLength(1);
+    expect(harness.recordReplacement).toHaveBeenCalledTimes(2);
+    expect(database.findLatestHumanReviewPolicyDecision).toHaveBeenCalledTimes(1);
+  });
+
+  it("replays only policy evaluation after replacement history was persisted", async () => {
+    const harness = buildAvailabilityRetryHarness({ failFirstPolicyEvaluation: true });
+
+    await expect(
+      processReviewerAbsenceActivationJob(harness.activation, harness.services),
+    ).rejects.toThrow("policy evaluation unavailable");
+    await expect(
+      processReviewerAbsenceActivationJob(harness.activation, harness.services),
+    ).resolves.toBeUndefined();
+
+    expect(harness.mutationCalls("DELETE")).toHaveLength(1);
+    expect(harness.mutationCalls("POST")).toHaveLength(1);
+    expect(harness.recordReplacement).toHaveBeenCalledTimes(1);
+    expect(database.findReviewerReplacementOutcome).toHaveBeenCalledTimes(2);
+    expect(database.findLatestHumanReviewPolicyDecision).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns from every shadow write service before constructing a requester", async () => {
+    const harness = buildAvailabilityRetryHarness({});
+    const shadowCandidate = { ...harness.candidate, mode: "shadow" as const };
+
+    await harness.services.removeReviewer(shadowCandidate, "@user-d82a5f");
+    await harness.services.requestReviewer(shadowCandidate, "@user-f30c8a");
+    await harness.services.reevaluatePolicy(shadowCandidate);
+    await harness.services.failPolicyCheck(shadowCandidate, "must remain read-only");
+
+    expect(harness.createRequester).not.toHaveBeenCalled();
+  });
+});
+
+function buildAvailabilityRetryHarness(options: {
+  failFirstRequestResponse?: boolean;
+  failFirstRecord?: boolean;
+  failFirstPolicyEvaluation?: boolean;
+}) {
+  const candidate = reviewerReplacementCandidate();
+
+  const activation = {
+    kind: "activate_reviewer_absence" as const,
+    absenceId: "018f4f38-63ee-7ced-9af8-c1783f8cf021",
+    expectedRevision: 1,
+  };
+  let recordedOutcome: database.ReviewerReplacementOutcome | null = null;
+  let failRequestResponse = options.failFirstRequestResponse ?? false;
+  let failRecord = options.failFirstRecord ?? false;
+  let failPolicyEvaluation = options.failFirstPolicyEvaluation ?? false;
+  vi.spyOn(database, "loadReviewerAbsenceActivation").mockResolvedValue({
+    absenceId: activation.absenceId,
+    revision: activation.expectedRevision,
+    reviewerHandle: "@user-d82a5f",
+    startAt: new Date("2026-08-26T10:00:00.000Z"),
+    endAt: new Date("2026-08-27T10:00:00.000Z"),
+    candidates: [candidate],
+  });
+  vi.spyOn(database, "findReviewerReplacementOutcome").mockImplementation(async () => recordedOutcome);
+  vi.spyOn(database, "listReviewerAbsenceWindows").mockResolvedValue([]);
+  const recordReplacement = vi.spyOn(database, "recordReviewerReplacement").mockImplementation(async (_db, input) => {
+    if (failRecord) {
+      failRecord = false;
+      throw new Error("database record failed");
+    }
+    recordedOutcome = input.outcome;
+    return { inserted: true };
+  });
+  vi.spyOn(database, "findLatestHumanReviewPolicyDecision").mockResolvedValue({
+    decisionId: candidate.decisionId,
+    owner: candidate.owner,
+    repo: candidate.repo,
+    pullNumber: candidate.pullNumber,
+    headSha: candidate.headSha,
+    mode: candidate.mode,
+    action: "request_human_review",
+    selectedReviewers: ["@user-f30c8a"],
+    requiredApprovalCount: 1,
+    policyCheckRunId: "71",
+    policyCheckState: "in_progress",
+  });
+  vi.spyOn(database, "updatePolicyCheckState").mockResolvedValue();
+
+  const requested = new Set(["@user-d82a5f"]);
+  const request = vi.fn(async (route: string) => {
+    if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
+      return { data: { state: "open", head: { sha: candidate.headSha }, user: { login: "user-author" } } };
+    }
+    if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") return { data: [] };
+    if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers") {
+      return { data: { users: [...requested].map((reviewer) => ({ login: reviewer.slice(1) })) } };
+    }
+    if (route === "DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers") {
+      requested.delete("@user-d82a5f");
+      return { data: {} };
+    }
+    if (route === "POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers") {
+      requested.add("@user-f30c8a");
+      if (failRequestResponse) {
+        failRequestResponse = false;
+        throw new Error("transient response failure");
+      }
+      return { data: {} };
+    }
+    if (route === "GET /repos/{owner}/{repo}/commits/{ref}/check-runs") {
+      if (failPolicyEvaluation) {
+        failPolicyEvaluation = false;
+        throw new Error("policy evaluation unavailable");
+      }
+      return { data: { check_runs: [{
+        id: 71,
+        name: "triagepilot/human-review-policy",
+        external_id: candidate.decisionId,
+        status: "in_progress",
+        conclusion: null,
+        app: { id: 123 },
+      }] } };
+    }
+    throw new Error(`unexpected GitHub route: ${route}`);
+  });
+  const createRequester = vi.fn(async () => ({ request }));
+  const services = createWorkerReviewerAvailabilityServiceFactory({
+    db: knownRepositoryDatabase() as never,
+    github: { appId: "123", privateKey: "test-private-key" },
+    createRequester: createRequester as never,
+  })(activation);
+
+  return {
+    activation,
+    candidate,
+    services,
+    createRequester,
+    recordReplacement,
+    mutationCalls(method: "DELETE" | "POST") {
+      return request.mock.calls.filter(([route]) =>
+        route === `${method} /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers`
+      );
+    },
+  };
+}
+
+function reviewerReplacementCandidate(): ReviewerReplacementCandidate {
+  return {
+    decisionId: "decision-1",
+    installationId: "99",
+    repositoryId: "101",
+    owner: "acme",
+    repo: "api",
+    pullNumber: 7,
+    headSha: "unmerged-head-456",
+    mode: "enforce",
+    selectedReviewers: ["@user-d82a5f"],
+    originalEligibleReviewers: ["@user-d82a5f", "@user-f30c8a"],
+    requiredApprovalCount: 1,
+    policyCheckRunId: "71",
+    policyCheckState: "in_progress",
+  };
+}
 
 describe("worker routing GitHub reads", () => {
   it("paginates changed files while preserving GitHub response order", async () => {

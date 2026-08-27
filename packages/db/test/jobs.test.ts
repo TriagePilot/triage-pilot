@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { buildNextRunAt, type JobKind, type JobRecord } from "../src/jobs";
+import { buildNextRunAt, createJobQueue, type JobKind, type JobRecord } from "../src/jobs";
+import { withPostgresTestDatabase } from "./postgres";
 
 describe("buildNextRunAt", () => {
   it("uses exponential backoff capped at 15 minutes", () => {
@@ -39,4 +40,32 @@ describe("buildNextRunAt", () => {
     expect(policyKind).toBe("evaluate_human_review_policy");
     expect(removedKind).toBe("run_sla_checks");
   });
+
+  it.runIf(Boolean(process.env.TEST_DATABASE_URL))(
+    "enqueues a reviewer absence activation job at its requested future run time",
+    async () => {
+      const runAt = new Date("2026-10-01T08:00:00.000Z");
+      await withPostgresTestDatabase(async (db) => {
+        const queue = createJobQueue(db);
+        const { jobId } = await queue.enqueue({
+          kind: "activate_reviewer_absence",
+          payload: {
+            kind: "activate_reviewer_absence",
+            absenceId: "018f0d7a-1bfe-7c7d-9f9a-eba4e70c3ebc",
+            expectedRevision: 2,
+          },
+          idempotencyKey: "reviewer-absence:018f0d7a-1bfe-7c7d-9f9a-eba4e70c3ebc:2",
+          runAt,
+        });
+        const job = await db
+          .selectFrom("jobs")
+          .select(["kind", "run_at"])
+          .where("id", "=", jobId)
+          .executeTakeFirstOrThrow();
+
+        expect(job.kind).toBe("activate_reviewer_absence");
+        expect(job.run_at.toISOString()).toBe("2026-10-01T08:00:00.000Z");
+      });
+    },
+  );
 });

@@ -39,6 +39,22 @@ export interface HumanReviewPolicyDecision {
   policyCheckState: "not_started" | "in_progress" | "success" | "failure";
 }
 
+export interface ReviewerReplacementCandidate {
+  decisionId: string;
+  installationId: string;
+  repositoryId: string;
+  owner: string;
+  repo: string;
+  pullNumber: number;
+  headSha: string;
+  mode: RepositoryMode;
+  selectedReviewers: string[];
+  originalEligibleReviewers: string[];
+  requiredApprovalCount: number;
+  policyCheckRunId: string | null;
+  policyCheckState: HumanReviewPolicyDecision["policyCheckState"];
+}
+
 type PolicyCheckState = Exclude<HumanReviewPolicyDecision["policyCheckState"], "not_started">;
 
 export async function persistDecision(
@@ -165,6 +181,193 @@ export async function findLatestHumanReviewPolicyDecision(
   };
 }
 
+export async function findReviewerReplacementCandidates(
+  db: Kysely<Database>,
+  input: {
+    unavailableReviewer: string;
+    recordedFor?: { absenceId: string; absenceRevision: number };
+  },
+): Promise<ReviewerReplacementCandidate[]> {
+  const latestDecisions = db
+    .selectFrom("routing_decisions")
+    .selectAll()
+    .where("repository_id", "is not", null)
+    .distinctOn(["repository_id", "pull_number"])
+    .orderBy("repository_id")
+    .orderBy("pull_number")
+    .orderBy("created_at", "desc")
+    .orderBy("id", "desc");
+  const decisions = await db
+    .with("latest_decisions", () => latestDecisions)
+    .selectFrom("latest_decisions")
+    .innerJoin("repositories", "repositories.id", "latest_decisions.repository_id")
+    .innerJoin("installations", "installations.id", "repositories.installation_id")
+    .select([
+      "latest_decisions.id as decisionId",
+      "installations.github_installation_id as installationId",
+      "repositories.github_repository_id as repositoryId",
+      "repositories.owner",
+      "repositories.name as repo",
+      "latest_decisions.pull_number as pullNumber",
+      "latest_decisions.head_sha as headSha",
+      "latest_decisions.mode",
+      "latest_decisions.selected_reviewers as selectedReviewers",
+      "latest_decisions.details",
+      "latest_decisions.policy_check_run_id as policyCheckRunId",
+      "latest_decisions.policy_check_state as policyCheckState",
+      "latest_decisions.created_at as createdAt",
+    ])
+    .where("latest_decisions.action", "=", "request_human_review")
+    .where("latest_decisions.head_sha", "is not", null)
+    .where((eb) => eb.or([
+      eb.and([
+        eb("latest_decisions.mode", "=", "enforce"),
+        eb("latest_decisions.policy_check_state", "=", "in_progress"),
+      ]),
+      eb.and([
+        eb("latest_decisions.mode", "=", "shadow"),
+        eb("latest_decisions.policy_check_state", "=", "not_started"),
+      ]),
+    ]))
+    .orderBy("latest_decisions.created_at", "desc")
+    .orderBy("latest_decisions.id", "desc")
+    .execute();
+
+  const freshCandidates = decisions.flatMap((decision) => {
+    const selectedReviewers = parseStrictReviewerArray(decision.selectedReviewers);
+    const original = parseOriginalReviewerPool(decision.details);
+    if (
+      decision.pullNumber === null ||
+      decision.headSha === null ||
+      selectedReviewers === null ||
+      !selectedReviewers.includes(input.unavailableReviewer) ||
+      original === null ||
+      (decision.mode !== "enforce" && decision.mode !== "shadow") ||
+      (decision.policyCheckState !== "in_progress" && decision.policyCheckState !== "not_started")
+    ) return [];
+
+    return [{
+      decisionId: decision.decisionId,
+      installationId: decision.installationId,
+      repositoryId: decision.repositoryId,
+      owner: decision.owner,
+      repo: decision.repo,
+      pullNumber: decision.pullNumber,
+      headSha: decision.headSha,
+      mode: decision.mode,
+      selectedReviewers,
+      originalEligibleReviewers: original.eligibleReviewers,
+      requiredApprovalCount: original.requestedReviewerCount,
+      policyCheckRunId: decision.policyCheckRunId,
+      policyCheckState: decision.policyCheckState,
+    }];
+  });
+
+  if (input.recordedFor === undefined) return freshCandidates;
+
+  const recordedCandidates = await findRecordedReviewerReplacementCandidates(db, {
+    unavailableReviewer: input.unavailableReviewer,
+    ...input.recordedFor,
+  });
+  const recordedDecisionIds = new Set(recordedCandidates.map((candidate) => candidate.decisionId));
+  return [
+    ...recordedCandidates,
+    ...freshCandidates.filter((candidate) => !recordedDecisionIds.has(candidate.decisionId)),
+  ];
+}
+
+async function findRecordedReviewerReplacementCandidates(
+  db: Kysely<Database>,
+  input: { unavailableReviewer: string; absenceId: string; absenceRevision: number },
+): Promise<ReviewerReplacementCandidate[]> {
+  const decisions = await db
+    .selectFrom("reviewer_replacements")
+    .innerJoin("routing_decisions", "routing_decisions.id", "reviewer_replacements.decision_id")
+    .innerJoin("repositories", "repositories.id", "routing_decisions.repository_id")
+    .innerJoin("installations", "installations.id", "repositories.installation_id")
+    .select([
+      "routing_decisions.id as decisionId",
+      "installations.github_installation_id as installationId",
+      "repositories.github_repository_id as repositoryId",
+      "repositories.owner",
+      "repositories.name as repo",
+      "routing_decisions.pull_number as pullNumber",
+      "routing_decisions.head_sha as headSha",
+      "routing_decisions.mode",
+      "routing_decisions.selected_reviewers as selectedReviewers",
+      "routing_decisions.details",
+      "routing_decisions.policy_check_run_id as policyCheckRunId",
+      "routing_decisions.policy_check_state as policyCheckState",
+    ])
+    .where("reviewer_replacements.absence_id", "=", input.absenceId)
+    .where("reviewer_replacements.absence_revision", "=", input.absenceRevision)
+    .where("reviewer_replacements.unavailable_reviewer", "=", input.unavailableReviewer)
+    .where("reviewer_replacements.outcome", "in", [
+      "replaced",
+      "skipped_policy_satisfied",
+      "no_replacement_available",
+      "permanent_failure",
+    ])
+    .where("routing_decisions.mode", "=", "enforce")
+    .orderBy("routing_decisions.created_at", "desc")
+    .orderBy("routing_decisions.id", "desc")
+    .execute();
+
+  return decisions.flatMap((decision) => {
+    const selectedReviewers = parseStrictReviewerArray(decision.selectedReviewers);
+    const original = parseOriginalReviewerPool(decision.details);
+    if (
+      decision.pullNumber === null ||
+      decision.headSha === null ||
+      selectedReviewers === null ||
+      original === null ||
+      decision.mode !== "enforce"
+    ) return [];
+
+    return [{
+      decisionId: decision.decisionId,
+      installationId: decision.installationId,
+      repositoryId: decision.repositoryId,
+      owner: decision.owner,
+      repo: decision.repo,
+      pullNumber: decision.pullNumber,
+      headSha: decision.headSha,
+      mode: decision.mode,
+      selectedReviewers,
+      originalEligibleReviewers: original.eligibleReviewers,
+      requiredApprovalCount: original.requestedReviewerCount,
+      policyCheckRunId: decision.policyCheckRunId,
+      policyCheckState: decision.policyCheckState,
+    }];
+  });
+}
+
+export async function replaceDecisionReviewerCohort(
+  db: Kysely<Database>,
+  input: { decisionId: string; unavailableReviewer: string; replacementReviewer: string },
+): Promise<void> {
+  const decision = await db
+    .selectFrom("routing_decisions")
+    .select("selected_reviewers")
+    .where("id", "=", input.decisionId)
+    .forUpdate()
+    .executeTakeFirst();
+  const selectedReviewers = decision ? parseStrictReviewerArray(decision.selected_reviewers) : null;
+  if (selectedReviewers === null || !selectedReviewers.includes(input.unavailableReviewer)) return;
+
+  const nextReviewers = selectedReviewers.map((reviewer) => (
+    reviewer === input.unavailableReviewer ? input.replacementReviewer : reviewer
+  ));
+  await db
+    .updateTable("routing_decisions")
+    .set({
+      selected_reviewers: JSON.stringify(nextReviewers),
+      selected_reviewer: nextReviewers[0] ?? null,
+    })
+    .where("id", "=", input.decisionId)
+    .execute();
+}
+
 function parseRequiredApprovalCount(details: unknown, selectedReviewers: string[]): number {
   if (
     typeof details === "object" &&
@@ -196,6 +399,45 @@ export async function updatePolicyCheckState(
 function parseSelectedReviewers(value: unknown): string[] {
   const reviewers = typeof value === "string" ? parseJsonArray(value) : value;
   return Array.isArray(reviewers) ? reviewers.filter((reviewer): reviewer is string => typeof reviewer === "string") : [];
+}
+
+function parseStrictReviewerArray(value: unknown): string[] | null {
+  const reviewers = typeof value === "string" ? parseJsonArray(value) : value;
+  return Array.isArray(reviewers) && reviewers.every((reviewer) => typeof reviewer === "string")
+    ? reviewers
+    : null;
+}
+
+function parseOriginalReviewerPool(
+  details: unknown,
+): { eligibleReviewers: string[]; requestedReviewerCount: number } | null {
+  if (
+    typeof details !== "object" ||
+    details === null ||
+    !("ownership" in details) ||
+    typeof details.ownership !== "object" ||
+    details.ownership === null ||
+    !("eligibleReviewers" in details.ownership) ||
+    !("routing" in details) ||
+    typeof details.routing !== "object" ||
+    details.routing === null ||
+    !("requestedReviewerCount" in details.routing)
+  ) return null;
+
+  const eligibleReviewers = parseReviewerList(details.ownership.eligibleReviewers);
+  const requestedReviewerCount = details.routing.requestedReviewerCount;
+  if (
+    eligibleReviewers === null ||
+    (requestedReviewerCount !== 1 && requestedReviewerCount !== 2)
+  ) return null;
+
+  return { eligibleReviewers, requestedReviewerCount };
+}
+
+function parseReviewerList(value: unknown): string[] | null {
+  return Array.isArray(value) && value.every((reviewer) => typeof reviewer === "string")
+    ? value
+    : null;
 }
 
 function parseJsonArray(value: string): unknown {

@@ -61,7 +61,16 @@ export interface HumanReviewPolicyJobPayload {
   pullNumber: number;
 }
 
-export type TriagePilotJobPayload = RoutingJobPayload | HumanReviewPolicyJobPayload;
+export interface ReviewerAbsenceActivationJobPayload {
+  kind: "activate_reviewer_absence";
+  absenceId: string;
+  expectedRevision: number;
+}
+
+export type TriagePilotJobPayload =
+  | RoutingJobPayload
+  | HumanReviewPolicyJobPayload
+  | ReviewerAbsenceActivationJobPayload;
 
 export function trustedBaseSha(payload: RoutingJobPayload): string | undefined {
   const baseSha = payload.baseSha?.trim();

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { trustedBaseSha, type RoutingJobPayload } from "../src/index";
+import {
+  trustedBaseSha,
+  type ReviewerAbsenceActivationJobPayload,
+  type RoutingJobPayload,
+  type TriagePilotJobPayload,
+} from "../src/index";
 
 const payload: RoutingJobPayload = {
   kind: "process_pull_request",
@@ -24,5 +29,22 @@ describe("routing job trust boundary", () => {
     const { baseSha: _baseSha, ...legacyPayload } = payload;
 
     expect(trustedBaseSha(legacyPayload)).toBeUndefined();
+  });
+});
+
+describe("reviewer absence activation job", () => {
+  it("preserves the literal absence identity and revision in the shared job payload", () => {
+    const payload: ReviewerAbsenceActivationJobPayload = {
+      kind: "activate_reviewer_absence",
+      absenceId: "018f0d7a-1bfe-7c7d-9f9a-eba4e70c3ebc",
+      expectedRevision: 2,
+    };
+    const job: TriagePilotJobPayload = payload;
+
+    expect(job).toEqual({
+      kind: "activate_reviewer_absence",
+      absenceId: "018f0d7a-1bfe-7c7d-9f9a-eba4e70c3ebc",
+      expectedRevision: 2,
+    });
   });
 });

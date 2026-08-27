@@ -107,6 +107,126 @@ describe("GitHubAdapter", () => {
     });
   });
 
+  it("lists requested individual reviewers across pages as normalized unique handles", async () => {
+    const firstPage = Array.from({ length: 100 }, (_, index) => ({ login: `user-${index}` }));
+    firstPage[0] = { login: "User-B4E82D" };
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({ data: { users: firstPage } })
+      .mockResolvedValueOnce({ data: { users: [{ login: "user-b4e82d" }, { login: "user-d82a5f" }, { login: "   " }] } });
+    const adapter = new GitHubAdapter({ request } as never);
+
+    const reviewers = await adapter.listRequestedReviewers({ pullRequest: { owner: "acme", repo: "app", pullNumber: 7 } });
+
+    expect(reviewers).toEqual(expect.arrayContaining(["@user-b4e82d", "@user-d82a5f"]));
+    expect(reviewers.filter((reviewer) => reviewer === "@user-b4e82d")).toHaveLength(1);
+    expect(reviewers).not.toContain("@");
+    expect(request).toHaveBeenNthCalledWith(1, "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", {
+      owner: "acme",
+      repo: "app",
+      pull_number: 7,
+      page: 1,
+      per_page: 100,
+    });
+    expect(request).toHaveBeenNthCalledWith(2, "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", {
+      owner: "acme",
+      repo: "app",
+      pull_number: 7,
+      page: 2,
+      per_page: 100,
+    });
+  });
+
+  it("does not request an individual reviewer already requested", async () => {
+    const request = vi.fn().mockResolvedValueOnce({ data: { users: [{ login: "User-B4E82D" }] } });
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await adapter.ensureHumanReviewerRequested({
+      pullRequest: { owner: "acme", repo: "app", pullNumber: 7 },
+      reviewer: "@user-b4e82d",
+    });
+
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).not.toHaveBeenCalledWith("POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", expect.anything());
+  });
+
+  it("requests a missing individual reviewer with a user-only payload", async () => {
+    const request = vi.fn().mockResolvedValueOnce({ data: { users: [] } }).mockResolvedValueOnce({ data: {} });
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await adapter.ensureHumanReviewerRequested({
+      pullRequest: { owner: "acme", repo: "app", pullNumber: 7 },
+      reviewer: "@user-b4e82d",
+    });
+
+    expect(request).toHaveBeenNthCalledWith(2, "POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", {
+      owner: "acme",
+      repo: "app",
+      pull_number: 7,
+      reviewers: ["user-b4e82d"],
+      team_reviewers: [],
+    });
+  });
+
+  it("does not remove an individual reviewer who is already absent", async () => {
+    const request = vi.fn().mockResolvedValueOnce({ data: { users: [{ login: "user-b4e82d" }] } });
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await adapter.removeHumanReviewer({
+      pullRequest: { owner: "acme", repo: "app", pullNumber: 7 },
+      reviewer: "@user-d82a5f",
+    });
+
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).not.toHaveBeenCalledWith("DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", expect.anything());
+  });
+
+  it("removes a requested individual reviewer with a user-only payload", async () => {
+    const request = vi.fn().mockResolvedValueOnce({ data: { users: [{ login: "user-d82a5f" }] } }).mockResolvedValueOnce({ data: {} });
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await adapter.removeHumanReviewer({
+      pullRequest: { owner: "acme", repo: "app", pullNumber: 7 },
+      reviewer: "@user-d82a5f",
+    });
+
+    expect(request).toHaveBeenNthCalledWith(2, "DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", {
+      owner: "acme",
+      repo: "app",
+      pull_number: 7,
+      reviewers: ["user-d82a5f"],
+      team_reviewers: [],
+    });
+  });
+
+  it.each(["@team-a7f19c/security", "user-d82a5f", "@User-D82A5F"])("rejects non-normalized individual reviewer %s before inspection or writes", async (reviewer) => {
+    const request = vi.fn();
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await expect(
+      adapter.ensureHumanReviewerRequested({
+        pullRequest: { owner: "acme", repo: "app", pullNumber: 7 },
+        reviewer,
+      }),
+    ).rejects.toThrow("Reviewer must be a normalized individual GitHub handle");
+
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it.each(["@team-a7f19c/security", "user-d82a5f", "@User-D82A5F"])("rejects non-normalized individual reviewer %s before removal inspection or writes", async (reviewer) => {
+    const request = vi.fn();
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await expect(
+      adapter.removeHumanReviewer({
+        pullRequest: { owner: "acme", repo: "app", pullNumber: 7 },
+        reviewer,
+      }),
+    ).rejects.toThrow("Reviewer must be a normalized individual GitHub handle");
+
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it("submits a low-risk policy approval review", async () => {
     const request = vi.fn().mockResolvedValueOnce({ data: [] }).mockResolvedValueOnce({ data: {} });
     const adapter = new GitHubAdapter({ request } as never);

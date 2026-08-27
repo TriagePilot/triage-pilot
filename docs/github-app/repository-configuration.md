@@ -36,6 +36,8 @@ ownership:
 
 Reviewer values must be individual GitHub user handles such as `@sasha`; organization team handles are not supported. Path patterns use glob syntax.
 
+Reviewer availability is set centrally by the administrator, not in this repository file. It may change future selected cohorts and outstanding cohorts without an effective approval, but it cannot expand this configuration's eligibility or revoke an effective GitHub approval.
+
 Reaching either `risk.size.high_changed_files` or `risk.size.high_changed_lines` marks a pull request high risk after test files are excluded. The defaults are 100 changed files and 5,000 changed lines.
 
 Routing is intentionally bounded by risk tier:

@@ -1,8 +1,27 @@
 import { describe, expect, it } from "vitest";
 
-import { runGuardedWorkerMain, runWorkerProcess } from "../src/main";
+import { processReviewerAbsenceActivationJob } from "../src/availability-processor";
+import { createWorkerRuntimeProcessors, runGuardedWorkerMain, runWorkerProcess } from "../src/main";
+import { processRoutingJob } from "../src/processor";
+import { processHumanReviewPolicyJob } from "../src/review-policy-processor";
 
 describe("worker boot", () => {
+  it("supplies routing, policy, and reviewer-availability processors to the worker loop", () => {
+    const runtime = createWorkerRuntimeProcessors({
+      db: {} as never,
+      github: { appId: "123", privateKey: "test-private-key" },
+    });
+
+    expect(runtime).toEqual({
+      processRoutingJob,
+      buildRoutingServices: expect.any(Function),
+      processHumanReviewPolicyJob,
+      buildHumanReviewPolicyServices: expect.any(Function),
+      processReviewerAbsenceActivationJob,
+      buildReviewerAvailabilityServices: expect.any(Function),
+    });
+  });
+
   it("turns missing configuration into one closed JSON failure record", async () => {
     const records: string[] = [];
 

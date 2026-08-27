@@ -29,6 +29,8 @@ function buildRoutingServices({ config }: { config: string }) {
       targetBranchName: "develop",
     })),
     fetchActiveApprovedReviewers: vi.fn(async () => []),
+    now: vi.fn(() => new Date("2026-10-01T08:00:00.000Z")),
+    listReviewerAbsences: vi.fn<RoutingJobServices["listReviewerAbsences"]>(async () => []),
     getReviewerLoad: vi.fn(async ({ reviewers }: { reviewers: string[] }) =>
       Object.fromEntries(reviewers.map((reviewer) => [reviewer, 0])),
     ),
@@ -101,6 +103,79 @@ ownership:
     expect(services.fetchPullRequestMetadata).toHaveBeenCalledWith(message);
     expect(services.updateRepositoryConfigState).toHaveBeenCalledWith({ configState: "valid", mode: "shadow" });
     expect(services.applyDecisionActions).not.toHaveBeenCalled();
+  });
+
+  it("excludes absent ownership candidates before loading reviewer capacity", async () => {
+    const services = buildRoutingServices({
+      config: `
+version: 1
+mode: shadow
+risk:
+  paths:
+    - pattern: README.md
+      weight: 30
+      tag: documentation
+ownership:
+  fallback_reviewers: ["@user-d82a5f", "@user-b4e82d"]
+`,
+    });
+    services.listReviewerAbsences.mockResolvedValueOnce([{
+      reviewerHandle: "@user-d82a5f",
+      startAt: new Date("2026-10-01T08:00:00.000Z"),
+      endAt: new Date("2026-10-08T08:00:00.000Z"),
+    }]);
+
+    await processRoutingJob(message, services);
+
+    expect(services.getReviewerLoad).toHaveBeenCalledWith({
+      installationId: "99",
+      reviewers: ["@user-b4e82d"],
+    });
+    expect(services.persistDecision).toHaveBeenCalledWith(expect.objectContaining({
+      selectedReviewers: ["@user-b4e82d"],
+      details: expect.objectContaining({
+        ownership: expect.objectContaining({
+          eligibleReviewers: ["@user-d82a5f", "@user-b4e82d"],
+        }),
+        availability: {
+          evaluatedAt: "2026-10-01T08:00:00.000Z",
+          excludedReviewers: ["@user-d82a5f"],
+        },
+      }),
+    }));
+  });
+
+  it("does not report an available mixed-case ownership reviewer as excluded", async () => {
+    const services = buildRoutingServices({
+      config: `
+version: 1
+mode: shadow
+risk:
+  paths:
+    - pattern: README.md
+      weight: 30
+      tag: documentation
+ownership:
+  fallback_reviewers: ["@User-A"]
+`,
+    });
+
+    await processRoutingJob(message, services);
+
+    expect(services.getReviewerLoad).toHaveBeenCalledWith({
+      installationId: "99",
+      reviewers: ["@user-a"],
+    });
+    expect(services.persistDecision).toHaveBeenCalledWith(expect.objectContaining({
+      selectedReviewers: ["@user-a"],
+      details: expect.objectContaining({
+        ownership: expect.objectContaining({ eligibleReviewers: ["@User-A"] }),
+        availability: {
+          evaluatedAt: "2026-10-01T08:00:00.000Z",
+          excludedReviewers: [],
+        },
+      }),
+    }));
   });
 
   it("silently skips a pull request targeting an excluded branch", async () => {

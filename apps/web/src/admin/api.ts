@@ -1,4 +1,4 @@
-import type { OperationsOverview } from "@triagepilot/db";
+import type { AvailabilityOverview, OperationsOverview } from "@triagepilot/db";
 
 export type AdminSession =
   | { authenticated: true; username: string }
@@ -52,4 +52,64 @@ export async function fetchOperationsOverview(): Promise<OperationsOverview> {
   return response.json() as Promise<OperationsOverview>;
 }
 
-export type { OperationsOverview };
+export interface AbsenceFormInput {
+  reviewerHandle: string;
+  startLocal: string;
+  endLocal: string;
+}
+
+export async function fetchAvailability(): Promise<AvailabilityOverview> {
+  return requestAvailability("");
+}
+
+export async function updateAvailabilityTimezone(timezone: string): Promise<AvailabilityOverview> {
+  return requestAvailability("/timezone", {
+    method: "PUT",
+    body: JSON.stringify({ timezone }),
+  });
+}
+
+export async function createAbsence(input: AbsenceFormInput): Promise<AvailabilityOverview> {
+  return requestAvailability("/absences", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function updateAbsence(
+  absenceId: string,
+  input: AbsenceFormInput & { expectedRevision: number },
+): Promise<AvailabilityOverview> {
+  return requestAvailability(`/absences/${absenceId}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function cancelAbsence(absenceId: string, expectedRevision: number): Promise<AvailabilityOverview> {
+  return requestAvailability(`/absences/${absenceId}/cancel`, {
+    method: "POST",
+    body: JSON.stringify({ expectedRevision }),
+  });
+}
+
+async function requestAvailability(path: string, init: RequestInit = {}): Promise<AvailabilityOverview> {
+  const response = await fetch(`/api/operations/availability${path}`, {
+    ...init,
+    credentials: "same-origin",
+    headers: { "content-type": "application/json", ...init.headers },
+  });
+  if (response.status === 401) {
+    throw new AdminApiError("The administrator session has expired.", response.status);
+  }
+  if (response.status === 422) {
+    const body = await response.json().catch(() => null) as { issues?: Array<{ message?: string }> } | null;
+    throw new AdminApiError(body?.issues?.[0]?.message ?? "Could not update reviewer availability.", response.status);
+  }
+  if (!response.ok) {
+    throw new AdminApiError("Could not update reviewer availability.", response.status);
+  }
+  return response.json() as Promise<AvailabilityOverview>;
+}
+
+export type { AvailabilityOverview, OperationsOverview };

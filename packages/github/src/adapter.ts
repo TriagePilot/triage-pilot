@@ -89,6 +89,48 @@ export class GitHubAdapter {
     });
   }
 
+  async listRequestedReviewers(input: { pullRequest: PullRequestRef }): Promise<string[]> {
+    const reviewers = new Set<string>();
+
+    for (let page = 1; ; page += 1) {
+      const response = await this.octokit.request("GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", {
+        ...toPullParams(input.pullRequest),
+        page,
+        per_page: PAGE_SIZE,
+      });
+      const users = readRequestedReviewerUsers(response.data);
+      for (const user of users) {
+        const reviewer = normalizeGitHubUserLogin(user);
+        if (reviewer !== undefined) reviewers.add(reviewer);
+      }
+      if (users.length < PAGE_SIZE) return [...reviewers];
+    }
+  }
+
+  async removeHumanReviewer(input: { pullRequest: PullRequestRef; reviewer: string }): Promise<void> {
+    assertNormalizedIndividualReviewer(input.reviewer);
+    const requested = await this.listRequestedReviewers({ pullRequest: input.pullRequest });
+    if (!requested.includes(input.reviewer)) return;
+
+    await this.octokit.request("DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", {
+      ...toPullParams(input.pullRequest),
+      reviewers: [input.reviewer.slice(1)],
+      team_reviewers: [],
+    });
+  }
+
+  async ensureHumanReviewerRequested(input: { pullRequest: PullRequestRef; reviewer: string }): Promise<void> {
+    assertNormalizedIndividualReviewer(input.reviewer);
+    const requested = await this.listRequestedReviewers({ pullRequest: input.pullRequest });
+    if (requested.includes(input.reviewer)) return;
+
+    await this.octokit.request("POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", {
+      ...toPullParams(input.pullRequest),
+      reviewers: [input.reviewer.slice(1)],
+      team_reviewers: [],
+    });
+  }
+
   async syncRiskLabel(input: { pullRequest: PullRequestRef; tier: RiskTier }) {
     const target = RISK_LABELS[input.tier];
     try {
@@ -309,6 +351,27 @@ function readLabelName(label: unknown): string | undefined {
   if (typeof label !== "object" || label === null || !("name" in label)) return undefined;
   const name = String(label.name).trim();
   return name || undefined;
+}
+
+function readRequestedReviewerUsers(data: unknown): unknown[] {
+  if (!isRecord(data) || !Array.isArray(data.users)) return [];
+  return data.users;
+}
+
+function normalizeGitHubUserLogin(user: unknown): string | undefined {
+  if (!isRecord(user) || typeof user.login !== "string") return undefined;
+  const reviewer = `@${user.login.trim().toLowerCase()}`;
+  return isNormalizedIndividualReviewer(reviewer) ? reviewer : undefined;
+}
+
+function assertNormalizedIndividualReviewer(reviewer: string): void {
+  if (!isNormalizedIndividualReviewer(reviewer)) {
+    throw new Error("Reviewer must be a normalized individual GitHub handle");
+  }
+}
+
+function isNormalizedIndividualReviewer(reviewer: string): boolean {
+  return /^@[a-z0-9_.-]+$/.test(reviewer);
 }
 
 function isGitHubStatus(error: unknown, status: number): boolean {

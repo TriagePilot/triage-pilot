@@ -2,10 +2,11 @@ import { Hono } from "hono";
 import { formatLog } from "@triagepilot/shared";
 
 import { authRoutes, type AuthServices } from "./routes/auth";
+import { availabilityRoutes, type AvailabilityServices } from "./routes/availability";
 import { operationsRoutes, type OperationsServices } from "./routes/operations";
 import { githubWebhookRoutes, type WebhookServices } from "./routes/webhooks";
 
-export type WebServices = WebhookServices & AuthServices & OperationsServices & {
+export type WebServices = WebhookServices & AuthServices & OperationsServices & AvailabilityServices & {
   checkDatabase(): Promise<void>;
 };
 
@@ -42,6 +43,7 @@ export function createWebApp(services: WebServices, staticAssets?: StaticAssetRe
   });
   app.route("/api/auth", authRoutes(services));
   app.route("/api/operations", operationsRoutes(services));
+  app.route("/api/operations/availability", availabilityRoutes(services));
   app.route("/webhooks", githubWebhookRoutes(services));
   return app;
 }

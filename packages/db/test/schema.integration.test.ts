@@ -17,7 +17,10 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
       expect(result.rows.map((row) => row.table_name)).toEqual([
         "installations",
         "jobs",
+        "organization_settings",
         "repositories",
+        "reviewer_absences",
+        "reviewer_replacements",
         "routing_decisions",
         "schema_migrations",
         "webhook_receipts",
@@ -65,7 +68,19 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         { name: "0002_selected_reviewers.sql" },
         { name: "0003_human_review_policy.sql" },
         { name: "0004_semantic_routing_deduplication.sql" },
+        { name: "0005_reviewer_availability.sql" },
       ]);
+      expect(migrations.rows.at(-1)).toEqual({ name: "0005_reviewer_availability.sql" });
+      await expect(
+        db
+          .insertInto("reviewer_absences")
+          .values({
+            reviewer_handle: "@user-d82a5f",
+            start_at: new Date("2026-10-01T08:00:00.000Z"),
+            end_at: new Date("2026-10-01T08:00:00.000Z"),
+          })
+          .execute(),
+      ).rejects.toMatchObject({ constraint: "reviewer_absences_valid_interval" });
     });
   });
 

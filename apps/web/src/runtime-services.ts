@@ -2,10 +2,15 @@ import {
   acceptHumanReviewPolicyDelivery,
   acceptRoutingDelivery,
   activateConfiguredInstallation,
+  cancelReviewerAbsence,
+  createReviewerAbsence,
   deleteConfiguredInstallation,
   readOperationsOverview,
   replaceInstallationRepositories,
+  readAvailabilityOverview,
   suspendConfiguredInstallation,
+  updateOrganizationTimezone,
+  updateReviewerAbsence,
   updateInstallationRepositories,
   type createDatabase,
 } from "@triagepilot/db";
@@ -85,6 +90,26 @@ export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebSer
         now: input.now(),
         heartbeatStaleAfterMs: 30_000,
       });
+    },
+
+    async readAvailabilityOverview(availability) {
+      return await readAvailabilityOverview(input.db, availability);
+    },
+
+    async updateOrganizationTimezone(availability) {
+      await updateOrganizationTimezone(input.db, availability);
+    },
+
+    async createReviewerAbsence(absence) {
+      return await createReviewerAbsence(input.db, absence);
+    },
+
+    async updateReviewerAbsence(absence) {
+      return await updateReviewerAbsence(input.db, absence);
+    },
+
+    async cancelReviewerAbsence(absence) {
+      return await cancelReviewerAbsence(input.db, absence);
     },
   };
 }
