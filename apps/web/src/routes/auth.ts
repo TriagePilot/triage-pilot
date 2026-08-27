@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
+import type { WorkspaceId } from "@triagepilot/contracts";
 
 import { createLoginThrottle } from "../auth/login-throttle";
 import {
@@ -13,6 +14,7 @@ import {
 export interface AdminSessionServices {
   adminUsername: string;
   sessionSecret: string;
+  workspaceId: WorkspaceId;
   now(): Date;
 }
 
@@ -52,7 +54,7 @@ export function authRoutes(services: AuthServices) {
   });
 
   app.get("/session", requireAdminSession(services), (c) =>
-    c.json({ authenticated: true, username: services.adminUsername }),
+    c.json({ authenticated: true, username: services.adminUsername, workspaceId: services.workspaceId }),
   );
 
   app.post("/logout", (c) => {

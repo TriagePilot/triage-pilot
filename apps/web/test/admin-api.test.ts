@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   fetchEffectiveConfigurationForWorkspace,
-  fetchOperationsOverview,
   fetchOperationsOverviewForWorkspace,
   getSession,
   login,
@@ -47,7 +46,7 @@ describe("admin API", () => {
     await expect(getSession()).resolves.toEqual({ authenticated: false });
   });
 
-  it("fetches the overview and logs out with same-origin cookies", async () => {
+  it("fetches the workspace-scoped overview and logs out with same-origin cookies", async () => {
     const calls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
     vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       calls.push([input, init]);
@@ -57,11 +56,17 @@ describe("admin API", () => {
       return new Response(null, { status: 204 });
     });
 
-    await expect(fetchOperationsOverview()).resolves.toEqual(emptyOverview);
+    await expect(fetchOperationsOverviewForWorkspace(workspace)).resolves.toEqual(emptyOverview);
     await logout();
 
     expect(calls).toEqual([
-      ["/api/operations/overview", { credentials: "same-origin" }],
+      [
+        "/api/operations/overview",
+        {
+          credentials: "same-origin",
+          headers: { "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
+        },
+      ],
       ["/api/auth/logout", { method: "POST", credentials: "same-origin" }],
     ]);
   });
@@ -84,8 +89,6 @@ describe("admin API", () => {
       throw new Error(`unexpected request to ${String(input)}`);
     });
 
-    const workspace = { id: "ws_local", displayName: "Self-hosted" };
-
     await fetchOperationsOverviewForWorkspace(workspace);
     await fetchEffectiveConfigurationForWorkspace(workspace);
 
@@ -94,14 +97,14 @@ describe("admin API", () => {
         "/api/operations/overview",
         {
           credentials: "same-origin",
-          headers: { "x-triagepilot-workspace": "ws_local" },
+          headers: { "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
         },
       ],
       [
         "/api/operations/effective-configuration",
         {
           credentials: "same-origin",
-          headers: { "x-triagepilot-workspace": "ws_local" },
+          headers: { "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
         },
       ],
     ]);
@@ -117,7 +120,7 @@ describe("admin API", () => {
         }),
     );
 
-    await expect(fetchOperationsOverview()).rejects.toMatchObject({
+    await expect(fetchOperationsOverviewForWorkspace(workspace)).rejects.toMatchObject({
       name: "AdminApiError",
       status: 401,
       message: "The administrator session has expired.",
@@ -132,4 +135,9 @@ const emptyOverview = {
   decisions: [],
   failures: { jobs: [], actions: [] },
   worker: { available: false, workerId: null, lastHeartbeatAt: null },
+};
+
+const workspace = {
+  id: "00000000-0000-4000-8000-000000000001",
+  displayName: "Self-hosted",
 };

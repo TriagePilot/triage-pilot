@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
+  EffectiveConfiguration,
   OperationsDashboard,
   type AuthorizationCapabilities,
+  type EffectiveConfigurationOverview,
   type NavigationHost,
   type OperationsApiClient,
   type OperationsOverview,
@@ -18,7 +20,7 @@ import {
 
 type AuthState = "checking" | "signed-out" | "signed-in";
 
-const localWorkspace: WorkspaceContext = { id: "ws_local", displayName: "Self-hosted" };
+const localWorkspaceDisplayName = "Self-hosted";
 const readOnlyAuthorization: AuthorizationCapabilities = {
   canViewOperations: true,
   canManageConfiguration: false,
@@ -30,7 +32,9 @@ const localNavigation: NavigationHost = {
 export function App() {
   const [authState, setAuthState] = useState<AuthState>("checking");
   const [username, setUsername] = useState("");
+  const [workspace, setWorkspace] = useState<WorkspaceContext | null>(null);
   const [overview, setOverview] = useState<OperationsOverview | null>(null);
+  const [effectiveConfiguration, setEffectiveConfiguration] = useState<EffectiveConfigurationOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -46,20 +50,25 @@ export function App() {
         return;
       }
       setUsername(session.username);
+      setWorkspace({ id: session.workspaceId, displayName: localWorkspaceDisplayName });
       setAuthState("signed-in");
-      await loadOverview();
+      await loadOverview({ id: session.workspaceId, displayName: localWorkspaceDisplayName });
     } catch (caught) {
       showSignedOut();
       setError(messageFrom(caught, "Could not check the administrator session."));
     }
   }
 
-  async function loadOverview() {
+  async function loadOverview(activeWorkspace: WorkspaceContext) {
     setError(null);
     setOverview(null);
+    setEffectiveConfiguration(null);
     try {
       const api = createSelfHostedOperationsApi({ onUnauthorized: showSignedOut });
-      setOverview(await api.readOperationsOverview(localWorkspace));
+      const nextOverview = await api.readOperationsOverview(activeWorkspace);
+      const nextEffectiveConfiguration = await api.readEffectiveConfiguration(activeWorkspace);
+      setOverview(nextOverview);
+      setEffectiveConfiguration(nextEffectiveConfiguration);
     } catch (caught) {
       if (caught instanceof AdminApiError && caught.status === 401) {
         showSignedOut(caught.message);
@@ -73,9 +82,15 @@ export function App() {
     setError(null);
     try {
       await login(nextUsername, password);
+      const session = await getSession();
+      if (!session.authenticated) {
+        showSignedOut();
+        return;
+      }
       setUsername(nextUsername);
+      setWorkspace({ id: session.workspaceId, displayName: localWorkspaceDisplayName });
       setAuthState("signed-in");
-      await loadOverview();
+      await loadOverview({ id: session.workspaceId, displayName: localWorkspaceDisplayName });
     } catch (caught) {
       setError(messageFrom(caught, "Sign in failed. Check the administrator credentials."));
     }
@@ -93,6 +108,8 @@ export function App() {
 
   function showSignedOut(nextError: string | null = null) {
     setOverview(null);
+    setEffectiveConfiguration(null);
+    setWorkspace(null);
     setUsername("");
     setAuthState("signed-out");
     setError(nextError);
@@ -102,7 +119,7 @@ export function App() {
   if (authState === "signed-out") {
     return <LoginScreen error={error} submitting={false} onSubmit={handleLogin} />;
   }
-  if (!overview) {
+  if (!overview || !effectiveConfiguration || !workspace) {
     if (error) {
       return (
         <main className="center-stage">
@@ -113,7 +130,7 @@ export function App() {
               {error}
             </p>
             <div className="recovery-actions">
-              <button type="button" onClick={() => void loadOverview()}>
+              <button type="button" onClick={() => workspace ? void loadOverview(workspace) : void loadSession()}>
                 Retry overview
               </button>
               <button className="button--quiet" type="button" onClick={() => void handleLogout()}>
@@ -130,7 +147,9 @@ export function App() {
   return (
     <Dashboard
       username={username}
+      workspace={workspace}
       overview={overview}
+      effectiveConfiguration={effectiveConfiguration}
       error={error}
       onLogout={handleLogout}
     />
@@ -204,13 +223,23 @@ export function LoginScreen({ error, submitting, onSubmit }: LoginScreenProps) {
 
 interface DashboardProps {
   username: string;
+  workspace?: WorkspaceContext;
   overview?: OperationsOverview;
+  effectiveConfiguration?: EffectiveConfigurationOverview;
   error?: string | null;
   onLogout(): Promise<void>;
   onUnauthorized?(message: string): void;
 }
 
-export function Dashboard({ username, overview, error, onLogout, onUnauthorized }: DashboardProps) {
+export function Dashboard({
+  username,
+  workspace = { id: "ws_local", displayName: localWorkspaceDisplayName },
+  overview,
+  effectiveConfiguration,
+  error,
+  onLogout,
+  onUnauthorized,
+}: DashboardProps) {
   const api = useMemo(
     () => overview
       ? fixedOverviewApi(overview)
@@ -228,7 +257,7 @@ export function Dashboard({ username, overview, error, onLogout, onUnauthorized 
 
       <OperationsDashboard
         api={api}
-        workspace={localWorkspace}
+        workspace={workspace}
         authorization={readOnlyAuthorization}
         navigation={localNavigation}
         {...(overview ? { initialOverview: overview } : {})}
@@ -241,6 +270,15 @@ export function Dashboard({ username, overview, error, onLogout, onUnauthorized 
           </div>
         }
       />
+      {effectiveConfiguration ? (
+        <EffectiveConfiguration
+          api={api}
+          workspace={workspace}
+          authorization={readOnlyAuthorization}
+          navigation={localNavigation}
+          initialConfiguration={effectiveConfiguration}
+        />
+      ) : null}
     </main>
   );
 }

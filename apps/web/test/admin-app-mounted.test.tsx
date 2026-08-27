@@ -52,7 +52,11 @@ describe("mounted admin application", () => {
     let overviewRequests = 0;
     vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
       if (input === "/api/auth/session") {
-        return Response.json({ authenticated: true, username: "admin" });
+        return Response.json({
+          authenticated: true,
+          username: "admin",
+          workspaceId: "00000000-0000-4000-8000-000000000001",
+        });
       }
       if (input === "/api/operations/overview") {
         overviewRequests += 1;
@@ -88,6 +92,66 @@ describe("mounted admin application", () => {
     expect(container.textContent).toContain("The administrator session has expired.");
     expect(container.textContent).not.toContain("The dashboard could not load");
     expect(container.textContent).not.toContain("Retry overview");
+  });
+
+  it("mounts effective configuration after an authenticated self-hosted session", async () => {
+    const calls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push([input, init]);
+      if (input === "/api/auth/session") {
+        return Response.json({
+          authenticated: true,
+          username: "admin",
+          workspaceId: "00000000-0000-4000-8000-000000000001",
+        });
+      }
+      if (input === "/api/operations/overview") return Response.json(emptyOverview);
+      if (input === "/api/operations/effective-configuration") {
+        return Response.json({
+          trustedPath: ".triagepilot.yml",
+          trustedRevision: "trusted-base-sha",
+          repositoryRevision: "trusted-base-sha",
+          inheritanceMode: "replace",
+          effectiveHash: "a".repeat(64),
+          values: [
+            { path: "$.mode", label: "mode", value: "shadow", source: "repository" },
+          ],
+        });
+      }
+      throw new Error(`unexpected request to ${String(input)}`);
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<App />);
+      await flushAsyncWork();
+    });
+
+    expect(container.textContent).toContain("Operations ledger");
+    expect(container.textContent).toContain("Effective configuration");
+    expect(container.textContent).toContain("Trusted path");
+    expect(container.textContent).toContain(".triagepilot.yml");
+    expect(container.textContent).toContain("repository source");
+    expect(container.textContent).not.toContain("Effective configuration is unavailable");
+    expect(calls).toMatchObject([
+      ["/api/auth/session", { credentials: "same-origin" }],
+      [
+        "/api/operations/overview",
+        {
+          credentials: "same-origin",
+          headers: { "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
+        },
+      ],
+      [
+        "/api/operations/effective-configuration",
+        {
+          credentials: "same-origin",
+          headers: { "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
+        },
+      ],
+    ]);
   });
 });
 

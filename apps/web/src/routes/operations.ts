@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
 import type { OperationsOverview } from "@triagepilot/db";
 import type { EffectiveConfigurationOverview } from "@triagepilot/ui";
 
@@ -12,12 +12,21 @@ export interface OperationsServices extends AdminSessionServices {
 export function operationsRoutes(services: OperationsServices) {
   const app = new Hono();
 
-  app.get("/overview", requireAdminSession(services), async (c) =>
+  app.get("/overview", requireAdminSession(services), requireBoundWorkspace(services), async (c) =>
     c.json(await services.listOperationsOverview()),
   );
-  app.get("/effective-configuration", requireAdminSession(services), async (c) =>
+  app.get("/effective-configuration", requireAdminSession(services), requireBoundWorkspace(services), async (c) =>
     c.json(await services.readEffectiveConfiguration()),
   );
 
   return app;
+}
+
+function requireBoundWorkspace(services: OperationsServices): MiddlewareHandler {
+  return async (c: Context, next) => {
+    if (c.req.header("x-triagepilot-workspace") !== services.workspaceId) {
+      return c.json({ error: "workspace_scope_mismatch" }, 403);
+    }
+    await next();
+  };
 }

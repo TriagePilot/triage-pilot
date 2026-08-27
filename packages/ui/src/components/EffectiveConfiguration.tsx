@@ -13,6 +13,7 @@ export interface EffectiveConfigurationProps {
   workspace: WorkspaceContext;
   authorization: AuthorizationCapabilities;
   navigation: NavigationHost;
+  initialConfiguration?: EffectiveConfigurationOverview;
 }
 
 type LoadState =
@@ -25,8 +26,11 @@ export function EffectiveConfiguration({
   workspace,
   authorization,
   navigation,
+  initialConfiguration,
 }: EffectiveConfigurationProps) {
-  const [state, setState] = useState<LoadState>({ status: "loading" });
+  const [state, setState] = useState<LoadState>(
+    initialConfiguration ? { status: "ready", configuration: initialConfiguration } : { status: "loading" },
+  );
 
   async function loadConfiguration() {
     if (!authorization.canViewOperations) {
@@ -42,8 +46,12 @@ export function EffectiveConfiguration({
   }
 
   useEffect(() => {
+    if (initialConfiguration) {
+      setState({ status: "ready", configuration: initialConfiguration });
+      return;
+    }
     void loadConfiguration();
-  }, [api, workspace.id, authorization.canViewOperations]);
+  }, [api, workspace.id, authorization.canViewOperations, initialConfiguration]);
 
   if (state.status === "loading") {
     return (

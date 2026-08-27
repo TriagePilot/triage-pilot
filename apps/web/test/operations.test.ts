@@ -68,26 +68,70 @@ describe("operations routes", () => {
     expect(await response.json()).toEqual({ error: "unauthorized" });
   });
 
-  it("returns the operational overview to an authenticated administrator", async () => {
+  it("rejects an authenticated overview request without a workspace header", async () => {
+    const { app, cookie } = await authenticatedApp();
+
+    const response = await app.request("/api/operations/overview", {
+      headers: { cookie },
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "workspace_scope_mismatch" });
+  });
+
+  it("rejects an authenticated overview request for a mismatched workspace", async () => {
+    const { app, cookie } = await authenticatedApp();
+
+    const response = await app.request("/api/operations/overview", {
+      headers: { cookie, "x-triagepilot-workspace": "ws_other" },
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "workspace_scope_mismatch" });
+  });
+
+  it("returns the operational overview to an authenticated administrator in the bound workspace", async () => {
     const { app, cookie } = await authenticatedApp({
       listOperationsOverview: async () => overview,
     });
 
     const response = await app.request("/api/operations/overview", {
-      headers: { cookie },
+      headers: { cookie, "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
     });
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(overview);
   });
 
-  it("returns effective configuration provenance to an authenticated administrator", async () => {
+  it("rejects an authenticated effective-configuration request without a workspace header", async () => {
+    const { app, cookie } = await authenticatedApp();
+
+    const response = await app.request("/api/operations/effective-configuration", {
+      headers: { cookie },
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "workspace_scope_mismatch" });
+  });
+
+  it("rejects an authenticated effective-configuration request for a mismatched workspace", async () => {
+    const { app, cookie } = await authenticatedApp();
+
+    const response = await app.request("/api/operations/effective-configuration", {
+      headers: { cookie, "x-triagepilot-workspace": "ws_other" },
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "workspace_scope_mismatch" });
+  });
+
+  it("returns effective configuration provenance to an authenticated administrator in the bound workspace", async () => {
     const { app, cookie } = await authenticatedApp({
       readEffectiveConfiguration: async () => effectiveConfiguration,
     });
 
     const response = await app.request("/api/operations/effective-configuration", {
-      headers: { cookie },
+      headers: { cookie, "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
     });
 
     expect(response.status).toBe(200);
@@ -117,7 +161,7 @@ const effectiveConfiguration = {
   ],
 };
 
-async function authenticatedApp(overrides: Parameters<typeof buildServices>[0]) {
+async function authenticatedApp(overrides: Parameters<typeof buildServices>[0] = {}) {
   const app = createWebApp(buildServices(overrides));
   const loginResponse = await app.request("/api/auth/login", {
     method: "POST",
