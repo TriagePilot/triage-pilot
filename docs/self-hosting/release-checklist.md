@@ -2,6 +2,8 @@
 
 Keep automated evidence separate from the live GitHub acceptance flow. A green CI run does not prove the live flow, and the live result must not be reported unless a real test organization and GitHub App were used.
 
+Tagged releases must start from an annotated `vX.Y.Z` tag whose target commit already carries the same `X.Y.Z` in the root `package.json`, every published package manifest, and the Dockerfile `TRIAGEPILOT_VERSION` build argument. The public release workflow builds, tests, packs, scans, and verifies one exact tag commit before publishing anything.
+
 ## Automated Evidence
 
 Run from a clean clone with a disposable PostgreSQL 16 database:
@@ -13,15 +15,28 @@ pnpm test
 TEST_DATABASE_URL=postgres://triagepilot:triagepilot@localhost:5432/triagepilot pnpm test:integration
 pnpm build
 DATABASE_URL=postgres://triagepilot:triagepilot@localhost:5432/triagepilot pnpm db:migrate
+pnpm check:package-boundary
 docker compose config
 docker build .
+bash scripts/test-previous-release-upgrade.sh
 pnpm check:public-boundary
 pnpm smoke:compose
 gitleaks detect --source . --no-banner
 test -f LICENSE -a -f SECURITY.md -a -f CONTRIBUTING.md -a -f CODE_OF_CONDUCT.md
 ```
 
-Record the command outputs and identify the authentication, installation-token, organization-scope, delivery deduplication, retry and recovery, shadow and enforce processing, dashboard, and retention tests. Confirm the migration used an empty database, the Compose smoke endpoint returned HTTP 200, the secret and public-boundary scans reported no findings, and pull-request CI did not publish an image.
+Record the command outputs and identify the authentication, installation-token, organization-scope, delivery deduplication, retry and recovery, shadow and enforce processing, dashboard, and retention tests. Confirm the migration used an empty database, the previous-release upgrade reached `0006_decision_outbox.sql`, the Compose smoke endpoint returned HTTP 200, the secret and public-boundary scans reported no findings, and pull-request CI did not publish an image.
+
+The tag workflow also produces `artifacts/release-manifest.json` and `artifacts/checksums.txt`. The manifest is the release contract for consumers and must contain:
+
+- `version`: the synchronized package and image version from the `vX.Y.Z` tag.
+- `gitCommit`: the exact commit built by the workflow.
+- `packages`: the seven public package tarballs, sorted by package name, each with its SHA-256 digest.
+- `contracts.sha256`: the digest of the packed `@triagepilot/contracts` tarball.
+- `databaseMigration.id`: the highest public migration shipped by `@triagepilot/db`.
+- `container.digest` and `container.imageVersion`: the OCI image digest and the matching image version label.
+
+Publish from the protected `public-release` environment only after those artifacts exist and the temporary consumer install succeeds.
 
 At the rendered-configuration validation boundary, the smoke shell owns and supplies the four generated secret-mount source paths. The validator treats those paths as expected binds but independently derives the canonical physical repository root from its own module location; no build-root value crosses the CLI boundary. Before starting a container, it requires the exact PostgreSQL and web healthchecks, no worker healthcheck, and no Compose lifecycle or develop/watch hooks. The later health-URL mode accepts only Docker's published loopback address and validates that address before using it.
 

@@ -1,37 +1,284 @@
-name: Release container
+name: Public release
 
 on:
   push:
     tags:
       - "v*"
 
-permissions:
-  contents: read
-  packages: write
-
 jobs:
-  container:
+  build_verify:
+    name: Build and verify release artifacts
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: triagepilot
+          POSTGRES_PASSWORD: triagepilot
+          POSTGRES_DB: triagepilot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U triagepilot -d triagepilot"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    outputs:
+      version: ${{ steps.release_meta.outputs.version }}
+      git_commit: ${{ steps.release_meta.outputs.git_commit }}
+      container_digest: ${{ steps.container_meta.outputs.container_digest }}
+      image_name: ${{ steps.release_meta.outputs.image_name }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
+        with:
+          version: 11.1.2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - id: release_meta
+        name: Validate annotated tag and synchronized version
+        run: |
+          set -Eeuo pipefail
+          ref_object_type="$(git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(objecttype)')"
+          if [[ "$ref_object_type" != "tag" ]]; then
+            echo "Release tags must be annotated; ${GITHUB_REF_NAME} is ${ref_object_type:-missing}." >&2
+            exit 1
+          fi
+
+          version="${GITHUB_REF_NAME#v}"
+          if [[ -z "$version" || "$version" == "$GITHUB_REF_NAME" ]]; then
+            echo "Expected a vX.Y.Z tag, got ${GITHUB_REF_NAME}." >&2
+            exit 1
+          fi
+
+          package_version="$(node --input-type=module -e "import { readFileSync } from 'node:fs'; const manifest = JSON.parse(readFileSync('package.json', 'utf8')); process.stdout.write(manifest.version);")"
+          dockerfile_version="$(sed -n 's/^ARG TRIAGEPILOT_VERSION=//p' Dockerfile)"
+          if [[ "$package_version" != "$version" ]]; then
+            echo "package.json version ${package_version} does not match tag ${version}." >&2
+            exit 1
+          fi
+          if [[ "$dockerfile_version" != "$version" ]]; then
+            echo "Dockerfile version ${dockerfile_version} does not match tag ${version}." >&2
+            exit 1
+          fi
+
+          image_repository="$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          {
+            echo "version=$version"
+            echo "git_commit=$(git rev-parse HEAD)"
+            echo "image_name=ghcr.io/${image_repository}:$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm test
+      - run: pnpm test:integration
+        env:
+          TEST_DATABASE_URL: postgres://triagepilot:triagepilot@localhost:5432/triagepilot
+      - run: pnpm build
+      - run: pnpm db:migrate
+        env:
+          DATABASE_URL: postgres://triagepilot:triagepilot@localhost:5432/triagepilot
+      - run: pnpm check:package-boundary
+      - run: pnpm check:public-boundary
+      - run: docker compose config
+
+      - name: Build single release image
+        run: |
+          set -Eeuo pipefail
+          mkdir -p artifacts/container
+          BUILDX_METADATA_PROVENANCE=max docker buildx build \
+            --load \
+            --metadata-file artifacts/container/metadata.json \
+            --build-arg "TRIAGEPILOT_VERSION=${{ steps.release_meta.outputs.version }}" \
+            --tag "triagepilot-release:${{ steps.release_meta.outputs.version }}" \
+            .
+          docker save \
+            --output "artifacts/container/triagepilot-${{ steps.release_meta.outputs.version }}.tar" \
+            "triagepilot-release:${{ steps.release_meta.outputs.version }}"
+
+      - id: container_meta
+        name: Capture release image digest
+        run: |
+          set -Eeuo pipefail
+          digest="$(node --input-type=module -e "import { readFileSync } from 'node:fs'; const metadata = JSON.parse(readFileSync('artifacts/container/metadata.json', 'utf8')); const digest = metadata['containerimage.digest'] ?? metadata['containerimage.descriptor']?.digest; if (!digest) throw new Error('Buildx metadata did not contain a container digest.'); process.stdout.write(digest);")"
+          echo "container_digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Verify previous-release database upgrade
+        run: bash scripts/test-previous-release-upgrade.sh
+        env:
+          TRIAGEPILOT_UPGRADE_CURRENT_IMAGE: triagepilot-release:${{ steps.release_meta.outputs.version }}
+
+      - run: pnpm smoke:compose
+
+      - name: Scan tracked history for secrets
+        uses: docker://ghcr.io/gitleaks/gitleaks:v8.30.1
+        with:
+          args: git --no-banner --redact .
+
+      - name: Pack public packages
+        run: |
+          set -Eeuo pipefail
+          mkdir -p artifacts/packages
+          for package_dir in \
+            packages/contracts \
+            packages/config \
+            packages/core \
+            packages/application \
+            packages/db \
+            packages/provider-github \
+            packages/ui
+          do
+            pnpm --dir "$package_dir" pack --pack-destination "$GITHUB_WORKSPACE/artifacts/packages"
+          done
+
+      - name: Verify packed packages in a temporary consumer
+        run: |
+          set -Eeuo pipefail
+          consumer_dir="$(mktemp -d "$RUNNER_TEMP/triagepilot-release-consumer.XXXXXX")"
+          pushd "$consumer_dir" >/dev/null
+          npm init -y >/dev/null
+          npm install --ignore-scripts --no-package-lock \
+            "$GITHUB_WORKSPACE"/artifacts/packages/*.tgz \
+            react@18.3.1 \
+            react-dom@18.3.1
+          node --input-type=module <<'NODE'
+          import { ensureLocalWorkspace } from "@triagepilot/db";
+          import { resolveConfiguration } from "@triagepilot/config";
+          import { buildRoutingKey } from "@triagepilot/contracts";
+          import { scorePullRequestRisk } from "@triagepilot/core";
+          import { processChangeRequest } from "@triagepilot/application";
+          import { normalizeGitHubWebhook } from "@triagepilot/provider-github";
+          import * as ui from "@triagepilot/ui";
+
+          if (typeof ensureLocalWorkspace !== "function") throw new Error("@triagepilot/db import failed");
+          if (typeof resolveConfiguration !== "function") throw new Error("@triagepilot/config import failed");
+          if (typeof buildRoutingKey !== "function") throw new Error("@triagepilot/contracts import failed");
+          if (typeof scorePullRequestRisk !== "function") throw new Error("@triagepilot/core import failed");
+          if (typeof processChangeRequest !== "function") throw new Error("@triagepilot/application import failed");
+          if (typeof normalizeGitHubWebhook !== "function") throw new Error("@triagepilot/provider-github import failed");
+          if (!("OperationsDashboard" in ui)) throw new Error("@triagepilot/ui import failed");
+          NODE
+          test -f node_modules/@triagepilot/ui/dist/styles.css
+          popd >/dev/null
+
+      - name: Generate release manifest and checksums
+        run: |
+          set -Eeuo pipefail
+          snapshot_dir="$(mktemp -d "$RUNNER_TEMP/triagepilot-release-worktree.XXXXXX")"
+          git worktree add --detach "$snapshot_dir" "$GITHUB_SHA"
+          mapfile -t package_tarballs < <(find "$GITHUB_WORKSPACE/artifacts/packages" -maxdepth 1 -name '*.tgz' -print | sort)
+          manifest_args=()
+          for tarball in "${package_tarballs[@]}"; do
+            manifest_args+=(--package-tarball "$tarball")
+          done
+          node scripts/create-release-manifest.mjs \
+            --cwd "$snapshot_dir" \
+            --version "${{ steps.release_meta.outputs.version }}" \
+            --git-commit "${{ steps.release_meta.outputs.git_commit }}" \
+            --database-migration 0006_decision_outbox.sql \
+            --container-digest "${{ steps.container_meta.outputs.container_digest }}" \
+            --oci-metadata "$GITHUB_WORKSPACE/artifacts/container/metadata.json" \
+            "${manifest_args[@]}"
+          cp "$snapshot_dir/artifacts/release-manifest.json" "$GITHUB_WORKSPACE/artifacts/release-manifest.json"
+          git worktree remove "$snapshot_dir" --force
+          sha256sum \
+            "$GITHUB_WORKSPACE"/artifacts/packages/*.tgz \
+            "$GITHUB_WORKSPACE"/artifacts/container/metadata.json \
+            "$GITHUB_WORKSPACE"/artifacts/container/triagepilot-${{ steps.release_meta.outputs.version }}.tar \
+            "$GITHUB_WORKSPACE"/artifacts/release-manifest.json \
+            > "$GITHUB_WORKSPACE/artifacts/checksums.txt"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: public-release-artifacts
+          path: artifacts
+          if-no-files-found: error
+
+  publish:
+    name: Publish verified artifacts
+    runs-on: ubuntu-latest
+    needs: build_verify
+    environment: public-release
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
+        with:
+          version: 11.1.2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - id: metadata
-        uses: docker/metadata-action@v5
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.metadata.outputs.tags }}
-          labels: ${{ steps.metadata.outputs.labels }}
+          name: public-release-artifacts
+          path: artifacts
+
+      - name: Revalidate downloaded release manifest
+        run: |
+          set -Eeuo pipefail
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          import { validateReleaseManifest } from "./scripts/create-release-manifest.mjs";
+
+          const manifest = JSON.parse(readFileSync("artifacts/release-manifest.json", "utf8"));
+          const metadata = JSON.parse(readFileSync("artifacts/container/metadata.json", "utf8"));
+          const digest = metadata["containerimage.digest"] ?? metadata["containerimage.descriptor"]?.digest;
+          if (!digest) throw new Error("Buildx metadata did not contain a container digest.");
+
+          validateReleaseManifest(manifest, {
+            version: "${{ needs.build_verify.outputs.version }}",
+            gitCommit: "${{ needs.build_verify.outputs.git_commit }}",
+            databaseMigration: "0006_decision_outbox.sql",
+            containerDigest: digest,
+          });
+          NODE
+
+      - name: Publish container image
+        run: |
+          set -Eeuo pipefail
+          docker load --input "artifacts/container/triagepilot-${{ needs.build_verify.outputs.version }}.tar"
+          docker tag \
+            "triagepilot-release:${{ needs.build_verify.outputs.version }}" \
+            "${{ needs.build_verify.outputs.image_name }}"
+          docker push "${{ needs.build_verify.outputs.image_name }}"
+          repo_digests="$(docker image inspect "${{ needs.build_verify.outputs.image_name }}" --format '{{json .RepoDigests}}')"
+          if [[ "$repo_digests" != *"${{ needs.build_verify.outputs.container_digest }}"* ]]; then
+            echo "Pushed image digest did not match ${{ needs.build_verify.outputs.container_digest }}." >&2
+            exit 1
+          fi
+
+      - name: Publish packages with npm provenance
+        run: |
+          set -Eeuo pipefail
+          for tarball in artifacts/packages/*.tgz; do
+            npm publish "$tarball" --provenance --access public
+          done

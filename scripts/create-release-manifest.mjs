@@ -18,6 +18,9 @@ const publishedPackages = [
   "@triagepilot/provider-github",
   "@triagepilot/ui",
 ];
+const sortedPublishedPackages = [...publishedPackages].sort((left, right) => left.localeCompare(right));
+const digestPattern = /^sha256:[0-9a-f]{64}$/;
+const shaPattern = /^[0-9a-f]{64}$/;
 
 export async function createReleaseManifest(options) {
   const repoRoot = resolve(options.cwd ?? defaultRepoRoot);
@@ -93,12 +96,118 @@ export async function createReleaseManifest(options) {
       imageVersion,
     },
   };
+  validateReleaseManifest(manifest, {
+    version: options.version,
+    gitCommit: options.gitCommit,
+    databaseMigration: highestMigration,
+    containerDigest: options.containerDigest,
+  });
 
   const outputPath = join(repoRoot, "artifacts", "release-manifest.json");
   await mkdir(join(repoRoot, "artifacts"), { recursive: true });
   const content = `${JSON.stringify(manifest, null, 2)}\n`;
   await writeFile(outputPath, content);
   return { outputPath, content };
+}
+
+export function validateReleaseManifest(manifest, expectations) {
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+    throw new Error("Release manifest must be an object.");
+  }
+  if (manifest.version !== expectations.version) {
+    throw new Error(`Release manifest version ${manifest.version} does not match ${expectations.version}.`);
+  }
+  if (manifest.gitCommit !== expectations.gitCommit) {
+    throw new Error(`Release manifest git commit ${manifest.gitCommit} does not match ${expectations.gitCommit}.`);
+  }
+
+  if (!Array.isArray(manifest.packages)) {
+    throw new Error("Release manifest packages must be an array.");
+  }
+  if (manifest.packages.length !== sortedPublishedPackages.length) {
+    throw new Error(`Release manifest must contain ${sortedPublishedPackages.length} packages.`);
+  }
+
+  const seenPackages = new Set();
+  const packageNames = manifest.packages.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error("Release manifest package entries must be objects.");
+    }
+    if (!sortedPublishedPackages.includes(entry.name)) {
+      throw new Error(`Unexpected published package ${entry.name}.`);
+    }
+    if (seenPackages.has(entry.name)) {
+      throw new Error(`Duplicate package tarball for ${entry.name}.`);
+    }
+    seenPackages.add(entry.name);
+
+    if (entry.version !== expectations.version) {
+      throw new Error(`Package ${entry.name} version ${entry.version} does not match ${expectations.version}.`);
+    }
+    if (typeof entry.tarball !== "string" || entry.tarball.length === 0) {
+      throw new Error(`Package ${entry.name} tarball is missing.`);
+    }
+    if (typeof entry.sha256 !== "string" || !shaPattern.test(entry.sha256)) {
+      throw new Error(`Package ${entry.name} sha256 must be a 64-character lowercase hex digest.`);
+    }
+    return entry.name;
+  });
+
+  const sortedPackageNames = [...packageNames].sort((left, right) => left.localeCompare(right));
+  if (packageNames.some((name, index) => name !== sortedPackageNames[index])) {
+    throw new Error("Release manifest packages are not sorted by name.");
+  }
+  const missingPackages = sortedPublishedPackages.filter((packageName) => !seenPackages.has(packageName));
+  if (missingPackages.length > 0) {
+    throw new Error(`Missing required package tarballs: ${missingPackages.join(", ")}.`);
+  }
+
+  if (!manifest.contracts || typeof manifest.contracts !== "object" || Array.isArray(manifest.contracts)) {
+    throw new Error("Release manifest contracts metadata is missing.");
+  }
+  if (manifest.contracts.package !== "@triagepilot/contracts") {
+    throw new Error(`Release manifest contracts package ${manifest.contracts.package} must be @triagepilot/contracts.`);
+  }
+  if (typeof manifest.contracts.sha256 !== "string" || !shaPattern.test(manifest.contracts.sha256)) {
+    throw new Error("Release manifest contracts digest must be a 64-character lowercase hex digest.");
+  }
+  const contractsPackage = manifest.packages.find((entry) => entry.name === "@triagepilot/contracts");
+  if (!contractsPackage) throw new Error("Missing required contracts artifact.");
+  if (contractsPackage.sha256 !== manifest.contracts.sha256) {
+    throw new Error("Release manifest contracts digest does not match the contracts package digest.");
+  }
+
+  if (!manifest.databaseMigration || typeof manifest.databaseMigration !== "object" || Array.isArray(manifest.databaseMigration)) {
+    throw new Error("Release manifest database migration metadata is missing.");
+  }
+  if (manifest.databaseMigration.package !== "@triagepilot/db") {
+    throw new Error(`Release manifest database migration package ${manifest.databaseMigration.package} must be @triagepilot/db.`);
+  }
+  if (manifest.databaseMigration.id !== expectations.databaseMigration) {
+    throw new Error(
+      `Release manifest database migration ${manifest.databaseMigration.id} does not match ${expectations.databaseMigration}.`,
+    );
+  }
+
+  if (!manifest.container || typeof manifest.container !== "object" || Array.isArray(manifest.container)) {
+    throw new Error("Release manifest container metadata is missing.");
+  }
+  if (typeof manifest.container.digest !== "string" || manifest.container.digest.length === 0) {
+    throw new Error("Release manifest container digest is missing.");
+  }
+  if (!digestPattern.test(manifest.container.digest)) {
+    throw new Error(`Release manifest container digest ${manifest.container.digest} is invalid.`);
+  }
+  if (manifest.container.digest !== expectations.containerDigest) {
+    throw new Error(
+      `Release manifest container digest ${manifest.container.digest} does not match ${expectations.containerDigest}.`,
+    );
+  }
+  if (manifest.container.imageVersion !== expectations.version) {
+    throw new Error(`Release manifest image version ${manifest.container.imageVersion} does not match ${expectations.version}.`);
+  }
+
+  return manifest;
 }
 
 export async function findHighestDatabaseMigration(repoRoot) {
@@ -139,6 +248,14 @@ export async function readImageVersionFromOciMetadata(ociMetadataPath, digest) {
 function metadataMatchesDigest(candidate, digest) {
   if (!candidate || typeof candidate !== "object") return false;
   if (candidate.digest === digest) return true;
+  if (candidate["containerimage.digest"] === digest) return true;
+  if (
+    candidate["containerimage.descriptor"] &&
+    typeof candidate["containerimage.descriptor"] === "object" &&
+    candidate["containerimage.descriptor"].digest === digest
+  ) {
+    return true;
+  }
   const repoDigests = [
     ...(Array.isArray(candidate.repoDigests) ? candidate.repoDigests : []),
     ...(Array.isArray(candidate.RepoDigests) ? candidate.RepoDigests : []),
@@ -159,6 +276,15 @@ function readLabels(candidate) {
     !Array.isArray(candidate.Config.Labels)
   ) {
     return candidate.Config.Labels;
+  }
+  if (
+    candidate["containerimage.descriptor"] &&
+    typeof candidate["containerimage.descriptor"] === "object" &&
+    candidate["containerimage.descriptor"].annotations &&
+    typeof candidate["containerimage.descriptor"].annotations === "object" &&
+    !Array.isArray(candidate["containerimage.descriptor"].annotations)
+  ) {
+    return candidate["containerimage.descriptor"].annotations;
   }
   return {};
 }

@@ -116,6 +116,23 @@ describe("createReleaseManifest", () => {
     ).rejects.toThrow("OCI metadata is missing org.opencontainers.image.version.");
   });
 
+  it("accepts Buildx metadata files with descriptor annotations", async () => {
+    const fixture = await createManifestFixture();
+
+    const result = await createReleaseManifest({
+      cwd: fixture.repoRoot,
+      version: "0.1.0",
+      gitCommit: fixture.gitCommit,
+      expectedDatabaseMigration: "0006_decision_outbox.sql",
+      containerDigest: fixture.containerDigest,
+      ociMetadataPath: fixture.buildxOciMetadataPath,
+      packageTarballs: fixture.validTarballs,
+    });
+
+    expect(result.content).toContain(fixture.containerDigest);
+    expect(result.content).toContain('"imageVersion": "0.1.0"');
+  });
+
   it("writes a deterministic manifest with the derived migration and contracts digest", async () => {
     const fixture = await createManifestFixture();
 
@@ -197,6 +214,16 @@ async function createManifestFixture() {
     digest: containerDigest,
     labels: {},
   });
+  const buildxOciMetadataPath = await writeOciMetadata(join(ociRoot, "buildx.json"), {
+    "buildx.build.provenance": {},
+    "containerimage.descriptor": {
+      annotations: { "org.opencontainers.image.version": "0.1.0" },
+      digest: containerDigest,
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      size: 506,
+    },
+    "containerimage.digest": containerDigest,
+  });
 
   return {
     repoRoot,
@@ -208,6 +235,7 @@ async function createManifestFixture() {
     digestMismatchOciMetadataPath,
     labelMismatchOciMetadataPath,
     missingLabelOciMetadataPath,
+    buildxOciMetadataPath,
   };
 }
 

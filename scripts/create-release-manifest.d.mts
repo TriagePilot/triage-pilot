@@ -14,6 +14,13 @@ export interface ReleaseManifest {
   container: { digest: string; imageVersion: string };
 }
 
+export interface ReleaseManifestExpectations {
+  version: string;
+  gitCommit: string;
+  databaseMigration: string;
+  containerDigest: string;
+}
+
 export function createReleaseManifest(options: {
   cwd?: string;
   version: string;
@@ -25,3 +32,7 @@ export function createReleaseManifest(options: {
 }): Promise<{ outputPath: string; content: string }>;
 export function findHighestDatabaseMigration(repoRoot: string): Promise<string>;
 export function readImageVersionFromOciMetadata(ociMetadataPath: string, digest: string): Promise<string>;
+export function validateReleaseManifest(
+  manifest: ReleaseManifest,
+  expectations: ReleaseManifestExpectations,
+): ReleaseManifest;
