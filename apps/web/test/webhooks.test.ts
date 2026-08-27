@@ -8,7 +8,7 @@ describe("GitHub webhook route", () => {
   it.each([
     [{ login: "someone", type: "User" }, "account_scope"],
     [{ login: "other-org", type: "Organization" }, "account_scope"],
-  ])("acknowledges but ignores out-of-scope account %#", async (owner, ignored) => {
+  ])("acknowledges but ignores an out-of-scope repository owner %#", async (owner, ignored) => {
     const acceptRoutingDelivery = vi.fn();
     const logIgnoredWebhook = vi.fn();
     const app = createWebApp(
@@ -23,7 +23,7 @@ describe("GitHub webhook route", () => {
     expect(logIgnoredWebhook).toHaveBeenCalledWith({
       eventName: "pull_request",
       deliveryId: "delivery-1",
-      accountType: owner.type,
+      accountType: "Organization",
       accountLogin: owner.login,
     });
     expect(logIgnoredWebhook.mock.calls[0]?.[0]).not.toHaveProperty("body");
@@ -91,10 +91,15 @@ describe("GitHub webhook route", () => {
 
     const response = await signedWebhook(
       app,
-      pullRequestBody({ owner: { login: "AcMe", type: "Organization" } }),
+      pullRequestBody({ owner: { login: "raw-owner-must-be-ignored", type: "User" } }),
     );
 
     expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ ok: true });
+    expect(normalizeGitHubWebhook).toHaveBeenCalledWith(expect.objectContaining({
+      eventName: "pull_request",
+      deliveryId: "delivery-1",
+    }));
     expect(acceptRoutingDelivery).toHaveBeenCalledWith(expect.objectContaining({
       eventAction: "synchronize",
       installation: { githubInstallationId: "provider-connection-9", accountLogin: "AcMe" },

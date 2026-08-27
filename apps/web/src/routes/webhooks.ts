@@ -19,8 +19,6 @@ const githubIdSchema = z.number().int().safe().transform((id) => String(id));
 const accountSchema = z.object({ login: z.string(), type: z.string() });
 const repositorySchema = z.object({ id: githubIdSchema, name: z.string() });
 
-const repositoryOwnerSchema = z.object({ repository: z.object({ owner: accountSchema }) });
-
 const installationWebhookSchema = z.object({
   action: z.string(),
   installation: z.object({ id: githubIdSchema, account: accountSchema }),
@@ -104,13 +102,15 @@ export function githubWebhookRoutes(services: WebhookServices) {
     const parsedBody = body ? (JSON.parse(body) as unknown) : {};
 
     if (eventName === "pull_request" || eventName === "pull_request_review") {
-      const account = repositoryOwnerSchema.parse(parsedBody).repository.owner;
-      if (!isConfiguredOrganization(account, services.githubOrganization)) {
-        return ignoreAccount(c, services, eventName, deliveryId, account);
-      }
       const normalized = services.normalizeGitHubWebhook({ eventName, deliveryId, payload: parsedBody });
       if (normalized === null) {
         return c.json({ ok: true, ignored: "action" as const }, 202);
+      }
+      if (!isConfiguredRepositoryOwner(normalized.changeRequest.repository.owner, services.githubOrganization)) {
+        return ignoreAccount(c, services, eventName, deliveryId, {
+          login: normalized.changeRequest.repository.owner,
+          type: "Organization",
+        });
       }
 
       if (normalized.eventName === "change_request") {
@@ -250,6 +250,10 @@ function isSupportedEvent(
 
 function isConfiguredOrganization(account: z.infer<typeof accountSchema>, configuredLogin: string): boolean {
   return account.type === "Organization" && account.login.toLowerCase() === configuredLogin.toLowerCase();
+}
+
+function isConfiguredRepositoryOwner(repositoryOwner: string, configuredLogin: string): boolean {
+  return repositoryOwner.toLowerCase() === configuredLogin.toLowerCase();
 }
 
 function ignoreAccount(
