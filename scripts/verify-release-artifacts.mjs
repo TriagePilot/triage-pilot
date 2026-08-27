@@ -2,7 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
-import { basename, isAbsolute, join, normalize, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { validateReleaseManifest } from "./create-release-manifest.mjs";
@@ -129,11 +129,25 @@ function normalizeChecksumPath(path) {
   if (isAbsolute(path)) {
     throw new Error(`Checksum entry path must be relative: ${path}`);
   }
-  const normalized = normalize(path).replace(/\\/g, "/");
-  if (normalized === ".." || normalized.startsWith("../")) {
+  if (path.includes("\\")) {
+    throw new Error(`Checksum entry path must use canonical POSIX relative form: ${path}`);
+  }
+  if (path === "." || path.startsWith("./")) {
+    throw new Error(`Checksum entry path must use canonical POSIX relative form: ${path}`);
+  }
+
+  const segments = path.split("/");
+  if (segments.some((segment) => segment.length === 0 || segment === ".")) {
+    throw new Error(`Checksum entry path must use canonical POSIX relative form: ${path}`);
+  }
+  if (path === ".." || path.startsWith("../")) {
     throw new Error(`Checksum entry path escapes artifacts directory: ${path}`);
   }
-  return normalized;
+  if (segments.includes("..")) {
+    throw new Error(`Checksum entry path must use canonical POSIX relative form: ${path}`);
+  }
+
+  return path;
 }
 
 async function sha256(path) {

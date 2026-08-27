@@ -101,6 +101,62 @@ describe("verifyReleaseArtifacts", () => {
     ).rejects.toThrow("Checksum entry path must be relative: ");
   });
 
+  it("fails when checksums.txt uses non-canonical relative path aliases", async () => {
+    const currentDirectoryFixture = await createArtifactFixture();
+    await replaceChecksumPath(currentDirectoryFixture.artifactsDir, "release-manifest.json", "./release-manifest.json");
+    await expect(
+      verifyReleaseArtifacts({
+        artifactsDir: currentDirectoryFixture.artifactsDir,
+        version: "0.1.0",
+        gitCommit: currentDirectoryFixture.gitCommit,
+        databaseMigration: "0006_decision_outbox.sql",
+        containerDigest: currentDirectoryFixture.containerDigest,
+      }),
+    ).rejects.toThrow("Checksum entry path must use canonical POSIX relative form: ./release-manifest.json");
+
+    const internalTraversalFixture = await createArtifactFixture();
+    await replaceChecksumPath(
+      internalTraversalFixture.artifactsDir,
+      "release-manifest.json",
+      "container/../release-manifest.json",
+    );
+    await expect(
+      verifyReleaseArtifacts({
+        artifactsDir: internalTraversalFixture.artifactsDir,
+        version: "0.1.0",
+        gitCommit: internalTraversalFixture.gitCommit,
+        databaseMigration: "0006_decision_outbox.sql",
+        containerDigest: internalTraversalFixture.containerDigest,
+      }),
+    ).rejects.toThrow(
+      "Checksum entry path must use canonical POSIX relative form: container/../release-manifest.json",
+    );
+
+    const repeatedSeparatorFixture = await createArtifactFixture();
+    await replaceChecksumPath(repeatedSeparatorFixture.artifactsDir, "container/metadata.json", "container//metadata.json");
+    await expect(
+      verifyReleaseArtifacts({
+        artifactsDir: repeatedSeparatorFixture.artifactsDir,
+        version: "0.1.0",
+        gitCommit: repeatedSeparatorFixture.gitCommit,
+        databaseMigration: "0006_decision_outbox.sql",
+        containerDigest: repeatedSeparatorFixture.containerDigest,
+      }),
+    ).rejects.toThrow("Checksum entry path must use canonical POSIX relative form: container//metadata.json");
+
+    const backslashFixture = await createArtifactFixture();
+    await replaceChecksumPath(backslashFixture.artifactsDir, "container/metadata.json", "container\\metadata.json");
+    await expect(
+      verifyReleaseArtifacts({
+        artifactsDir: backslashFixture.artifactsDir,
+        version: "0.1.0",
+        gitCommit: backslashFixture.gitCommit,
+        databaseMigration: "0006_decision_outbox.sql",
+        containerDigest: backslashFixture.containerDigest,
+      }),
+    ).rejects.toThrow("Checksum entry path must use canonical POSIX relative form: container\\metadata.json");
+  });
+
   it("fails on duplicate checksum entries, traversal paths, unexpected entries, and extra package tarballs", async () => {
     const duplicateFixture = await createArtifactFixture();
     await writeFile(
@@ -258,6 +314,12 @@ async function createArtifactFixture() {
   await writeFile(join(artifactsDir, "checksums.txt"), `${checksumLines.join("\n")}\n`);
 
   return { artifactsDir, gitCommit, containerDigest };
+}
+
+async function replaceChecksumPath(artifactsDir: string, from: string, to: string) {
+  const checksumsPath = join(artifactsDir, "checksums.txt");
+  const content = await readFile(checksumsPath, "utf8");
+  await writeFile(checksumsPath, content.replace(from, to));
 }
 
 async function createPackageTarball(root: string, packageName: string, version: string) {
