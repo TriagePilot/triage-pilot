@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { HumanReviewPolicyDeliveryInput } from "@triagepilot/db";
+import type { HumanReviewPolicyDeliveryInput, RoutingDeliveryInput } from "@triagepilot/db";
 
 import { createWebApp } from "../src/app";
 import { buildServices } from "./helpers";
@@ -57,27 +57,45 @@ describe("GitHub webhook route", () => {
         headSha: "abc123",
         isDraft: false,
         eventName: "pull_request.opened",
-        routingKey: "routing:101:7:trusted-base-123:abc123",
+        routingKey: "routing:101:7:trusted-base-123:abc123:ready",
       },
     });
   });
 
-  it("passes an opened draft pull request to the worker for configuration-aware routing", async () => {
-    const acceptRoutingDelivery = vi.fn(async () => ({ inserted: true, jobId: "job-1" }));
+  it("queues ready-for-review routing separately after a draft with unchanged commits", async () => {
+    const acceptedDeliveries: RoutingDeliveryInput[] = [];
+    const acceptRoutingDelivery = async (input: RoutingDeliveryInput) => {
+      acceptedDeliveries.push(input);
+      return { inserted: true, jobId: "job-1" };
+    };
     const app = createWebApp(buildServices({ githubOrganization: "acme", acceptRoutingDelivery }));
 
-    const response = await signedWebhook(
+    await signedWebhook(
       app,
       pullRequestBody({ owner: { login: "acme", type: "Organization" }, draft: true }),
+      { deliveryId: "delivery-draft" },
+    );
+    await signedWebhook(
+      app,
+      pullRequestBody({
+        owner: { login: "acme", type: "Organization" },
+        action: "ready_for_review",
+        draft: false,
+      }),
+      { deliveryId: "delivery-ready" },
     );
 
-    expect(response.status).toBe(202);
-    expect(await response.json()).toEqual({ ok: true });
-    expect(acceptRoutingDelivery).toHaveBeenCalledWith(
-      expect.objectContaining({
-        payload: expect.objectContaining({ isDraft: true }),
-      }),
-    );
+    expect(acceptedDeliveries).toHaveLength(2);
+    expect(acceptedDeliveries[0]?.payload).toMatchObject({
+      eventName: "pull_request.opened",
+      isDraft: true,
+      routingKey: "routing:101:7:trusted-base-123:abc123:draft",
+    });
+    expect(acceptedDeliveries[1]?.payload).toMatchObject({
+      eventName: "pull_request.ready_for_review",
+      isDraft: false,
+      routingKey: "routing:101:7:trusted-base-123:abc123:ready",
+    });
   });
 
   it.each(["edited", "labeled", "review_requested", "converted_to_draft"])(
