@@ -28,6 +28,7 @@ export function buildServices(overrides: Partial<WebServices> = {}): WebServices
       failures: { jobs: [], actions: [] },
       worker: { available: false, workerId: null, lastHeartbeatAt: null },
     }),
+    rerunRouting: async () => ({ jobId: "job-recovery-1" }),
     readAvailabilityOverview: async () => ({ timezone: "UTC", absences: [] }),
     updateOrganizationTimezone: async () => {},
     createReviewerAbsence: async () => {},

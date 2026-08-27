@@ -7,6 +7,8 @@ const dbMocks = vi.hoisted(() => ({
   readAvailabilityOverview: vi.fn(),
   updateOrganizationTimezone: vi.fn(),
   updateReviewerAbsence: vi.fn(),
+  createJobQueue: vi.fn(),
+  findRoutingRecoveryTarget: vi.fn(),
 }));
 
 vi.mock("@triagepilot/db", async (importOriginal) => ({
@@ -17,12 +19,119 @@ vi.mock("@triagepilot/db", async (importOriginal) => ({
   readAvailabilityOverview: dbMocks.readAvailabilityOverview,
   updateOrganizationTimezone: dbMocks.updateOrganizationTimezone,
   updateReviewerAbsence: dbMocks.updateReviewerAbsence,
+  createJobQueue: dbMocks.createJobQueue,
+  findRoutingRecoveryTarget: dbMocks.findRoutingRecoveryTarget,
 }));
 
 import { createWebRuntimeServices } from "../src/runtime-services";
+import { RoutingRunError } from "../src/routing-run";
 import { withPostgresTestDatabase } from "../../../packages/db/test/postgres";
 
 describe("web runtime services", () => {
+  it("queues a fresh routing job from the pull request's current GitHub state", async () => {
+    const db = new NoAccessDb();
+    const enqueue = vi.fn(async () => ({ inserted: true, jobId: "job-recovery-1" }));
+    const request = vi.fn(async () => ({
+      data: {
+        state: "open",
+        draft: false,
+        base: { sha: "base-current" },
+        head: { sha: "head-current" },
+      },
+    }));
+    dbMocks.createJobQueue.mockReturnValueOnce({ enqueue });
+    dbMocks.findRoutingRecoveryTarget.mockResolvedValueOnce({
+      githubInstallationId: "99",
+      githubRepositoryId: "101",
+      owner: "acme",
+      repo: "api",
+      pullNumber: 7,
+    });
+    const services = createWebRuntimeServices(runtimeInput(db as never, () => new Date(), {
+      createRequester: async () => ({ request }),
+      createId: () => "run-1",
+    }));
+
+    await expect(services.rerunRouting({ decisionId: "decision-1" })).resolves.toEqual({
+      jobId: "job-recovery-1",
+    });
+
+    expect(dbMocks.findRoutingRecoveryTarget).toHaveBeenCalledWith(db, {
+      githubOrganization: "acme",
+      decisionId: "decision-1",
+    });
+    expect(request).toHaveBeenCalledWith("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
+      owner: "acme",
+      repo: "api",
+      pull_number: 7,
+    });
+    expect(enqueue).toHaveBeenCalledWith({
+      kind: "process_pull_request",
+      idempotencyKey: "routing:101:7:base-current:head-current:ready:rerun:run-1",
+      payload: {
+        kind: "process_pull_request",
+        deliveryId: "operator-rerun:run-1",
+        installationId: "99",
+        repositoryId: "101",
+        owner: "acme",
+        repo: "api",
+        pullNumber: 7,
+        baseSha: "base-current",
+        headSha: "head-current",
+        isDraft: false,
+        eventName: "operator.rerun",
+        routingKey: "routing:101:7:base-current:head-current:ready:rerun:run-1",
+      },
+    });
+  });
+
+  it("resolves a configured missing pull request from its GitHub URL", async () => {
+    const db = new NoAccessDb();
+    dbMocks.createJobQueue.mockReturnValueOnce({
+      enqueue: vi.fn(async () => ({ inserted: true, jobId: "job-recovery-2" })),
+    });
+    dbMocks.findRoutingRecoveryTarget.mockResolvedValueOnce({
+      githubInstallationId: "99",
+      githubRepositoryId: "101",
+      owner: "acme",
+      repo: "api",
+      pullNumber: 2674,
+    });
+    const services = createWebRuntimeServices(runtimeInput(db as never, () => new Date(), {
+      createRequester: async () => ({ request: async () => ({ data: {
+        state: "open", draft: true, base: { sha: "base" }, head: { sha: "head" },
+      } }) }),
+      createId: () => "run-2",
+    }));
+
+    await services.rerunRouting({ pullRequestUrl: "https://github.com/acme/api/pull/2674" });
+
+    expect(dbMocks.findRoutingRecoveryTarget).toHaveBeenCalledWith(db, {
+      githubOrganization: "acme",
+      owner: "acme",
+      repo: "api",
+      pullNumber: 2674,
+    });
+  });
+
+  it("reports a missing GitHub pull request without enqueueing work", async () => {
+    const db = new NoAccessDb();
+    const enqueue = vi.fn();
+    dbMocks.createJobQueue.mockReturnValueOnce({ enqueue });
+    dbMocks.findRoutingRecoveryTarget.mockResolvedValueOnce({
+      githubInstallationId: "99", githubRepositoryId: "101", owner: "acme", repo: "api", pullNumber: 2674,
+    });
+    const services = createWebRuntimeServices(runtimeInput(db as never, () => new Date(), {
+      createRequester: async () => ({ request: async () => { throw { status: 404 }; } }),
+    }));
+
+    const error = await services.rerunRouting({ pullRequestUrl: "https://github.com/acme/api/pull/2674" })
+      .catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(RoutingRunError);
+    expect(error).toMatchObject({ status: 404, code: "not_found" });
+    expect(enqueue).not.toHaveBeenCalled();
+  });
   it("delegates review policy acceptance to the database service", async () => {
     const db = new NoAccessDb();
     const services = createWebRuntimeServices(runtimeInput(db as never, () => new Date()));
@@ -176,6 +285,8 @@ describe("web runtime services", () => {
               id: decision.id,
               repository: "acme/api",
               pullNumber: 7,
+              headSha: null,
+              runCount: 1,
               mode: "shadow",
               action: "request_human_review",
               actionStatus: "not_applied",
@@ -233,6 +344,7 @@ describe("web runtime services", () => {
 function runtimeInput(
   db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0],
   now: () => Date,
+  overrides: Record<string, unknown> = {},
 ) {
   return {
     db,
@@ -249,6 +361,7 @@ function runtimeInput(
       webhookSecret: "hook-secret",
     },
     verifySignature: async () => {},
+    ...overrides,
   };
 }
 

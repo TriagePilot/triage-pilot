@@ -21,6 +21,50 @@ afterEach(async () => {
 });
 
 describe("mounted admin application", () => {
+  it("expands grouped routing history and queues a run from the PR group", async () => {
+    const requests: unknown[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === "/api/operations/routing-runs") {
+        requests.push(JSON.parse(String(init?.body)));
+        return Response.json({ status: "queued", jobId: "job-recovery-1" }, { status: 202 });
+      }
+      throw new Error(`unexpected request to ${String(input)}`);
+    });
+    const groupedOverview: OperationsOverview = {
+      ...emptyOverview,
+      decisions: [
+        decision({ id: "new", headSha: "head-new", riskScore: 40, createdAt: "2026-08-18T12:00:00.000Z" }),
+        decision({ id: "old", headSha: "head-old", riskScore: 20, createdAt: "2026-08-18T11:00:00.000Z" }),
+      ],
+    };
+    const refreshOverview = vi.fn(async () => {});
+    const container = document.createElement("div");
+    document.body.append(container);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<Dashboard username="admin" overview={groupedOverview} availability={emptyAvailability} onAvailabilityChange={() => {}} onOverviewRefresh={refreshOverview} onLogout={async () => {}} />);
+    });
+
+    expect(container.textContent).toContain("2 runs");
+    expect(container.textContent).not.toContain("head-old");
+    await act(async () => {
+      buttonNamed(container, "Show history")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(container.textContent).toContain("head-old");
+
+    await act(async () => {
+      buttonNamed(container, "Re-run routing")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await flushAsyncWork();
+    });
+    expect(requests).toEqual([{ decisionId: "new" }]);
+    expect(container.textContent).toContain("Routing run queued");
+    await act(async () => {
+      buttonNamed(container, "Refresh ledger")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await flushAsyncWork();
+    });
+    expect(refreshOverview).toHaveBeenCalledTimes(1);
+  });
   it("exposes exactly one uniquely named region for each scrollable table", async () => {
     const container = document.createElement("div");
     document.body.append(container);
@@ -194,3 +238,24 @@ const emptyOverview: OperationsOverview = {
 };
 
 const emptyAvailability: AvailabilityOverview = { timezone: "UTC", absences: [] };
+
+function decision(overrides: Partial<OperationsOverview["decisions"][number]>): OperationsOverview["decisions"][number] {
+  return {
+    id: "decision-1",
+    repository: "acme/api",
+    pullNumber: 7,
+    headSha: "head-1",
+    runCount: 2,
+    mode: "shadow",
+    action: "request_human_review",
+    actionStatus: "not_applied",
+    actionError: null,
+    policyCheckState: "not_started",
+    riskScore: 20,
+    riskBreakdown: null,
+    selectedReviewer: null,
+    selectedReviewers: [],
+    createdAt: "2026-08-18T11:00:00.000Z",
+    ...overrides,
+  };
+}

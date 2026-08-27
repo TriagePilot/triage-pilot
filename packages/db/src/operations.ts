@@ -17,6 +17,8 @@ export interface DecisionOverview {
   id: string;
   repository: string;
   pullNumber: number | null;
+  headSha: string | null;
+  runCount: number;
   mode: RepositoryMode;
   action: RoutingAction;
   actionStatus: ActionStatus;
@@ -103,41 +105,7 @@ export async function readOperationsOverview(
         .orderBy("repositories.owner", "asc")
         .orderBy("repositories.name", "asc")
         .execute(),
-      db
-        .selectFrom("routing_decisions")
-        .innerJoin("repositories", "repositories.id", "routing_decisions.repository_id")
-        .innerJoin("installations", "installations.id", "repositories.installation_id")
-        .select([
-          "routing_decisions.id",
-          "repositories.owner",
-          "repositories.name",
-          "routing_decisions.mode",
-          "routing_decisions.action",
-          "routing_decisions.action_status",
-          "routing_decisions.action_error",
-          "routing_decisions.policy_check_state",
-          "routing_decisions.risk_score",
-          "routing_decisions.selected_reviewer",
-          "routing_decisions.selected_reviewers",
-          "routing_decisions.details",
-          "routing_decisions.created_at",
-          sql<number | null>`case
-            when jsonb_typeof(routing_decisions.details -> 'pullNumber') = 'number'
-              and routing_decisions.details ->> 'pullNumber' ~ '^[1-9][0-9]{0,9}$'
-            then case
-              when (routing_decisions.details ->> 'pullNumber')::numeric <= 2147483647
-              then (routing_decisions.details ->> 'pullNumber')::integer
-              else null
-            end
-            else null
-          end`.as("pull_number"),
-        ])
-        .where("installations.status", "=", "active")
-        .where(configuredOrganization)
-        .orderBy("routing_decisions.created_at", "desc")
-        .orderBy("routing_decisions.id", "desc")
-        .limit(50)
-        .execute(),
+      readGroupedDecisions(db, input.githubOrganization),
       db
         .selectFrom("jobs")
         .select(["id", "last_error", "updated_at"])
@@ -189,6 +157,8 @@ export async function readOperationsOverview(
       id: decision.id,
       repository: `${decision.owner}/${decision.name}`,
       pullNumber: decision.pull_number,
+      headSha: decision.head_sha,
+      runCount: Number(decision.run_count),
       mode: decision.mode,
       action: decision.action as RoutingAction,
       actionStatus: decision.action_status,
@@ -221,6 +191,117 @@ export async function readOperationsOverview(
       lastHeartbeatAt: heartbeat?.heartbeat_at.toISOString() ?? null,
     },
   };
+}
+
+interface GroupedDecisionRow {
+  id: string;
+  owner: string;
+  name: string;
+  mode: RepositoryMode;
+  action: string;
+  action_status: ActionStatus;
+  action_error: string | null;
+  policy_check_state: string;
+  risk_score: number;
+  selected_reviewer: string | null;
+  selected_reviewers: unknown;
+  details: unknown;
+  created_at: Date;
+  pull_number: number | null;
+  head_sha: string | null;
+  run_count: string | number;
+}
+
+async function readGroupedDecisions(
+  db: Kysely<Database>,
+  githubOrganization: string,
+): Promise<GroupedDecisionRow[]> {
+  const result = await sql<GroupedDecisionRow>`
+    with normalized as (
+      select
+        routing_decisions.id,
+        routing_decisions.repository_id,
+        routing_decisions.created_at,
+        coalesce(
+          routing_decisions.pull_number,
+          case
+            when jsonb_typeof(routing_decisions.details -> 'pullNumber') = 'number'
+              and routing_decisions.details ->> 'pullNumber' ~ '^[1-9][0-9]{0,9}$'
+              and (routing_decisions.details ->> 'pullNumber')::numeric <= 2147483647
+            then (routing_decisions.details ->> 'pullNumber')::integer
+            else null
+          end
+        ) as effective_pull_number
+      from routing_decisions
+      inner join repositories on repositories.id = routing_decisions.repository_id
+      inner join installations on installations.id = repositories.installation_id
+      where installations.status = 'active'
+        and lower(installations.account_login) = lower(${githubOrganization})
+    ), identified as (
+      select
+        id,
+        repository_id,
+        created_at,
+        effective_pull_number,
+        coalesce(effective_pull_number::text, 'legacy:' || id::text) as group_identity
+      from normalized
+    ), latest_groups as (
+      select
+        repository_id,
+        group_identity,
+        max(created_at) as group_created_at,
+        count(*) as run_count
+      from identified
+      group by repository_id, group_identity
+      order by group_created_at desc, repository_id, group_identity
+      limit 50
+    ), selected_groups as (
+      select
+        *,
+        row_number() over (
+          order by group_created_at desc, repository_id, group_identity
+        ) as group_rank
+      from latest_groups
+    ), ranked_ids as (
+      select
+        identified.id,
+        identified.effective_pull_number,
+        selected_groups.run_count,
+        selected_groups.group_rank,
+        row_number() over (
+          partition by identified.repository_id, identified.group_identity
+          order by identified.created_at desc, identified.id desc
+        ) as revision_rank
+      from identified
+      inner join selected_groups
+        on selected_groups.repository_id = identified.repository_id
+       and selected_groups.group_identity = identified.group_identity
+    ), selected_ids as (
+      select * from ranked_ids where revision_rank <= 10
+    )
+    select
+      routing_decisions.id,
+      repositories.owner,
+      repositories.name,
+      routing_decisions.mode,
+      routing_decisions.action,
+      routing_decisions.action_status,
+      routing_decisions.action_error,
+      routing_decisions.policy_check_state,
+      routing_decisions.risk_score,
+      routing_decisions.selected_reviewer,
+      routing_decisions.selected_reviewers,
+      routing_decisions.details,
+      routing_decisions.created_at,
+      selected_ids.effective_pull_number as pull_number,
+      routing_decisions.head_sha,
+      selected_ids.run_count
+    from selected_ids
+    inner join routing_decisions on routing_decisions.id = selected_ids.id
+    inner join repositories on repositories.id = routing_decisions.repository_id
+    order by selected_ids.group_rank asc, selected_ids.revision_rank asc
+  `.execute(db);
+  return result.rows;
 }
 
 function normalizePolicyCheckState(value: string): PolicyCheckState {

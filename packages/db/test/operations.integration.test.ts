@@ -6,6 +6,61 @@ import { withPostgresTestDatabase } from "./postgres";
 const now = new Date("2026-08-18T12:00:00.000Z");
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", () => {
+  it("returns the latest 50 pull request groups with at most 10 revisions per group", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const installation = await db.insertInto("installations").values({
+        github_installation_id: "99", account_login: "acme", account_type: "Organization", status: "active", permissions: {},
+      }).returning("id").executeTakeFirstOrThrow();
+      const repositoryId = await seedRepository(db, installation.id, "101", "api", "shadow", "valid");
+
+      for (let revision = 1; revision <= 12; revision += 1) {
+        await db.insertInto("routing_decisions").values({
+          repository_id: repositoryId,
+          delivery_id: `grouped-${revision}`,
+          routing_key: `grouped-${revision}`,
+          pull_number: 7,
+          head_sha: `head-${revision}`,
+          mode: "shadow",
+          action: "request_human_review",
+          action_status: "not_applied",
+          risk_score: revision,
+          selected_reviewer: null,
+          selected_reviewers: JSON.stringify([]),
+          no_human_reason: null,
+          details: { pullNumber: 7 },
+          created_at: new Date(now.getTime() + revision * 1_000),
+        }).execute();
+      }
+      await db.insertInto("routing_decisions").values({
+        repository_id: repositoryId,
+        delivery_id: "other-pr",
+        routing_key: "other-pr",
+        pull_number: 8,
+        head_sha: "other-head",
+        mode: "shadow",
+        action: "policy_approval",
+        action_status: "not_applied",
+        risk_score: 1,
+        selected_reviewer: null,
+        selected_reviewers: JSON.stringify([]),
+        no_human_reason: null,
+        details: { pullNumber: 8 },
+        created_at: new Date(now.getTime() + 500),
+      }).execute();
+
+      const overview = await readOperationsOverview(db, {
+        githubOrganization: "acme", githubAppId: "123", now, heartbeatStaleAfterMs: 30_000,
+      });
+
+      expect(overview.decisions).toHaveLength(11);
+      expect(overview.decisions.slice(0, 10).map((decision) => decision.headSha)).toEqual([
+        "head-12", "head-11", "head-10", "head-9", "head-8", "head-7", "head-6", "head-5", "head-4", "head-3",
+      ]);
+      expect(overview.decisions.slice(0, 10).every((decision) => decision.runCount === 12)).toBe(true);
+      expect(overview.decisions[10]).toMatchObject({ pullNumber: 8, headSha: "other-head", runCount: 1 });
+    });
+  });
+
   it("maps mixed-case organization data with bounded ordering and decimal GitHub IDs", async () => {
     await withPostgresTestDatabase(async (db) => {
       const installation = await db
@@ -118,6 +173,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
         id: decisionIds[51],
         repository: "acme/zeta",
         pullNumber: 151,
+        headSha: null,
+        runCount: 1,
         mode: "enforce",
         action: "policy_approval",
         actionStatus: "failed",

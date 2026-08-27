@@ -43,6 +43,10 @@ describe("admin application", () => {
     expect(html).toContain("Reviewer availability");
     expect(html).toContain("Connected repositories");
     expect(html).toContain("Recent routing decisions");
+    expect(html).toContain("Run missing pull request");
+    expect(html).toContain('for="missing-pull-request-url"');
+    expect(html).toContain("Re-run routing");
+    expect(html).toContain("1 run");
     expect(html).toContain("Permanent job failures");
     expect(html).toContain("Action failures");
     expect(html).toContain("acme/api");
@@ -64,8 +68,8 @@ describe("admin application", () => {
     expect(html).toContain('aria-labelledby="job-failures-heading"');
     expect(html).toContain('aria-labelledby="action-failures-heading"');
     expect(html).toContain('aria-labelledby="availability-history-heading"');
-    expect(html.match(/<button/g)).toHaveLength(3);
-    expect(html.match(/<input/g)).toHaveLength(4);
+    expect(html.match(/<button/g)).toHaveLength(5);
+    expect(html.match(/<input/g)).toHaveLength(5);
     expect(html).not.toContain("<select");
   });
 
@@ -208,6 +212,8 @@ const overview: OperationsOverview = {
       id: "decision-1",
       repository: "acme/api",
       pullNumber: 7,
+      headSha: "head-1",
+      runCount: 1,
       mode: "shadow",
       action: "request_human_review",
       actionStatus: "not_applied",

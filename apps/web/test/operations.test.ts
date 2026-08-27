@@ -20,6 +20,8 @@ const overview = {
       id: "decision-1",
       repository: "acme/api",
       pullNumber: 7,
+      headSha: "head-1",
+      runCount: 1,
       mode: "shadow" as const,
       action: "request_human_review" as const,
       actionStatus: "not_applied" as const,
@@ -70,6 +72,54 @@ describe("operations routes", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(overview);
+  });
+
+  it("queues a routing run for an authenticated administrator", async () => {
+    const requests: unknown[] = [];
+    const { app, cookie } = await authenticatedApp({
+      rerunRouting: async (request) => {
+        requests.push(request);
+        return { jobId: "job-recovery-1" };
+      },
+    });
+
+    const response = await app.request("/api/operations/routing-runs", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify({ decisionId: "decision-1" }),
+    });
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ jobId: "job-recovery-1", status: "queued" });
+    expect(requests).toEqual([{ decisionId: "decision-1" }]);
+  });
+
+  it.each([
+    {},
+    { decisionId: "decision-1", pullRequestUrl: "https://github.com/acme/api/pull/7" },
+    { pullRequestUrl: "not a URL" },
+    { pullRequestUrl: "https://github.com/acme/api/pull/999999999999999999999999" },
+  ])("rejects an invalid routing run request %#", async (body) => {
+    const { app, cookie } = await authenticatedApp({});
+
+    const response = await app.request("/api/operations/routing-runs", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({ error: "validation_failed" });
+  });
+
+  it("requires an administrator session to queue a routing run", async () => {
+    const response = await createWebApp(buildServices()).request("/api/operations/routing-runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ decisionId: "decision-1" }),
+    });
+
+    expect(response.status).toBe(401);
   });
 
   it.each(["/api/setup/status", "/api/setup/github-app", "/api/operations/recent"])(
