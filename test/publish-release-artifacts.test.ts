@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
@@ -66,6 +66,48 @@ describe("publishReleaseArtifacts", () => {
     expect(commands).toContain(`gh release create ${tagName} --verify-tag --title TriagePilot ${version} --notes-file ${join(fixture.artifactsDir, "release-notes.md")}`);
   });
 
+  it("publishes a missing container from an extracted OCI layout directory and cleans it up", async () => {
+    const fixture = await createPublishFixture();
+    const runner = createPublishRunner(fixture, { remoteContainerExists: false });
+
+    await expect(publishReleaseArtifacts(createPublishOptions(fixture), runner.command)).resolves.toMatchObject({
+      container: "published",
+    });
+
+    const cpCall = runner.calls.find((call) => call.command === "oras" && call.args[0] === "cp");
+    expect(cpCall).toBeDefined();
+    expect(cpCall!.args[0]).toBe("cp");
+    expect(cpCall!.args[1]).toBe("--from-oci-layout-path");
+    expect(cpCall!.args[2]).not.toBe(fixture.imageTarPath);
+    expect(cpCall!.args[2]).not.toMatch(/\.oci\.tar$/);
+    expect(cpCall!.args.slice(3)).toEqual([imageName, imageName]);
+    expect(runner.copiedLayoutWasExtracted).toBe(true);
+    await expect(stat(cpCall!.args[2])).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects unsafe OCI archive paths before invoking ORAS copy", async () => {
+    const fixture = await createPublishFixture();
+    await rewriteImageArchiveWithUnsafeEntry(fixture.imageTarPath, "../escape");
+    await rewriteChecksum(fixture.artifactsDir, "container/triagepilot-0.1.0.oci.tar");
+    const runner = createPublishRunner(fixture, { remoteContainerExists: false });
+
+    await expect(publishReleaseArtifacts(createPublishOptions(fixture), runner.command)).rejects.toThrow(
+      "Unsafe OCI layout archive entry ../escape.",
+    );
+    expect(runner.calls.some((call) => call.command === "oras" && call.args[0] === "cp")).toBe(false);
+  });
+
+  it("cleans the extracted OCI layout when ORAS copy fails", async () => {
+    const fixture = await createPublishFixture();
+    const runner = createPublishRunner(fixture, { remoteContainerExists: false, failContainerCopy: true });
+
+    await expect(publishReleaseArtifacts(createPublishOptions(fixture), runner.command)).rejects.toThrow("copy failed");
+
+    const cpCall = runner.calls.find((call) => call.command === "oras" && call.args[0] === "cp");
+    expect(cpCall).toBeDefined();
+    await expect(stat(cpCall!.args[2])).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("rejects already-published artifacts when the immutable remote container digest differs", async () => {
     const fixture = await createPublishFixture();
     const runner = createPublishRunner(fixture, { remoteContainerDigest: `sha256:${"d".repeat(64)}` });
@@ -125,15 +167,22 @@ function createPublishRunner(
   options: {
     releaseExists?: boolean;
     releaseNotes?: string;
+    remoteContainerExists?: boolean;
     remoteContainerDigest?: string;
     remoteManifest?: string;
+    failContainerCopy?: boolean;
     tamperedPublishedPackage?: string;
   } = {},
 ) {
   const calls: Array<{ command: string; args: string[] }> = [];
+  let resolveCalls = 0;
+  let copiedLayoutWasExtracted = false;
 
   return {
     calls,
+    get copiedLayoutWasExtracted() {
+      return copiedLayoutWasExtracted;
+    },
     async command(command: string, args: string[], commandOptions: { allowFailure?: boolean; cwd?: string } = {}) {
       calls.push({ command, args });
       const result = await handleCommand(command, args, commandOptions);
@@ -153,6 +202,10 @@ function createPublishRunner(
       return {};
     }
     if (command === "oras" && args[0] === "resolve") {
+      resolveCalls += 1;
+      if (options.remoteContainerExists === false && resolveCalls === 1) {
+        return { exitCode: 1, stderr: "not found" };
+      }
       return { stdout: `${options.remoteContainerDigest ?? fixture.containerDigest}\n` };
     }
     if (command === "oras" && args[0] === "manifest" && args[1] === "fetch") {
@@ -162,6 +215,12 @@ function createPublishRunner(
       return { stdout: fixture.remoteConfig };
     }
     if (command === "oras" && args[0] === "cp") {
+      expect(args[1]).toBe("--from-oci-layout-path");
+      expect(args[2]).not.toBe(fixture.imageTarPath);
+      expect(await readFile(join(args[2], "oci-layout"), "utf8")).toContain("imageLayoutVersion");
+      expect(await readFile(join(args[2], "index.json"), "utf8")).toContain(fixture.containerDigest);
+      copiedLayoutWasExtracted = true;
+      if (options.failContainerCopy) return { exitCode: 1, stderr: "copy failed" };
       return {};
     }
     if (command === "npm" && args[0] === "view") {
@@ -347,7 +406,7 @@ async function createImageTarball(
           mediaType: "application/vnd.oci.image.manifest.v1+json",
           digest: `sha256:${manifestDigest}`,
           size: Buffer.byteLength(manifest),
-          annotations: { "org.opencontainers.image.ref.name": version },
+          annotations: { "org.opencontainers.image.ref.name": imageName },
         },
       ],
     }),
@@ -356,6 +415,64 @@ async function createImageTarball(
   await writeFile(join(stageRoot, "blobs", "sha256", manifestDigest), manifest);
   await execFileAsync("tar", ["-cf", path, "-C", stageRoot, "oci-layout", "index.json", "blobs"]);
   return { digest: `sha256:${manifestDigest}`, manifest, config };
+}
+
+async function rewriteImageArchiveWithUnsafeEntry(imageTarPath: string, unsafeEntryName: string) {
+  const extractedRoot = await mkdtemp(join(tmpdir(), "triagepilot-oci-extract-"));
+  cleanupPaths.push(extractedRoot);
+  await execFileAsync("tar", ["-xf", imageTarPath, "-C", extractedRoot]);
+  const entries = await collectTarEntries(extractedRoot);
+  entries.push({ name: unsafeEntryName, content: Buffer.from("unsafe\n") });
+  await writeFile(imageTarPath, createTarBuffer(entries));
+}
+
+async function rewriteChecksum(artifactsDir: string, relativePath: string) {
+  const checksumsPath = join(artifactsDir, "checksums.txt");
+  const lines = (await readFile(checksumsPath, "utf8")).trimEnd().split("\n");
+  const digest = await sha256(join(artifactsDir, relativePath));
+  await writeFile(
+    checksumsPath,
+    `${lines.map((line) => (line.endsWith(`  ${relativePath}`) ? `${digest}  ${relativePath}` : line)).join("\n")}\n`,
+  );
+}
+
+async function collectTarEntries(root: string, relativeDirectory = ""): Promise<Array<{ name: string; content: Buffer }>> {
+  const directory = relativeDirectory.length === 0 ? root : join(root, relativeDirectory);
+  const entries = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const relativePath = relativeDirectory.length === 0 ? entry.name : `${relativeDirectory}/${entry.name}`;
+    if (entry.isDirectory()) {
+      entries.push(...(await collectTarEntries(root, relativePath)));
+      continue;
+    }
+    entries.push({ name: relativePath, content: await readFile(join(root, relativePath)) });
+  }
+  return entries;
+}
+
+function createTarBuffer(entries: Array<{ name: string; content: Buffer }>) {
+  return Buffer.concat([...entries.flatMap((entry) => [createTarHeader(entry.name, entry.content.length), entry.content, tarPadding(entry.content.length)]), Buffer.alloc(1024)]);
+}
+
+function createTarHeader(name: string, size: number) {
+  const header = Buffer.alloc(512);
+  header.write(name, 0, "utf8");
+  header.write("0000644\0", 100, "ascii");
+  header.write("0000000\0", 108, "ascii");
+  header.write("0000000\0", 116, "ascii");
+  header.write(size.toString(8).padStart(11, "0") + "\0", 124, "ascii");
+  header.write("00000000000\0", 136, "ascii");
+  header.fill(" ", 148, 156);
+  header.write("0", 156, "ascii");
+  header.write("ustar\0", 257, "ascii");
+  header.write("00", 263, "ascii");
+  const checksum = [...header].reduce((sum, byte) => sum + byte, 0);
+  header.write(checksum.toString(8).padStart(6, "0") + "\0 ", 148, "ascii");
+  return header;
+}
+
+function tarPadding(size: number) {
+  return Buffer.alloc((512 - (size % 512)) % 512);
 }
 
 async function sha256(path: string) {

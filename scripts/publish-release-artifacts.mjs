@@ -3,7 +3,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { basename, join, posix, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -90,7 +90,13 @@ async function ensureContainerImage(options, command) {
     return "matched";
   }
 
-  await command("oras", ["cp", "--from-oci-layout-path", options.imageTarPath, options.imageName, options.imageName]);
+  const layoutRoot = await extractOciLayoutArchive(options.imageTarPath);
+  try {
+    const sourceRef = await readOciLayoutSourceRef(layoutRoot, options.digest);
+    await command("oras", ["cp", "--from-oci-layout-path", layoutRoot, sourceRef, options.imageName]);
+  } finally {
+    await rm(layoutRoot, { recursive: true, force: true });
+  }
   const afterPublish = await command("oras", ["resolve", options.imageName]);
   const actualDigest = afterPublish.stdout.trim();
   if (actualDigest !== options.digest) {
@@ -143,6 +149,76 @@ async function ensureNpmPackages(artifactsDir, packages, command) {
     await rm(downloadRoot, { recursive: true, force: true });
   }
   return results;
+}
+
+async function extractOciLayoutArchive(imageTarPath) {
+  validateTarEntries(await listTarEntries(imageTarPath));
+  const layoutRoot = await mkdtemp(join(tmpdir(), "triagepilot-oci-layout-"));
+  try {
+    await execFileAsync("tar", ["-xf", imageTarPath, "-C", layoutRoot], {
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    await readFile(join(layoutRoot, "oci-layout"), "utf8");
+    await readFile(join(layoutRoot, "index.json"), "utf8");
+    return layoutRoot;
+  } catch (error) {
+    await rm(layoutRoot, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function readOciLayoutSourceRef(layoutRoot, digest) {
+  const index = JSON.parse(await readFile(join(layoutRoot, "index.json"), "utf8"));
+  const descriptor = index?.manifests?.find((entry) => entry?.digest === digest);
+  const sourceRef = descriptor?.annotations?.["org.opencontainers.image.ref.name"];
+  if (typeof sourceRef !== "string" || sourceRef.length === 0) {
+    throw new Error(`Extracted OCI layout is missing source ref annotation for ${digest}.`);
+  }
+  return sourceRef;
+}
+
+async function listTarEntries(tarPath) {
+  const archive = await readFile(tarPath);
+  const entries = [];
+  for (let offset = 0; offset + 512 <= archive.length;) {
+    const header = archive.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) break;
+
+    const name = readTarString(header, 0, 100);
+    const prefix = readTarString(header, 345, 155);
+    const entryName = prefix.length > 0 ? `${prefix}/${name}` : name;
+    const size = parseTarOctal(header, 124, 12);
+    entries.push(entryName);
+    offset += 512 + Math.ceil(size / 512) * 512;
+  }
+  return entries;
+}
+
+function validateTarEntries(entries) {
+  for (const entry of entries) {
+    const normalizedEntry = entry.endsWith("/") ? entry.slice(0, -1) : entry;
+    if (normalizedEntry.length === 0 || posix.isAbsolute(normalizedEntry) || normalizedEntry.includes("\\")) {
+      throw new Error(`Unsafe OCI layout archive entry ${entry}.`);
+    }
+    const segments = normalizedEntry.split("/");
+    if (segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")) {
+      throw new Error(`Unsafe OCI layout archive entry ${entry}.`);
+    }
+  }
+}
+
+function readTarString(header, offset, length) {
+  const end = header.indexOf(0, offset);
+  const sliceEnd = end === -1 || end > offset + length ? offset + length : end;
+  return header.toString("utf8", offset, sliceEnd).trim();
+}
+
+function parseTarOctal(header, offset, length) {
+  const raw = readTarString(header, offset, length).trim();
+  if (raw.length === 0) return 0;
+  const size = Number.parseInt(raw, 8);
+  if (!Number.isFinite(size)) throw new Error("Invalid OCI layout archive entry size.");
+  return size;
 }
 
 function expectedImageValues(manifest) {
