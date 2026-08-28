@@ -7,7 +7,7 @@
   "packageManager": "pnpm@11.1.2",
   "scripts": {
     "build": "pnpm -r build",
-    "check": "pnpm -r check",
+    "check": "pnpm build && pnpm -r check",
     "check:package-boundary": "node scripts/check-package-boundary.mjs",
     "check:public-boundary": "node scripts/check-public-boundary.mjs",
     "dev:web": "pnpm --filter @triagepilot/web dev",
