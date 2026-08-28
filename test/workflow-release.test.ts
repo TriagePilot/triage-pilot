@@ -3,6 +3,19 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 describe("release workflow guardrails", () => {
+  it("declares the canonical GitHub repository in every OIDC-published npm package", async () => {
+    for (const packageDirectory of ["contracts", "config", "core", "application", "db", "provider-github", "ui"]) {
+      const manifest = JSON.parse(
+        await readFile(new URL(`../packages/${packageDirectory}/package.json`, import.meta.url), "utf8"),
+      );
+      expect(manifest.repository).toEqual({
+        type: "git",
+        url: "git+https://github.com/TriagePilot/triage-pilot.git",
+        directory: `packages/${packageDirectory}`,
+      });
+    }
+  });
+
   it("keeps full checkout history and asserts the previous-release baseline is available in CI", async () => {
     const ci = await readFile(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 

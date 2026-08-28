@@ -2,6 +2,11 @@
   "name": "@triagepilot/provider-github",
   "version": "0.1.0",
   "license": "FSL-1.1-Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TriagePilot/triage-pilot.git",
+    "directory": "packages/provider-github"
+  },
   "type": "module",
   "exports": {
     ".": {
