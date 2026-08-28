@@ -1,6 +1,7 @@
 {
   "name": "@triagepilot/contracts",
   "version": "0.1.0",
+  "license": "FSL-1.1-Apache-2.0",
   "type": "module",
   "files": ["dist", "LICENSE"],
   "main": "./dist/index.js",

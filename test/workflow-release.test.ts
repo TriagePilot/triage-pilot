@@ -28,5 +28,11 @@ describe("release workflow guardrails", () => {
     expect(release).toContain('find packages -maxdepth 1 -type f -name \'*.tgz\' -print | sort');
     expect(release).not.toContain('for tarball in artifacts/packages/*.tgz; do');
     expect(release).toContain('mapfile -t package_tarballs < <(node --input-type=module');
+    expect(release).toContain('artifact_published_at="$(node --input-type=module');
+    expect(release).toContain('artifact_future_license_effective_at="$(ARTIFACT_PUBLISHED_AT="$artifact_published_at" node --input-type=module');
+    expect(release).toContain('--build-arg "TRIAGEPILOT_GIT_COMMIT=${{ steps.release_meta.outputs.git_commit }}"');
+    expect(release).toContain('--build-arg "TRIAGEPILOT_PUBLISHED_AT=${{ steps.release_meta.outputs.artifact_published_at }}"');
+    expect(release).toContain('--build-arg "TRIAGEPILOT_FUTURE_LICENSE_EFFECTIVE_AT=${{ steps.release_meta.outputs.artifact_future_license_effective_at }}"');
+    expect(release).toContain('--published-at "${{ steps.release_meta.outputs.artifact_published_at }}"');
   });
 });

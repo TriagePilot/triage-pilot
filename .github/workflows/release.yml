@@ -30,6 +30,8 @@ jobs:
     outputs:
       version: ${{ steps.release_meta.outputs.version }}
       git_commit: ${{ steps.release_meta.outputs.git_commit }}
+      artifact_published_at: ${{ steps.release_meta.outputs.artifact_published_at }}
+      artifact_future_license_effective_at: ${{ steps.release_meta.outputs.artifact_future_license_effective_at }}
       container_digest: ${{ steps.container_meta.outputs.container_digest }}
       image_name: ${{ steps.release_meta.outputs.image_name }}
     steps:
@@ -76,9 +78,13 @@ jobs:
           fi
 
           image_repository="$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          artifact_published_at="$(node --input-type=module -e "const date = new Date(); date.setUTCMilliseconds(0); process.stdout.write(date.toISOString());")"
+          artifact_future_license_effective_at="$(ARTIFACT_PUBLISHED_AT="$artifact_published_at" node --input-type=module -e "const date = new Date(process.env.ARTIFACT_PUBLISHED_AT); date.setUTCFullYear(date.getUTCFullYear() + 2); process.stdout.write(date.toISOString());")"
           {
             echo "version=$version"
             echo "git_commit=$(git rev-parse HEAD)"
+            echo "artifact_published_at=$artifact_published_at"
+            echo "artifact_future_license_effective_at=$artifact_future_license_effective_at"
             echo "image_name=ghcr.io/${image_repository}:$version"
           } >> "$GITHUB_OUTPUT"
 
@@ -106,6 +112,9 @@ jobs:
             --load \
             --metadata-file artifacts/container/metadata.json \
             --build-arg "TRIAGEPILOT_VERSION=${{ steps.release_meta.outputs.version }}" \
+            --build-arg "TRIAGEPILOT_GIT_COMMIT=${{ steps.release_meta.outputs.git_commit }}" \
+            --build-arg "TRIAGEPILOT_PUBLISHED_AT=${{ steps.release_meta.outputs.artifact_published_at }}" \
+            --build-arg "TRIAGEPILOT_FUTURE_LICENSE_EFFECTIVE_AT=${{ steps.release_meta.outputs.artifact_future_license_effective_at }}" \
             --tag "triagepilot-release:${{ steps.release_meta.outputs.version }}" \
             .
           docker save \
@@ -193,6 +202,7 @@ jobs:
             --git-commit "${{ steps.release_meta.outputs.git_commit }}" \
             --database-migration 0006_decision_outbox.sql \
             --container-digest "${{ steps.container_meta.outputs.container_digest }}" \
+            --published-at "${{ steps.release_meta.outputs.artifact_published_at }}" \
             --oci-metadata "$GITHUB_WORKSPACE/artifacts/container/metadata.json" \
             "${manifest_args[@]}"
           cp "$snapshot_dir/artifacts/release-manifest.json" "$GITHUB_WORKSPACE/artifacts/release-manifest.json"

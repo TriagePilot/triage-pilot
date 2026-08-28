@@ -40,4 +40,10 @@ The supported public deployment is Docker Compose with `web`, exactly one `worke
 
 ## License
 
-TriagePilot is licensed under AGPL-3.0.
+Original TriagePilot code is released under the Functional Source License, Version 1.1, Apache 2.0 Future License (`FSL-1.1-Apache-2.0`). Current public versions are Fair Source and source-available, not OSI-approved open source.
+
+Organizations may use, modify, and self-host TriagePilot for their own internal use and access. During a version's FSL period, licensees may not make that version available to others in a competing commercial product or service as defined by the complete [license](LICENSE). This is not a blanket prohibition on commercial use.
+
+Each public version becomes available under Apache License 2.0 on the second anniversary of the date that version is made available. Public Git commits, packages, images, and releases can each establish availability; release manifests record artifact publication dates for provenance and do not delay a source-availability date already recorded in Git history.
+
+The public repository's product is the self-hosted application. Synchronized registry packages are public release artifacts required by the private SaaS dependency boundary; they are not a separately supported SDK, plugin platform, or community extension surface. The separate private SaaS repository remains proprietary and does not convert to Apache 2.0 under this policy.

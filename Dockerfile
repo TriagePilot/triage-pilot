@@ -22,7 +22,14 @@ RUN pnpm build
 
 FROM base AS runtime
 ARG TRIAGEPILOT_VERSION=0.1.0
-LABEL org.opencontainers.image.version=$TRIAGEPILOT_VERSION
+ARG TRIAGEPILOT_GIT_COMMIT=unknown
+ARG TRIAGEPILOT_PUBLISHED_AT=1970-01-01T00:00:00.000Z
+ARG TRIAGEPILOT_FUTURE_LICENSE_EFFECTIVE_AT=1972-01-01T00:00:00.000Z
+LABEL org.opencontainers.image.version=$TRIAGEPILOT_VERSION \
+      org.opencontainers.image.revision=$TRIAGEPILOT_GIT_COMMIT \
+      org.opencontainers.image.licenses="FSL-1.1-Apache-2.0" \
+      org.opencontainers.image.created=$TRIAGEPILOT_PUBLISHED_AT \
+      org.triagepilot.future-license-effective-at=$TRIAGEPILOT_FUTURE_LICENSE_EFFECTIVE_AT
 ENV NODE_ENV=production
 COPY --from=build /app /app
 EXPOSE 8787

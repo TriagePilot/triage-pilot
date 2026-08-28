@@ -11,8 +11,63 @@ const publishedPackages = [
   "@triagepilot/provider-github",
   "@triagepilot/ui",
 ] as const;
+const licenseId = "FSL-1.1-Apache-2.0";
+const publishedAt = "2026-08-28T10:20:30.000Z";
+const futureLicenseEffectiveAt = "2028-08-28T10:20:30.000Z";
 
 describe("validateReleaseManifest", () => {
+  it("rejects missing or inconsistent FSL licensing metadata", () => {
+    expect(() =>
+      validateReleaseManifest(
+        {
+          ...createValidManifest(),
+          license: undefined,
+        },
+        validExpectations(),
+      ),
+    ).toThrow("Release manifest license must be FSL-1.1-Apache-2.0.");
+
+    expect(() =>
+      validateReleaseManifest(
+        {
+          ...createValidManifest(),
+          license: "AGPL-3.0",
+        },
+        validExpectations(),
+      ),
+    ).toThrow("Release manifest license must be FSL-1.1-Apache-2.0.");
+
+    expect(() =>
+      validateReleaseManifest(
+        {
+          ...createValidManifest(),
+          publishedAt: "not-a-date",
+        },
+        validExpectations(),
+      ),
+    ).toThrow("Release manifest publishedAt must be an ISO timestamp.");
+
+    expect(() =>
+      validateReleaseManifest(
+        {
+          ...createValidManifest(),
+          futureLicenseEffectiveAt: "not-a-date",
+        },
+        validExpectations(),
+      ),
+    ).toThrow("Release manifest futureLicenseEffectiveAt must be an ISO timestamp.");
+
+    expect(() =>
+      validateReleaseManifest(
+        {
+          ...createValidManifest(),
+          futureLicenseEffectiveAt: "2028-08-27T10:20:30.000Z",
+        },
+        validExpectations(),
+      ),
+    ).toThrow("Release manifest futureLicenseEffectiveAt must be the second anniversary of publishedAt.");
+  });
+
   it("rejects mismatched package versions, commit shas, and migration levels", () => {
     expect(() =>
       validateReleaseManifest(
@@ -81,6 +136,9 @@ function createValidManifest() {
   return {
     version: "0.1.0",
     gitCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    license: licenseId,
+    publishedAt,
+    futureLicenseEffectiveAt,
     packages: publishedPackages.map((name, index) => ({
       name,
       version: "0.1.0",
@@ -98,6 +156,8 @@ function createValidManifest() {
     container: {
       digest: `sha256:${"4".repeat(64)}`,
       imageVersion: "0.1.0",
+      publishedAt,
+      futureLicenseEffectiveAt,
     },
   };
 }

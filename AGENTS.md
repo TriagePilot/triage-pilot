@@ -1,6 +1,6 @@
 # AGENTS.md
 
-TriagePilot is an AGPL-3.0 self-hosted GitHub pull-request routing application. This repository is the canonical development target.
+TriagePilot is an FSL-1.1-Apache-2.0 self-hosted GitHub pull-request routing application. This repository is the canonical development target for the public self-hosted product.
 
 ## Architecture
 
@@ -18,6 +18,7 @@ Read `docs/specs/2026-07-07-open-source-self-hosting-design.md` before planning 
 
 - Keep the runtime portable and container-first.
 - Do not add provider-specific deployment files, private infrastructure, hosted-service runbooks, or environment-specific secrets templates.
+- Keep external code and documentation contributions closed unless a separate contributor-rights model is approved later.
 - Preserve shadow mode as the default. Only trusted repository configuration may permit GitHub writes.
 - Add or update tests for behavior changes.
 - Use migrations for schema changes; never mutate an existing released migration.

@@ -18,6 +18,8 @@ const publishedPackages = [
   "@triagepilot/provider-github",
   "@triagepilot/ui",
 ] as const;
+const licenseId = "FSL-1.1-Apache-2.0";
+const staleAgplPattern = /AGPL-3\.0|GNU Affero General Public License|Affero GPL/i;
 
 type PublishedPackageName = (typeof publishedPackages)[number];
 
@@ -35,10 +37,12 @@ type PackedPackage = {
 
 let packDirectory: string;
 let packedPackages: PackedPackage[];
+let rootLicense: string;
 
 describe("published package artifacts", () => {
   beforeAll(async () => {
     packDirectory = await mkdtemp(join(tmpdir(), "triagepilot-artifacts-"));
+    rootLicense = await readFile(join(repoRoot, "LICENSE"), "utf8");
     await runPnpm(["build"]);
     packedPackages = [];
 
@@ -95,6 +99,8 @@ describe("published package artifacts", () => {
 
     for (const artifact of packedPackages) {
       expect(readString(artifact.packedManifest.version, `${artifact.name} version`)).toBe(rootVersion);
+      expect(readString(artifact.packedManifest.license, `${artifact.name} license`)).toBe(licenseId);
+      expect(JSON.stringify(artifact.packedManifest), `${artifact.name} packed metadata`).not.toMatch(staleAgplPattern);
       expect(artifact.packedManifest.private).not.toBe(true);
       expect(readString(artifact.packedManifest.main, `${artifact.name} main`)).toBe("./dist/index.js");
       expect(readString(artifact.packedManifest.types, `${artifact.name} types`)).toBe("./dist/index.d.ts");
@@ -103,6 +109,9 @@ describe("published package artifacts", () => {
       expect(readFiles(artifact.packedManifest.files, `${artifact.name} files`)).toContain("dist");
       expect(artifact.fileEntries).toContain("package.json");
       expect(artifact.fileEntries).toContain("LICENSE");
+      await expect(readFile(join(artifact.extractedDir, "LICENSE"), "utf8")).resolves.toBe(rootLicense);
+      expect(rootLicense, "root LICENSE").toContain(licenseId);
+      expect(rootLicense, "root LICENSE").not.toMatch(staleAgplPattern);
       expect(artifact.fileEntries.some((entry) => entry.startsWith("dist/"))).toBe(true);
       expect(artifact.fileEntries.some((entry) => entry.startsWith("src/"))).toBe(false);
 

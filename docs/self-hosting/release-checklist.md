@@ -4,6 +4,8 @@ Keep automated evidence separate from the live GitHub acceptance flow. A green C
 
 Tagged releases must start from an annotated `vX.Y.Z` tag whose target commit already carries the same `X.Y.Z` in the root `package.json`, every published package manifest, and the Dockerfile `TRIAGEPILOT_VERSION` build argument. The public release workflow builds, tests, packs, scans, and verifies one exact tag commit before publishing anything.
 
+Original TriagePilot code is released under `FSL-1.1-Apache-2.0` with the notice `Copyright 2026 Miroslav Babjak`. Each version becomes available under Apache License 2.0 on the second anniversary of the date that version is made available. Public Git commits, package publication, image publication, and release publication can each establish availability; artifact metadata records artifact publication provenance and does not redefine or delay an earlier source-availability date recorded in public Git history. Third-party components keep their own licenses, and required third-party notices must be preserved.
+
 ## Automated Evidence
 
 Run from a clean clone with a disposable PostgreSQL 16 database:
@@ -31,10 +33,15 @@ The tag workflow also produces `artifacts/release-manifest.json` and `artifacts/
 
 - `version`: the synchronized package and image version from the `vX.Y.Z` tag.
 - `gitCommit`: the exact commit built by the workflow.
+- `license`: `FSL-1.1-Apache-2.0`.
+- `publishedAt`: the artifact publication timestamp chosen once by the release workflow.
+- `futureLicenseEffectiveAt`: the Apache 2.0 artifact future-license timestamp, derived as the second anniversary of `publishedAt`.
 - `packages`: the seven public package tarballs, sorted by package name, each with its SHA-256 digest.
 - `contracts.sha256`: the digest of the packed `@triagepilot/contracts` tarball.
 - `databaseMigration.id`: the highest public migration shipped by `@triagepilot/db`.
-- `container.digest` and `container.imageVersion`: the OCI image digest and the matching image version label.
+- `container.digest`, `container.imageVersion`, `container.publishedAt`, and `container.futureLicenseEffectiveAt`: the OCI image digest, matching image version label, artifact publication timestamp, and matching artifact future-license timestamp.
+
+The image metadata must include `org.opencontainers.image.licenses=FSL-1.1-Apache-2.0`, `org.opencontainers.image.revision`, `org.opencontainers.image.created`, and `org.triagepilot.future-license-effective-at`. Release notes must repeat the license identifier, artifact publication timestamp, artifact future-license timestamp, and the source commit so operators can distinguish artifact provenance from source availability.
 
 Publish from the protected `public-release` environment only after those artifacts exist and the temporary consumer install succeeds.
 

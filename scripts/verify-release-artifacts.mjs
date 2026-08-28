@@ -5,7 +5,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { validateReleaseManifest } from "./create-release-manifest.mjs";
+import { readImageReleaseMetadata, validateReleaseManifest } from "./create-release-manifest.mjs";
 
 const defaultRepoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
@@ -33,6 +33,21 @@ export async function verifyReleaseArtifacts(options) {
 
   if (metadataDigest !== options.containerDigest) {
     throw new Error(`Buildx metadata digest ${metadataDigest} does not match ${options.containerDigest}.`);
+  }
+  const imageMetadata = await readImageReleaseMetadata(metadataPath, options.containerDigest);
+  if (imageMetadata.license !== manifest.license) {
+    throw new Error(`Buildx metadata license ${imageMetadata.license} does not match manifest license ${manifest.license}.`);
+  }
+  if (imageMetadata.revision !== manifest.gitCommit) {
+    throw new Error(`Buildx metadata revision ${imageMetadata.revision} does not match manifest git commit ${manifest.gitCommit}.`);
+  }
+  if (imageMetadata.publishedAt !== manifest.publishedAt) {
+    throw new Error(`Buildx metadata publishedAt ${imageMetadata.publishedAt} does not match manifest publishedAt ${manifest.publishedAt}.`);
+  }
+  if (imageMetadata.futureLicenseEffectiveAt !== manifest.futureLicenseEffectiveAt) {
+    throw new Error(
+      `Buildx metadata futureLicenseEffectiveAt ${imageMetadata.futureLicenseEffectiveAt} does not match manifest futureLicenseEffectiveAt ${manifest.futureLicenseEffectiveAt}.`,
+    );
   }
 
   const checksumEntries = parseChecksums(await readFile(checksumsPath, "utf8"));

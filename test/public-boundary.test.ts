@@ -18,6 +18,9 @@ const termZeta = ["secret", "-", "manager"].join("");
 const ruleAlpha = ["content", termAlpha].join(":");
 const ruleBeta = ["content", termBeta.toLowerCase()].join(":");
 const ruleGamma = ["content", termGamma].join(":");
+const ruleStaleLicense = ["content", "active-agpl"].join(":");
+const licenseId = "FSL-1.1-Apache-2.0";
+const fslTitle = "Functional Source License, Version 1.1, Apache 2.0 Future License";
 const approvedDesignPath = [
   "docs",
   "specs",
@@ -69,6 +72,41 @@ describe("scanPublicBoundary", () => {
         expect.objectContaining({ path: "docs/notes/leak.md", rule: ruleBeta }),
         expect.objectContaining({ path: "docs/notes/leak.md", rule: ruleAlpha }),
       ]),
+    );
+  });
+
+  it("requires FSL licensing and closed external-contribution governance", async () => {
+    const repoRoot = await createTrackedRepo({
+      "LICENSE": `${fslTitle}\n${licenseId}\nCopyright 2026 Miroslav Babjak\n`,
+      "README.md":
+        `${licenseId}\nTriagePilot is Fair Source and source-available. Internal self-hosted use is permitted. Each version converts to Apache 2.0 on its second anniversary. The separate SaaS repository is proprietary.\n`,
+      "CONTRIBUTING.md":
+        "External code and documentation contributions are not merged. Automated dependency updates require provenance and license-review.\n",
+      ".github/PULL_REQUEST_TEMPLATE.md": "External code and documentation contributions are not merged.\n",
+    });
+
+    await expect(scanPublicBoundary({ cwd: repoRoot })).resolves.toEqual([]);
+  });
+
+  it("rejects active stale AGPL licensing claims outside preserved historical or third-party material", async () => {
+    const previousLicense = ["A", "GPL-3.0"].join("");
+    const repoRoot = await createTrackedRepo({
+      "LICENSE": `${fslTitle}\n${licenseId}\nCopyright 2026 Miroslav Babjak\n`,
+      "README.md":
+        `${licenseId}\nTriagePilot is Fair Source and source-available. Internal self-hosted use is permitted. Each version converts to Apache 2.0 on its second anniversary. The separate SaaS repository is proprietary.\n`,
+      "CONTRIBUTING.md":
+        "External code and documentation contributions are not merged. Automated dependency updates require provenance and license-review.\n",
+      ".github/PULL_REQUEST_TEMPLATE.md": "External code and documentation contributions are not merged.\n",
+      "docs/notes/license.md": `TriagePilot is licensed as ${previousLicense}.\n`,
+      "docs/specs/2026-08-26-legacy-context.md": `Historical note: older wording said ${previousLicense}.\n`,
+    });
+
+    const violations = await scanPublicBoundary({ cwd: repoRoot });
+    expect(violations).toEqual(
+      expect.arrayContaining([expect.objectContaining({ path: "docs/notes/license.md", rule: ruleStaleLicense })]),
+    );
+    expect(violations).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ path: "docs/specs/2026-08-26-legacy-context.md" })]),
     );
   });
 });

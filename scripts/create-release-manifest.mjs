@@ -19,6 +19,11 @@ const publishedPackages = [
   "@triagepilot/ui",
 ];
 const sortedPublishedPackages = [...publishedPackages].sort((left, right) => left.localeCompare(right));
+const licenseId = "FSL-1.1-Apache-2.0";
+const imageLicenseLabel = "org.opencontainers.image.licenses";
+const imageRevisionLabel = "org.opencontainers.image.revision";
+const imagePublishedAtLabel = "org.opencontainers.image.created";
+const imageFutureLicenseEffectiveAtLabel = "org.triagepilot.future-license-effective-at";
 const digestPattern = /^sha256:[0-9a-f]{64}$/;
 const shaPattern = /^[0-9a-f]{64}$/;
 
@@ -35,6 +40,8 @@ export async function createReleaseManifest(options) {
   if (options.expectedDatabaseMigration && options.expectedDatabaseMigration !== highestMigration) {
     throw new Error(`Expected highest migration ${options.expectedDatabaseMigration}, found ${highestMigration}.`);
   }
+  const publishedAt = parseIsoTimestamp(options.publishedAt, "publishedAt");
+  const futureLicenseEffectiveAt = deriveFutureLicenseEffectiveAt(publishedAt);
 
   const packages = [];
   const seenPackages = new Set();
@@ -55,6 +62,9 @@ export async function createReleaseManifest(options) {
     if (manifest.version !== options.version) {
       throw new Error(`Package ${manifest.name} version ${manifest.version} does not match ${options.version}.`);
     }
+    if (manifest.license !== licenseId) {
+      throw new Error(`Package ${manifest.name} license ${manifest.license} does not match ${licenseId}.`);
+    }
     seenPackages.add(manifest.name);
 
     packages.push({
@@ -70,9 +80,23 @@ export async function createReleaseManifest(options) {
     throw new Error(`Missing required package tarballs: ${missingPackages.join(", ")}.`);
   }
 
-  const imageVersion = await readImageVersionFromOciMetadata(options.ociMetadataPath, options.containerDigest);
-  if (imageVersion !== options.version) {
-    throw new Error(`OCI metadata label org.opencontainers.image.version ${imageVersion} does not match ${options.version}.`);
+  const imageMetadata = await readImageReleaseMetadata(options.ociMetadataPath, options.containerDigest);
+  if (imageMetadata.version !== options.version) {
+    throw new Error(`OCI metadata label org.opencontainers.image.version ${imageMetadata.version} does not match ${options.version}.`);
+  }
+  if (imageMetadata.license !== licenseId) {
+    throw new Error(`OCI metadata label ${imageLicenseLabel} ${imageMetadata.license} does not match ${licenseId}.`);
+  }
+  if (imageMetadata.revision !== options.gitCommit) {
+    throw new Error(`OCI metadata label ${imageRevisionLabel} ${imageMetadata.revision} does not match ${options.gitCommit}.`);
+  }
+  if (imageMetadata.publishedAt !== publishedAt) {
+    throw new Error(`OCI metadata label ${imagePublishedAtLabel} ${imageMetadata.publishedAt} does not match ${publishedAt}.`);
+  }
+  if (imageMetadata.futureLicenseEffectiveAt !== futureLicenseEffectiveAt) {
+    throw new Error(
+      `OCI metadata label ${imageFutureLicenseEffectiveAtLabel} ${imageMetadata.futureLicenseEffectiveAt} does not match ${futureLicenseEffectiveAt}.`,
+    );
   }
 
   packages.sort((left, right) => left.name.localeCompare(right.name));
@@ -82,6 +106,9 @@ export async function createReleaseManifest(options) {
   const manifest = {
     version: options.version,
     gitCommit: options.gitCommit,
+    license: licenseId,
+    publishedAt,
+    futureLicenseEffectiveAt,
     packages,
     contracts: {
       package: "@triagepilot/contracts",
@@ -93,7 +120,9 @@ export async function createReleaseManifest(options) {
     },
     container: {
       digest: options.containerDigest,
-      imageVersion,
+      imageVersion: imageMetadata.version,
+      publishedAt,
+      futureLicenseEffectiveAt,
     },
   };
   validateReleaseManifest(manifest, {
@@ -119,6 +148,14 @@ export function validateReleaseManifest(manifest, expectations) {
   }
   if (manifest.gitCommit !== expectations.gitCommit) {
     throw new Error(`Release manifest git commit ${manifest.gitCommit} does not match ${expectations.gitCommit}.`);
+  }
+  if (manifest.license !== licenseId) {
+    throw new Error(`Release manifest license must be ${licenseId}.`);
+  }
+  const publishedAt = parseIsoTimestamp(manifest.publishedAt, "publishedAt");
+  const futureLicenseEffectiveAt = parseIsoTimestamp(manifest.futureLicenseEffectiveAt, "futureLicenseEffectiveAt");
+  if (futureLicenseEffectiveAt !== deriveFutureLicenseEffectiveAt(publishedAt)) {
+    throw new Error("Release manifest futureLicenseEffectiveAt must be the second anniversary of publishedAt.");
   }
 
   if (!Array.isArray(manifest.packages)) {
@@ -206,6 +243,14 @@ export function validateReleaseManifest(manifest, expectations) {
   if (manifest.container.imageVersion !== expectations.version) {
     throw new Error(`Release manifest image version ${manifest.container.imageVersion} does not match ${expectations.version}.`);
   }
+  if (manifest.container.publishedAt !== publishedAt) {
+    throw new Error(`Release manifest container publishedAt ${manifest.container.publishedAt} does not match ${publishedAt}.`);
+  }
+  if (manifest.container.futureLicenseEffectiveAt !== futureLicenseEffectiveAt) {
+    throw new Error(
+      `Release manifest container futureLicenseEffectiveAt ${manifest.container.futureLicenseEffectiveAt} does not match ${futureLicenseEffectiveAt}.`,
+    );
+  }
 
   return manifest;
 }
@@ -230,6 +275,10 @@ async function assertCleanCheckout(repoRoot, expectedCommit) {
 }
 
 export async function readImageVersionFromOciMetadata(ociMetadataPath, digest) {
+  return (await readImageReleaseMetadata(ociMetadataPath, digest)).version;
+}
+
+export async function readImageReleaseMetadata(ociMetadataPath, digest) {
   const metadata = JSON.parse(await readFile(ociMetadataPath, "utf8"));
   const candidates = Array.isArray(metadata) ? metadata : [metadata];
   const match = candidates.find((candidate) => metadataMatchesDigest(candidate, digest));
@@ -242,7 +291,23 @@ export async function readImageVersionFromOciMetadata(ociMetadataPath, digest) {
   if (typeof version !== "string" || version.length === 0) {
     throw new Error("OCI metadata is missing org.opencontainers.image.version.");
   }
-  return version;
+  const imageLicense = labels[imageLicenseLabel];
+  if (typeof imageLicense !== "string" || imageLicense.length === 0) {
+    throw new Error(`OCI metadata is missing ${imageLicenseLabel}.`);
+  }
+  const revision = labels[imageRevisionLabel];
+  if (typeof revision !== "string" || revision.length === 0) {
+    throw new Error(`OCI metadata is missing ${imageRevisionLabel}.`);
+  }
+  const publishedAt = labels[imagePublishedAtLabel];
+  if (typeof publishedAt !== "string" || publishedAt.length === 0) {
+    throw new Error(`OCI metadata is missing ${imagePublishedAtLabel}.`);
+  }
+  const futureLicenseEffectiveAt = labels[imageFutureLicenseEffectiveAtLabel];
+  if (typeof futureLicenseEffectiveAt !== "string" || futureLicenseEffectiveAt.length === 0) {
+    throw new Error(`OCI metadata is missing ${imageFutureLicenseEffectiveAtLabel}.`);
+  }
+  return { version, license: imageLicense, revision, publishedAt, futureLicenseEffectiveAt };
 }
 
 function metadataMatchesDigest(candidate, digest) {
@@ -289,6 +354,23 @@ function readLabels(candidate) {
   return {};
 }
 
+export function deriveFutureLicenseEffectiveAt(publishedAt) {
+  const date = new Date(parseIsoTimestamp(publishedAt, "publishedAt"));
+  date.setUTCFullYear(date.getUTCFullYear() + 2);
+  return date.toISOString();
+}
+
+function parseIsoTimestamp(value, label) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`Release manifest ${label} must be an ISO timestamp.`);
+  }
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime()) || date.toISOString() !== value) {
+    throw new Error(`Release manifest ${label} must be an ISO timestamp.`);
+  }
+  return value;
+}
+
 function parseArgs(argv) {
   const args = {
     packageTarballs: [],
@@ -316,6 +398,10 @@ function parseArgs(argv) {
         args.containerDigest = nextValue;
         index += 1;
         break;
+      case "--published-at":
+        args.publishedAt = nextValue;
+        index += 1;
+        break;
       case "--oci-metadata":
         args.ociMetadataPath = nextValue;
         index += 1;
@@ -333,7 +419,7 @@ function parseArgs(argv) {
     }
   }
 
-  if (!args.version || !args.gitCommit || !args.containerDigest || !args.ociMetadataPath || args.packageTarballs.length === 0) {
+  if (!args.version || !args.gitCommit || !args.containerDigest || !args.publishedAt || !args.ociMetadataPath || args.packageTarballs.length === 0) {
     throw new Error("Missing required arguments.");
   }
 

@@ -18,6 +18,9 @@ const publishedPackages = [
   "@triagepilot/provider-github",
   "@triagepilot/ui",
 ] as const;
+const licenseId = "FSL-1.1-Apache-2.0";
+const publishedAt = "2026-08-28T10:20:30.000Z";
+const futureLicenseEffectiveAt = "2028-08-28T10:20:30.000Z";
 
 const cleanupPaths: string[] = [];
 
@@ -36,6 +39,7 @@ describe("createReleaseManifest", () => {
         gitCommit: fixture.gitCommit,
         expectedDatabaseMigration: "0005_workspace_scope.sql",
         containerDigest: fixture.containerDigest,
+        publishedAt,
         ociMetadataPath: fixture.validOciMetadataPath,
         packageTarballs: fixture.validTarballs,
       }),
@@ -51,6 +55,7 @@ describe("createReleaseManifest", () => {
         version: "0.1.0",
         gitCommit: fixture.gitCommit,
         containerDigest: fixture.containerDigest,
+        publishedAt,
         ociMetadataPath: fixture.validOciMetadataPath,
         packageTarballs: fixture.validTarballs.filter((path) => !path.includes("contracts")),
       }),
@@ -62,6 +67,7 @@ describe("createReleaseManifest", () => {
         version: "0.1.0",
         gitCommit: fixture.gitCommit,
         containerDigest: fixture.containerDigest,
+        publishedAt,
         ociMetadataPath: fixture.validOciMetadataPath,
         packageTarballs: [...fixture.validTarballs, fixture.validTarballs[0]],
       }),
@@ -73,6 +79,7 @@ describe("createReleaseManifest", () => {
         version: "0.1.0",
         gitCommit: fixture.gitCommit,
         containerDigest: fixture.containerDigest,
+        publishedAt,
         ociMetadataPath: fixture.validOciMetadataPath,
         packageTarballs: [...fixture.validTarballs.slice(1), fixture.unexpectedTarball],
       }),
@@ -88,6 +95,7 @@ describe("createReleaseManifest", () => {
         version: "0.1.0",
         gitCommit: fixture.gitCommit,
         containerDigest: fixture.containerDigest,
+        publishedAt,
         ociMetadataPath: fixture.digestMismatchOciMetadataPath,
         packageTarballs: fixture.validTarballs,
       }),
@@ -99,6 +107,7 @@ describe("createReleaseManifest", () => {
         version: "0.1.0",
         gitCommit: fixture.gitCommit,
         containerDigest: fixture.containerDigest,
+        publishedAt,
         ociMetadataPath: fixture.labelMismatchOciMetadataPath,
         packageTarballs: fixture.validTarballs,
       }),
@@ -110,10 +119,35 @@ describe("createReleaseManifest", () => {
         version: "0.1.0",
         gitCommit: fixture.gitCommit,
         containerDigest: fixture.containerDigest,
+        publishedAt,
         ociMetadataPath: fixture.missingLabelOciMetadataPath,
         packageTarballs: fixture.validTarballs,
       }),
     ).rejects.toThrow("OCI metadata is missing org.opencontainers.image.version.");
+
+    await expect(
+      createReleaseManifest({
+        cwd: fixture.repoRoot,
+        version: "0.1.0",
+        gitCommit: fixture.gitCommit,
+        containerDigest: fixture.containerDigest,
+        publishedAt,
+        ociMetadataPath: fixture.licenseMismatchOciMetadataPath,
+        packageTarballs: fixture.validTarballs,
+      }),
+    ).rejects.toThrow("OCI metadata label org.opencontainers.image.licenses MIT does not match FSL-1.1-Apache-2.0.");
+
+    await expect(
+      createReleaseManifest({
+        cwd: fixture.repoRoot,
+        version: "0.1.0",
+        gitCommit: fixture.gitCommit,
+        containerDigest: fixture.containerDigest,
+        publishedAt,
+        ociMetadataPath: fixture.publishedAtMismatchOciMetadataPath,
+        packageTarballs: fixture.validTarballs,
+      }),
+    ).rejects.toThrow("OCI metadata label org.opencontainers.image.created 2026-08-27T10:20:30.000Z does not match 2026-08-28T10:20:30.000Z.");
   });
 
   it("accepts Buildx metadata files with descriptor annotations", async () => {
@@ -125,12 +159,16 @@ describe("createReleaseManifest", () => {
       gitCommit: fixture.gitCommit,
       expectedDatabaseMigration: "0006_decision_outbox.sql",
       containerDigest: fixture.containerDigest,
+      publishedAt,
       ociMetadataPath: fixture.buildxOciMetadataPath,
       packageTarballs: fixture.validTarballs,
     });
 
     expect(result.content).toContain(fixture.containerDigest);
     expect(result.content).toContain('"imageVersion": "0.1.0"');
+    expect(result.content).toContain(`"license": "${licenseId}"`);
+    expect(result.content).toContain(`"publishedAt": "${publishedAt}"`);
+    expect(result.content).toContain(`"futureLicenseEffectiveAt": "${futureLicenseEffectiveAt}"`);
   });
 
   it("writes a deterministic manifest with the derived migration and contracts digest", async () => {
@@ -142,6 +180,7 @@ describe("createReleaseManifest", () => {
       gitCommit: fixture.gitCommit,
       expectedDatabaseMigration: "0006_decision_outbox.sql",
       containerDigest: fixture.containerDigest,
+      publishedAt,
       ociMetadataPath: fixture.validOciMetadataPath,
       packageTarballs: fixture.validTarballs,
     });
@@ -152,6 +191,7 @@ describe("createReleaseManifest", () => {
       gitCommit: fixture.gitCommit,
       expectedDatabaseMigration: "0006_decision_outbox.sql",
       containerDigest: fixture.containerDigest,
+      publishedAt,
       ociMetadataPath: fixture.validOciMetadataPath,
       packageTarballs: [...fixture.validTarballs].reverse(),
     });
@@ -200,30 +240,58 @@ async function createManifestFixture() {
   const containerDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
   const validOciMetadataPath = await writeOciMetadata(join(ociRoot, "valid.json"), {
     digest: containerDigest,
+    gitCommit,
     labels: { "org.opencontainers.image.version": "0.1.0" },
   });
   const digestMismatchOciMetadataPath = await writeOciMetadata(join(ociRoot, "digest-mismatch.json"), {
     digest: "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    gitCommit,
     labels: { "org.opencontainers.image.version": "0.1.0" },
   });
   const labelMismatchOciMetadataPath = await writeOciMetadata(join(ociRoot, "label-mismatch.json"), {
     digest: containerDigest,
+    gitCommit,
     labels: { "org.opencontainers.image.version": "9.9.9" },
   });
   const missingLabelOciMetadataPath = await writeOciMetadata(join(ociRoot, "missing-label.json"), {
     digest: containerDigest,
+    gitCommit,
     labels: {},
   });
-  const buildxOciMetadataPath = await writeOciMetadata(join(ociRoot, "buildx.json"), {
-    "buildx.build.provenance": {},
-    "containerimage.descriptor": {
-      annotations: { "org.opencontainers.image.version": "0.1.0" },
-      digest: containerDigest,
-      mediaType: "application/vnd.oci.image.manifest.v1+json",
-      size: 506,
-    },
-    "containerimage.digest": containerDigest,
+  const licenseMismatchOciMetadataPath = await writeOciMetadata(join(ociRoot, "license-mismatch.json"), {
+    digest: containerDigest,
+    gitCommit,
+    labels: { "org.opencontainers.image.version": "0.1.0", "org.opencontainers.image.licenses": "MIT" },
   });
+  const publishedAtMismatchOciMetadataPath = await writeOciMetadata(join(ociRoot, "published-at-mismatch.json"), {
+    digest: containerDigest,
+    gitCommit,
+    labels: { "org.opencontainers.image.version": "0.1.0", "org.opencontainers.image.created": "2026-08-27T10:20:30.000Z" },
+  });
+  const buildxOciMetadataPath = join(ociRoot, "buildx.json");
+  await writeFile(
+    buildxOciMetadataPath,
+    JSON.stringify(
+      {
+        "buildx.build.provenance": {},
+        "containerimage.descriptor": {
+          annotations: {
+            "org.opencontainers.image.version": "0.1.0",
+            "org.opencontainers.image.licenses": licenseId,
+            "org.opencontainers.image.revision": gitCommit,
+            "org.opencontainers.image.created": publishedAt,
+            "org.triagepilot.future-license-effective-at": futureLicenseEffectiveAt,
+          },
+          digest: containerDigest,
+          mediaType: "application/vnd.oci.image.manifest.v1+json",
+          size: 506,
+        },
+        "containerimage.digest": containerDigest,
+      },
+      null,
+      2,
+    ),
+  );
 
   return {
     repoRoot,
@@ -235,6 +303,8 @@ async function createManifestFixture() {
     digestMismatchOciMetadataPath,
     labelMismatchOciMetadataPath,
     missingLabelOciMetadataPath,
+    licenseMismatchOciMetadataPath,
+    publishedAtMismatchOciMetadataPath,
     buildxOciMetadataPath,
   };
 }
@@ -247,7 +317,7 @@ async function createPackageTarball(root: string, packageName: string, version: 
   await mkdir(packageRoot, { recursive: true });
   await writeFile(
     join(packageRoot, "package.json"),
-    JSON.stringify({ name: packageName, version, main: "./dist/index.js", types: "./dist/index.d.ts" }, null, 2),
+    JSON.stringify({ name: packageName, version, license: licenseId, main: "./dist/index.js", types: "./dist/index.d.ts" }, null, 2),
   );
   await writeFile(join(packageRoot, "LICENSE"), "fixture\n");
   await mkdir(join(packageRoot, "dist"), { recursive: true });
@@ -258,7 +328,23 @@ async function createPackageTarball(root: string, packageName: string, version: 
   return tarballPath;
 }
 
-async function writeOciMetadata(path: string, metadata: { digest: string; labels: Record<string, string> }) {
-  await writeFile(path, JSON.stringify(metadata, null, 2));
+async function writeOciMetadata(path: string, metadata: { digest: string; gitCommit?: string; labels: Record<string, string> }) {
+  await writeFile(
+    path,
+    JSON.stringify(
+      {
+        digest: metadata.digest,
+        labels: {
+          "org.opencontainers.image.licenses": licenseId,
+          "org.opencontainers.image.revision": metadata.gitCommit ?? "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "org.opencontainers.image.created": publishedAt,
+          "org.triagepilot.future-license-effective-at": futureLicenseEffectiveAt,
+          ...metadata.labels,
+        },
+      },
+      null,
+      2,
+    ),
+  );
   return path;
 }

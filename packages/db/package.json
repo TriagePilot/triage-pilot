@@ -1,6 +1,7 @@
 {
   "name": "@triagepilot/db",
   "version": "0.1.0",
+  "license": "FSL-1.1-Apache-2.0",
   "type": "module",
   "files": ["dist", "migrations", "LICENSE"],
   "main": "./dist/index.js",

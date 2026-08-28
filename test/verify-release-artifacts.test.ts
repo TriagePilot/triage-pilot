@@ -20,6 +20,9 @@ const packageNames = [
   "@triagepilot/provider-github",
   "@triagepilot/ui",
 ] as const;
+const licenseId = "FSL-1.1-Apache-2.0";
+const publishedAt = "2026-08-28T10:20:30.000Z";
+const futureLicenseEffectiveAt = "2028-08-28T10:20:30.000Z";
 
 describe("verifyReleaseArtifacts", () => {
   afterAll(async () => {
@@ -273,7 +276,13 @@ async function createArtifactFixture() {
         "containerimage.digest": containerDigest,
         "containerimage.descriptor": {
           digest: containerDigest,
-          annotations: { "org.opencontainers.image.version": "0.1.0" },
+          annotations: {
+            "org.opencontainers.image.version": "0.1.0",
+            "org.opencontainers.image.licenses": licenseId,
+            "org.opencontainers.image.revision": gitCommit,
+            "org.opencontainers.image.created": publishedAt,
+            "org.triagepilot.future-license-effective-at": futureLicenseEffectiveAt,
+          },
         },
       },
       null,
@@ -286,6 +295,9 @@ async function createArtifactFixture() {
   const manifest = {
     version: "0.1.0",
     gitCommit,
+    license: licenseId,
+    publishedAt,
+    futureLicenseEffectiveAt,
     packages: packageEntries,
     contracts: {
       package: "@triagepilot/contracts",
@@ -298,6 +310,8 @@ async function createArtifactFixture() {
     container: {
       digest: containerDigest,
       imageVersion: "0.1.0",
+      publishedAt,
+      futureLicenseEffectiveAt,
     },
   };
   await writeFile(join(artifactsDir, "release-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
@@ -330,7 +344,7 @@ async function createPackageTarball(root: string, packageName: string, version: 
   await mkdir(packageRoot, { recursive: true });
   await writeFile(
     join(packageRoot, "package.json"),
-    JSON.stringify({ name: packageName, version, main: "./dist/index.js", types: "./dist/index.d.ts" }, null, 2),
+    JSON.stringify({ name: packageName, version, license: licenseId, main: "./dist/index.js", types: "./dist/index.d.ts" }, null, 2),
   );
   await writeFile(join(packageRoot, "LICENSE"), "fixture\n");
   await mkdir(join(packageRoot, "dist"), { recursive: true });
