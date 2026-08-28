@@ -45,16 +45,28 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
 
       await expect(services.fetchConfig(scopedMessage)).rejects.toThrow("repository 101 is not known");
       await expect(
-        services.persistDecision({
+        services.decisions.persistWithEvent({
+          workspaceId,
+          repository: scopedMessage.changeRequest.repository,
           deliveryId: "delivery-1",
           routingKey: "routing:101:7:base:abc123",
-          pullNumber: 7,
-          headSha: "abc123",
+          changeRequestId: "7",
+          changeRequestNumber: 7,
+          headRevision: "abc123",
           mode: "shadow",
           action: "policy_approval",
           actionStatus: "not_applied",
           riskScore: 5,
           details: {},
+          organizationConfigVersion: null,
+          repositoryConfigPath: null,
+          repositoryConfigRevision: null,
+          effectiveConfigHash: "effective-hash",
+          inheritanceMode: "defaults",
+          configDiagnostics: [],
+          configSources: {},
+        }, () => {
+          throw new Error("event factory must not run");
         }),
       ).rejects.toThrow("repository 101 is not known");
 
@@ -119,20 +131,48 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
       })(scopedMessage);
 
       await services.updateRepositoryConfigState({ configState: "valid", mode: "enforce" });
-      const decision = await services.persistDecision({
-        deliveryId: "delivery-1",
-        routingKey: "routing:101:7:base:abc123",
-        pullNumber: 7,
-        headSha: "abc123",
-        mode: "enforce",
-        action: "request_human_review",
-        actionStatus: "pending",
-        riskScore: 5,
-        selectedReviewers: ["@user-d82a5f"],
-        details: { pullNumber: 7 },
-      });
+      const decision = await services.decisions.persistWithEvent(
+        {
+          workspaceId,
+          repository: scopedMessage.changeRequest.repository,
+          deliveryId: "delivery-1",
+          routingKey: "routing:101:7:base:abc123",
+          changeRequestId: "7",
+          changeRequestNumber: 7,
+          headRevision: "abc123",
+          mode: "enforce",
+          action: "request_human_review",
+          actionStatus: "pending",
+          riskScore: 5,
+          selectedActors: ["@user-d82a5f"],
+          details: { pullNumber: 7 },
+          organizationConfigVersion: null,
+          repositoryConfigPath: null,
+          repositoryConfigRevision: null,
+          effectiveConfigHash: "effective-hash",
+          inheritanceMode: "defaults",
+          configDiagnostics: [],
+          configSources: {},
+        },
+        ({ decisionId }) => ({
+          schemaVersion: 1,
+          eventId: `decision:${decisionId}:v1`,
+          occurredAt: "2026-08-18T12:02:00.000Z",
+          workspaceId,
+          provider: "github",
+          decisionId,
+          repositoryId: "101",
+          changeRequestId: "7",
+          routingKey: "routing:101:7:base:abc123",
+          mode: "enforce",
+          action: "request_human_review",
+          riskScore: 5,
+          selectedActors: ["@user-d82a5f"],
+          effectiveConfigurationHash: "effective-hash",
+        }),
+      );
       const failedAt = new Date("2026-08-18T12:03:00.000Z");
-      await services.markActionFailed(decision.decisionId, "GitHub denied the action", failedAt);
+      await services.decisions.markActionFailed(decision.decisionId, "GitHub denied the action", failedAt);
       await services.applyDecisionActions({
         action: "request_human_review",
         decisionId: decision.decisionId,

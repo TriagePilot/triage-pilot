@@ -19,7 +19,6 @@ import {
   findLatestHumanReviewPolicyDecision,
   markActionFailed as persistActionFailed,
   markActionSucceeded as persistActionSucceeded,
-  persistDecision as persistRoutingDecision,
   persistDecisionWithEvent,
   recordPolicyCheck,
   updatePolicyCheckState,
@@ -401,26 +400,6 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
           .where("workspace_id", "=", message.workspaceId)
           .where("id", "=", await repositoryId())
           .execute();
-      },
-      async persistDecision(decision: {
-        deliveryId: string;
-        routingKey: string;
-        pullNumber: number;
-        headSha: string;
-        mode: "shadow" | "enforce";
-        action: string;
-        actionStatus: "not_applied" | "pending" | "succeeded" | "failed";
-        riskScore: number;
-        selectedReviewers?: string[];
-        noHumanReason?: string;
-        details: unknown;
-      }) {
-        const persisted = await persistRoutingDecision(input.db, message.workspaceId, {
-          repositoryId: await repositoryId(),
-          ...decision,
-        });
-        persistedDecisionId = persisted.decisionId;
-        return persisted;
       },
       markActionSucceeded: applicationServices.decisions.markActionSucceeded,
       markActionFailed: applicationServices.decisions.markActionFailed,

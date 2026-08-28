@@ -40,6 +40,12 @@ const policyMessage = {
 };
 
 describe("worker routing GitHub reads", () => {
+  it("does not expose a compatibility path that persists a decision without its event", () => {
+    const services = buildServices(message, configRequester());
+
+    expect(services).not.toHaveProperty("persistDecision");
+  });
+
   it("paginates changed files while preserving GitHub response order", async () => {
     const firstPage = [
       { filename: "src/first.ts", additions: 1, deletions: 0 },
