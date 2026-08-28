@@ -87,7 +87,7 @@ describe("verifyReleaseArtifacts", () => {
         databaseMigration: "0006_decision_outbox.sql",
         containerDigest: fixture.containerDigest,
       }),
-    ).rejects.toThrow("Saved image label org.opencontainers.image.licenses MIT does not match FSL-1.1-Apache-2.0.");
+    ).rejects.toThrow("Saved image label org.opencontainers.image.licenses MIT does not match FSL-1.1-Apache-2.0 for linux/amd64.");
   });
 
   it.each([
@@ -541,20 +541,39 @@ async function createImageTarball(
 ) {
   const stageRoot = await mkdtemp(join(tmpdir(), "triagepilot-image-stage-"));
   cleanupPaths.push(stageRoot);
-  const configContent = JSON.stringify({ config: { Labels: labels } });
-  const configDigest = createHash("sha256").update(configContent).digest("hex");
-  const manifestContent = JSON.stringify({
-    schemaVersion: 2,
-    mediaType: "application/vnd.oci.image.manifest.v1+json",
-    annotations,
-    config: {
-      mediaType: "application/vnd.oci.image.config.v1+json",
-      digest: `sha256:${configDigest}`,
-      size: Buffer.byteLength(configContent),
-    },
-    layers: [],
+  const blobs = new Map<string, string>();
+  const manifests = ["amd64", "arm64"].map((architecture) => {
+    const configContent = JSON.stringify({ architecture, os: "linux", config: { Labels: labels } });
+    const configDigest = createHash("sha256").update(configContent).digest("hex");
+    blobs.set(configDigest, configContent);
+    const manifestContent = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      annotations,
+      config: {
+        mediaType: "application/vnd.oci.image.config.v1+json",
+        digest: `sha256:${configDigest}`,
+        size: Buffer.byteLength(configContent),
+      },
+      layers: [],
+    });
+    const digest = createHash("sha256").update(manifestContent).digest("hex");
+    blobs.set(digest, manifestContent);
+    return {
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      digest: `sha256:${digest}`,
+      size: Buffer.byteLength(manifestContent),
+      platform: { architecture, os: "linux" },
+    };
   });
-  const manifestDigest = createHash("sha256").update(manifestContent).digest("hex");
+  const imageIndexContent = JSON.stringify({
+    schemaVersion: 2,
+    mediaType: "application/vnd.oci.image.index.v1+json",
+    annotations,
+    manifests,
+  });
+  const imageIndexDigest = createHash("sha256").update(imageIndexContent).digest("hex");
+  blobs.set(imageIndexDigest, imageIndexContent);
   await mkdir(join(stageRoot, "blobs", "sha256"), { recursive: true });
   await writeFile(join(stageRoot, "oci-layout"), JSON.stringify({ imageLayoutVersion: "1.0.0" }));
   await writeFile(
@@ -563,18 +582,19 @@ async function createImageTarball(
       schemaVersion: 2,
       manifests: [
         {
-          mediaType: "application/vnd.oci.image.manifest.v1+json",
-          digest: `sha256:${manifestDigest}`,
-          size: Buffer.byteLength(manifestContent),
+          mediaType: "application/vnd.oci.image.index.v1+json",
+          digest: `sha256:${imageIndexDigest}`,
+          size: Buffer.byteLength(imageIndexContent),
           annotations: { "org.opencontainers.image.ref.name": "0.1.0" },
         },
       ],
     }),
   );
-  await writeFile(join(stageRoot, "blobs", "sha256", configDigest), configContent);
-  await writeFile(join(stageRoot, "blobs", "sha256", manifestDigest), manifestContent);
+  for (const [digest, content] of blobs) {
+    await writeFile(join(stageRoot, "blobs", "sha256", digest), content);
+  }
   await writeFile(path, createTarBuffer(await collectTarEntries(stageRoot)));
-  return `sha256:${manifestDigest}`;
+  return `sha256:${imageIndexDigest}`;
 }
 
 async function collectTarEntries(root: string, relativeDirectory = ""): Promise<Array<{ name: string; content: Buffer }>> {

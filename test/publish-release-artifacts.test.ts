@@ -50,20 +50,48 @@ describe("publishReleaseArtifacts", () => {
     );
     expect(runner.calls.some((call) => call.command === "npm" && call.args[0] === "publish")).toBe(false);
     expect(runner.calls.some((call) => call.command === "gh" && call.args[1] === "create")).toBe(false);
+    expect(runner.calls.some((call) => call.command === "gh" && call.args[1] === "upload")).toBe(false);
   });
 
-  it("creates missing verified release notes before accepting already-published artifacts on retry", async () => {
+  it("publishes registry artifacts before finalizing a missing release with authoritative attachments", async () => {
     const fixture = await createPublishFixture();
-    const runner = createPublishRunner(fixture, { releaseExists: false });
+    const runner = createPublishRunner(fixture, { releaseExists: false, remoteContainerExists: false });
 
     await publishReleaseArtifacts(createPublishOptions(fixture), runner.command);
 
     const commands = runner.calls.map((call) => [call.command, ...call.args].join(" "));
     const releaseCreateIndex = commands.findIndex((command) => command.startsWith(`gh release create ${tagName}`));
-    const containerCheckIndex = commands.findIndex((command) => command.startsWith(`oras resolve ${imageName}`));
+    const containerPublishIndex = commands.findIndex((command) => command.startsWith("oras cp "));
     expect(releaseCreateIndex).toBeGreaterThanOrEqual(0);
-    expect(containerCheckIndex).toBeGreaterThan(releaseCreateIndex);
+    expect(containerPublishIndex).toBeGreaterThanOrEqual(0);
+    expect(releaseCreateIndex).toBeGreaterThan(containerPublishIndex);
     expect(commands).toContain(`gh release create ${tagName} --verify-tag --title TriagePilot ${version} --notes-file ${join(fixture.artifactsDir, "release-notes.md")}`);
+    expect(commands).toContain(`gh release upload ${tagName} ${join(fixture.artifactsDir, "release-manifest.json")}`);
+    expect(commands).toContain(`gh release upload ${tagName} ${join(fixture.artifactsDir, "checksums.txt")}`);
+  });
+
+  it("resumes an existing release by uploading only its missing authoritative attachment", async () => {
+    const fixture = await createPublishFixture();
+    const runner = createPublishRunner(fixture, { missingReleaseAsset: "checksums.txt" });
+
+    await expect(publishReleaseArtifacts(createPublishOptions(fixture), runner.command)).resolves.toMatchObject({
+      release: "matched",
+    });
+
+    const uploads = runner.calls.filter((call) => call.command === "gh" && call.args[1] === "upload");
+    expect(uploads.map((call) => call.args)).toEqual([
+      ["release", "upload", tagName, join(fixture.artifactsDir, "checksums.txt")],
+    ]);
+  });
+
+  it("rejects an existing authoritative attachment whose immutable digest differs", async () => {
+    const fixture = await createPublishFixture();
+    const runner = createPublishRunner(fixture, { tamperedReleaseAsset: "release-manifest.json" });
+
+    await expect(publishReleaseArtifacts(createPublishOptions(fixture), runner.command)).rejects.toThrow(
+      `GitHub release ${tagName} asset release-manifest.json does not match the verified artifact digest.`,
+    );
+    expect(runner.calls.some((call) => call.command === "oras")).toBe(false);
   });
 
   it("publishes a missing container from an extracted OCI layout directory and cleans it up", async () => {
@@ -210,6 +238,21 @@ describe("publishReleaseArtifacts", () => {
     expect(runner.calls.some((call) => call.command === "npm" && call.args[0] === "publish")).toBe(false);
   });
 
+  it("rejects an already-published container whose OCI index omits a required architecture", async () => {
+    const fixture = await createPublishFixture();
+    const remoteManifest = JSON.parse(fixture.remoteManifest) as {
+      manifests: Array<{ platform?: { architecture?: string } }>;
+    };
+    remoteManifest.manifests = remoteManifest.manifests.filter(
+      (descriptor) => descriptor.platform?.architecture !== "arm64",
+    );
+    const runner = createPublishRunner(fixture, { remoteManifest: JSON.stringify(remoteManifest) });
+
+    await expect(publishReleaseArtifacts(createPublishOptions(fixture), runner.command)).rejects.toThrow(
+      "Published OCI image index is missing platform linux/arm64.",
+    );
+  });
+
   it("rejects already-published npm packages when downloaded package bytes differ", async () => {
     const fixture = await createPublishFixture();
     const runner = createPublishRunner(fixture, { tamperedPublishedPackage: "@triagepilot/config" });
@@ -252,6 +295,8 @@ function createPublishRunner(
     remoteManifest?: string;
     failContainerCopy?: boolean;
     tamperedPublishedPackage?: string;
+    missingReleaseAsset?: string;
+    tamperedReleaseAsset?: string;
   } = {},
 ) {
   const calls: Array<{ command: string; args: string[] }> = [];
@@ -276,9 +321,22 @@ function createPublishRunner(
   async function handleCommand(command: string, args: string[], commandOptions: { cwd?: string }) {
     if (command === "gh" && args[0] === "release" && args[1] === "view") {
       if (options.releaseExists === false) return { exitCode: 1, stderr: "not found" };
-      return { stdout: JSON.stringify({ body: options.releaseNotes ?? fixture.releaseNotes }) };
+      const assets = [];
+      for (const name of ["release-manifest.json", "checksums.txt"]) {
+        if (options.missingReleaseAsset === name) continue;
+        assets.push({
+          name,
+          digest: options.tamperedReleaseAsset === name
+            ? `sha256:${"d".repeat(64)}`
+            : `sha256:${await sha256(join(fixture.artifactsDir, name))}`,
+        });
+      }
+      return { stdout: JSON.stringify({ body: options.releaseNotes ?? fixture.releaseNotes, assets }) };
     }
     if (command === "gh" && args[0] === "release" && args[1] === "create") {
+      return {};
+    }
+    if (command === "gh" && args[0] === "release" && args[1] === "upload") {
       return {};
     }
     if (command === "oras" && args[0] === "resolve") {
@@ -292,7 +350,10 @@ function createPublishRunner(
       return { stdout: options.remoteManifest ?? fixture.remoteManifest };
     }
     if (command === "oras" && args[0] === "manifest" && args[1] === "fetch-config") {
-      return { stdout: fixture.remoteConfig };
+      const digest = args[2]?.split("@").at(-1);
+      const config = digest === undefined ? undefined : fixture.remoteConfigs.get(digest);
+      if (config === undefined) throw new Error(`Unexpected published platform manifest ${args[2]}.`);
+      return { stdout: config };
     }
     if (command === "oras" && args[0] === "cp") {
       expect(args[1]).toBe("--from-oci-layout-path");
@@ -358,7 +419,7 @@ type PublishFixture = {
   imageTarPath: string;
   releaseNotes: string;
   remoteManifest: string;
-  remoteConfig: string;
+  remoteConfigs: Map<string, string>;
   packageTarballs: Map<string, string>;
 };
 
@@ -455,7 +516,7 @@ async function createPublishFixture(): Promise<PublishFixture> {
     imageTarPath,
     releaseNotes,
     remoteManifest: image.manifest,
-    remoteConfig: image.config,
+    remoteConfigs: image.configs,
     packageTarballs,
   };
 }
@@ -486,20 +547,41 @@ async function createImageTarball(
 ) {
   const stageRoot = await mkdtemp(join(tmpdir(), "triagepilot-image-stage-"));
   cleanupPaths.push(stageRoot);
-  const config = JSON.stringify({ config: { Labels: labels } });
-  const configDigest = createHash("sha256").update(config).digest("hex");
+  const blobs = new Map<string, string>();
+  const configs = new Map<string, string>();
+  const manifests = ["amd64", "arm64"].map((architecture) => {
+    const config = JSON.stringify({ architecture, os: "linux", config: { Labels: labels } });
+    const configDigest = createHash("sha256").update(config).digest("hex");
+    blobs.set(configDigest, config);
+    const manifest = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      annotations,
+      config: {
+        mediaType: "application/vnd.oci.image.config.v1+json",
+        digest: `sha256:${configDigest}`,
+        size: Buffer.byteLength(config),
+      },
+      layers: [],
+    });
+    const digest = createHash("sha256").update(manifest).digest("hex");
+    blobs.set(digest, manifest);
+    configs.set(`sha256:${digest}`, config);
+    return {
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      digest: `sha256:${digest}`,
+      size: Buffer.byteLength(manifest),
+      platform: { architecture, os: "linux" },
+    };
+  });
   const manifest = JSON.stringify({
     schemaVersion: 2,
-    mediaType: "application/vnd.oci.image.manifest.v1+json",
+    mediaType: "application/vnd.oci.image.index.v1+json",
     annotations,
-    config: {
-      mediaType: "application/vnd.oci.image.config.v1+json",
-      digest: `sha256:${configDigest}`,
-      size: Buffer.byteLength(config),
-    },
-    layers: [],
+    manifests,
   });
   const manifestDigest = createHash("sha256").update(manifest).digest("hex");
+  blobs.set(manifestDigest, manifest);
   await mkdir(join(stageRoot, "blobs", "sha256"), { recursive: true });
   await writeFile(join(stageRoot, "oci-layout"), JSON.stringify({ imageLayoutVersion: "1.0.0" }));
   await writeFile(
@@ -508,7 +590,7 @@ async function createImageTarball(
       schemaVersion: 2,
       manifests: [
         {
-          mediaType: "application/vnd.oci.image.manifest.v1+json",
+          mediaType: "application/vnd.oci.image.index.v1+json",
           digest: `sha256:${manifestDigest}`,
           size: Buffer.byteLength(manifest),
           annotations: { "org.opencontainers.image.ref.name": imageName },
@@ -516,10 +598,11 @@ async function createImageTarball(
       ],
     }),
   );
-  await writeFile(join(stageRoot, "blobs", "sha256", configDigest), config);
-  await writeFile(join(stageRoot, "blobs", "sha256", manifestDigest), manifest);
+  for (const [digest, content] of blobs) {
+    await writeFile(join(stageRoot, "blobs", "sha256", digest), content);
+  }
   await writeFile(path, createTarBuffer(await collectTarEntries(stageRoot)));
-  return { digest: `sha256:${manifestDigest}`, manifest, config };
+  return { digest: `sha256:${manifestDigest}`, manifest, configs };
 }
 
 async function rewriteImageArchiveWithUnsafeEntry(imageTarPath: string, unsafeEntryName: string) {

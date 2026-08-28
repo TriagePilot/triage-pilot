@@ -76,8 +76,17 @@ export async function verifyReleaseArtifacts(options) {
         `Publishable image annotation ${key} ${publishableImageMetadata.annotations[key]} does not match ${expectedImageValues[key]}.`,
       );
     }
-    if (publishableImageMetadata.labels[key] !== expectedImageValues[key]) {
-      throw new Error(`Saved image label ${key} ${publishableImageMetadata.labels[key]} does not match ${expectedImageValues[key]}.`);
+  }
+  for (const image of publishableImageMetadata.platformImages) {
+    for (const key of imageMetadataKeys) {
+      if (image.annotations[key] !== expectedImageValues[key]) {
+        throw new Error(
+          `Publishable image annotation ${key} ${image.annotations[key]} does not match ${expectedImageValues[key]} for ${image.platform}.`,
+        );
+      }
+      if (image.labels[key] !== expectedImageValues[key]) {
+        throw new Error(`Saved image label ${key} ${image.labels[key]} does not match ${expectedImageValues[key]} for ${image.platform}.`);
+      }
     }
   }
 
@@ -152,22 +161,63 @@ export async function readPublishableImageMetadata(imageTarPath, digest) {
     throw new Error(`Publishable OCI image archive does not describe digest ${digest}.`);
   }
 
-  const { stdout: manifestJson } = await execFileAsync("tar", ["-xOf", imageTarPath, blobPathForDigest(digest)], {
+  const { stdout: imageIndexJson } = await execFileAsync("tar", ["-xOf", imageTarPath, blobPathForDigest(digest)], {
     maxBuffer: 16 * 1024 * 1024,
   });
-  const manifest = JSON.parse(manifestJson);
-  const annotations = readRecord(manifest.annotations, "publishable image annotations");
-  const configDigest = manifest?.config?.digest;
-  if (typeof configDigest !== "string" || configDigest.length === 0) {
-    throw new Error("Publishable OCI image manifest is missing config digest.");
+  const imageIndex = JSON.parse(imageIndexJson);
+  const annotations = readRecord(imageIndex.annotations, "publishable image index annotations");
+  if (!Array.isArray(imageIndex.manifests)) {
+    throw new Error("Publishable OCI image index is missing manifests.");
   }
 
-  const { stdout: configJson } = await execFileAsync("tar", ["-xOf", imageTarPath, blobPathForDigest(configDigest)], {
-    maxBuffer: 16 * 1024 * 1024,
-  });
-  const config = JSON.parse(configJson);
-  const labels = readRecord(config?.config?.Labels, "saved image config labels");
-  return { annotations, labels };
+  const expectedPlatforms = new Set(["linux/amd64", "linux/arm64"]);
+  const platformImages = [];
+  for (const platformDescriptor of imageIndex.manifests) {
+    const platform = platformKey(platformDescriptor?.platform);
+    if (platform === undefined) continue;
+    if (!expectedPlatforms.has(platform)) {
+      throw new Error(`Publishable OCI image index contains unexpected platform ${platform}.`);
+    }
+    if (platformImages.some((image) => image.platform === platform)) {
+      throw new Error(`Publishable OCI image index contains duplicate platform ${platform}.`);
+    }
+    const manifestDigest = platformDescriptor?.digest;
+    if (typeof manifestDigest !== "string" || manifestDigest.length === 0) {
+      throw new Error(`Publishable OCI image index platform ${platform} is missing a manifest digest.`);
+    }
+    const { stdout: manifestJson } = await execFileAsync("tar", ["-xOf", imageTarPath, blobPathForDigest(manifestDigest)], {
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    const manifest = JSON.parse(manifestJson);
+    const manifestAnnotations = readRecord(manifest.annotations, `publishable image annotations for ${platform}`);
+    const configDigest = manifest?.config?.digest;
+    if (typeof configDigest !== "string" || configDigest.length === 0) {
+      throw new Error(`Publishable OCI image manifest for ${platform} is missing config digest.`);
+    }
+    const { stdout: configJson } = await execFileAsync("tar", ["-xOf", imageTarPath, blobPathForDigest(configDigest)], {
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    const config = JSON.parse(configJson);
+    const labels = readRecord(config?.config?.Labels, `saved image config labels for ${platform}`);
+    platformImages.push({ platform, annotations: manifestAnnotations, labels });
+  }
+
+  const actualPlatforms = new Set(platformImages.map((image) => image.platform));
+  for (const platform of expectedPlatforms) {
+    if (!actualPlatforms.has(platform)) {
+      throw new Error(`Publishable OCI image index is missing platform ${platform}.`);
+    }
+  }
+  return { annotations, platformImages };
+}
+
+function platformKey(platform) {
+  const os = platform?.os;
+  const architecture = platform?.architecture;
+  if (typeof os !== "string" || typeof architecture !== "string" || os === "unknown" || architecture === "unknown") {
+    return undefined;
+  }
+  return `${os}/${architecture}`;
 }
 
 function blobPathForDigest(digest) {

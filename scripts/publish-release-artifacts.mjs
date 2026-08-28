@@ -32,16 +32,17 @@ export async function publishReleaseArtifacts(options, command = runCommand) {
   });
   const manifest = JSON.parse(await readFile(verification.manifestPath, "utf8"));
   const releaseNotes = await readFile(verification.releaseNotesPath, "utf8");
-
-  const release = await ensureGitHubRelease(
-    {
-      tagName: options.tagName,
-      title: `TriagePilot ${options.version}`,
-      releaseNotesPath: verification.releaseNotesPath,
-      releaseNotes,
-    },
-    command,
-  );
+  const releaseOptions = {
+    tagName: options.tagName,
+    title: `TriagePilot ${options.version}`,
+    releaseNotesPath: verification.releaseNotesPath,
+    releaseNotes,
+    assets: [
+      join(artifactsDir, "release-manifest.json"),
+      join(artifactsDir, "checksums.txt"),
+    ],
+  };
+  const releasePlan = await inspectGitHubRelease(releaseOptions, command);
   const container = await ensureContainerImage(
     {
       imageName: options.imageName,
@@ -53,31 +54,65 @@ export async function publishReleaseArtifacts(options, command = runCommand) {
     command,
   );
   const packages = await ensureNpmPackages(artifactsDir, manifest.packages, command);
+  const release = await ensureGitHubRelease(releaseOptions, releasePlan, command);
 
   return { release, container, packages };
 }
 
-async function ensureGitHubRelease(options, command) {
-  const existing = await command("gh", ["release", "view", options.tagName, "--json", "body"], { allowFailure: true });
-  if (existing.exitCode === 0) {
-    const parsed = JSON.parse(existing.stdout);
-    if (parsed.body !== options.releaseNotes) {
-      throw new Error(`GitHub release ${options.tagName} already exists with notes that do not match artifacts/release-notes.md.`);
-    }
-    return "matched";
+async function inspectGitHubRelease(options, command) {
+  const existing = await command("gh", ["release", "view", options.tagName, "--json", "body,assets"], { allowFailure: true });
+  if (existing.exitCode !== 0) {
+    return { exists: false, missingAssets: options.assets };
   }
 
-  await command("gh", [
-    "release",
-    "create",
-    options.tagName,
-    "--verify-tag",
-    "--title",
-    options.title,
-    "--notes-file",
-    options.releaseNotesPath,
-  ]);
-  return "created";
+  const parsed = JSON.parse(existing.stdout);
+  if (parsed.body !== options.releaseNotes) {
+    throw new Error(`GitHub release ${options.tagName} already exists with notes that do not match artifacts/release-notes.md.`);
+  }
+  if (!Array.isArray(parsed.assets)) {
+    throw new Error(`GitHub release ${options.tagName} did not return an asset list.`);
+  }
+  const assetsByName = new Map();
+  for (const asset of parsed.assets) {
+    if (!asset || typeof asset.name !== "string" || assetsByName.has(asset.name)) {
+      throw new Error(`GitHub release ${options.tagName} returned invalid or duplicate asset metadata.`);
+    }
+    assetsByName.set(asset.name, asset);
+  }
+
+  const missingAssets = [];
+  for (const path of options.assets) {
+    const name = basename(path);
+    const remote = assetsByName.get(name);
+    if (remote === undefined) {
+      missingAssets.push(path);
+      continue;
+    }
+    const expectedDigest = `sha256:${await sha256(path)}`;
+    if (remote.digest !== expectedDigest) {
+      throw new Error(`GitHub release ${options.tagName} asset ${name} does not match the verified artifact digest.`);
+    }
+  }
+  return { exists: true, missingAssets };
+}
+
+async function ensureGitHubRelease(options, plan, command) {
+  if (!plan.exists) {
+    await command("gh", [
+      "release",
+      "create",
+      options.tagName,
+      "--verify-tag",
+      "--title",
+      options.title,
+      "--notes-file",
+      options.releaseNotesPath,
+    ]);
+  }
+  for (const asset of plan.missingAssets) {
+    await command("gh", ["release", "upload", options.tagName, asset]);
+  }
+  return plan.exists ? "matched" : "created";
 }
 
 async function ensureContainerImage(options, command) {
@@ -109,20 +144,59 @@ async function ensureContainerImage(options, command) {
 
 async function verifyPublishedImageMetadata(reference, expectedValues, command) {
   const manifestResult = await command("oras", ["manifest", "fetch", reference]);
-  const configResult = await command("oras", ["manifest", "fetch-config", reference]);
-  const manifest = JSON.parse(manifestResult.stdout);
-  const config = JSON.parse(configResult.stdout);
-  const annotations = readRecord(manifest.annotations, "published image annotations");
-  const labels = readRecord(config?.config?.Labels, "published image config labels");
+  const imageIndex = JSON.parse(manifestResult.stdout);
+  const annotations = readRecord(imageIndex.annotations, "published image index annotations");
 
   for (const key of imageMetadataKeys) {
     if (annotations[key] !== expectedValues[key]) {
       throw new Error(`Published image annotation ${key} ${annotations[key]} does not match ${expectedValues[key]}.`);
     }
-    if (labels[key] !== expectedValues[key]) {
-      throw new Error(`Published image label ${key} ${labels[key]} does not match ${expectedValues[key]}.`);
+  }
+
+  if (!Array.isArray(imageIndex.manifests)) {
+    throw new Error("Published OCI image index is missing manifests.");
+  }
+  const expectedPlatforms = new Set(["linux/amd64", "linux/arm64"]);
+  const platformDescriptors = new Map();
+  for (const descriptor of imageIndex.manifests) {
+    const platform = platformKey(descriptor?.platform);
+    if (platform === undefined) continue;
+    if (!expectedPlatforms.has(platform)) {
+      throw new Error(`Published OCI image index contains unexpected platform ${platform}.`);
+    }
+    if (platformDescriptors.has(platform)) {
+      throw new Error(`Published OCI image index contains duplicate platform ${platform}.`);
+    }
+    if (typeof descriptor.digest !== "string" || descriptor.digest.length === 0) {
+      throw new Error(`Published OCI image index platform ${platform} is missing a manifest digest.`);
+    }
+    platformDescriptors.set(platform, descriptor);
+  }
+
+  const repository = reference.slice(0, reference.lastIndexOf("@"));
+  for (const platform of expectedPlatforms) {
+    const descriptor = platformDescriptors.get(platform);
+    if (descriptor === undefined) {
+      throw new Error(`Published OCI image index is missing platform ${platform}.`);
+    }
+    const configResult = await command("oras", ["manifest", "fetch-config", `${repository}@${descriptor.digest}`]);
+    const config = JSON.parse(configResult.stdout);
+    const labels = readRecord(config?.config?.Labels, `published image config labels for ${platform}`);
+    for (const key of imageMetadataKeys) {
+      if (labels[key] !== expectedValues[key]) {
+        throw new Error(`Published image label ${key} ${labels[key]} does not match ${expectedValues[key]} for ${platform}.`);
+      }
     }
   }
+}
+
+function platformKey(platform) {
+  const os = platform?.os;
+  const architecture = platform?.architecture;
+  if (typeof os !== "string" || typeof architecture !== "string" || os === "unknown" || architecture === "unknown") {
+    return undefined;
+  }
+  return `${os}/${architecture}`;
 }
 
 async function ensureNpmPackages(artifactsDir, packages, command) {
