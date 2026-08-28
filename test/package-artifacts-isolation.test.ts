@@ -1,37 +1,28 @@
 import { execFile } from "node:child_process";
-import { access } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = resolve(import.meta.dirname, "..");
-const uiEntrypoint = join(repoRoot, "packages", "ui", "dist", "index.js");
+const rootDistSentinel = join(repoRoot, "packages", "ui", "dist", ".artifact-isolation-sentinel");
+const sentinelContent = "artifact verification must not rebuild root dist\n";
 
 describe("package artifact verification isolation", () => {
   beforeAll(async () => {
-    await runPnpm(["build"]);
-  }, 180_000);
+    await mkdir(join(repoRoot, "packages", "ui", "dist"), { recursive: true });
+    await writeFile(rootDistSentinel, sentinelContent);
+  });
 
   afterAll(async () => {
-    await runPnpm(["build"]);
-  }, 180_000);
+    await rm(rootDistSentinel, { force: true });
+  });
 
-  it("keeps the public UI entrypoint available while artifact verification runs", async () => {
-    let entrypointWasUnavailable = false;
-    const monitor = setInterval(() => {
-      void access(uiEntrypoint).catch(() => {
-        entrypointWasUnavailable = true;
-      });
-    }, 2);
+  it("preserves a root dist sentinel while artifact verification runs", async () => {
+    await runPnpm(["vitest", "run", "test/package-artifacts.test.ts"]);
 
-    try {
-      await runPnpm(["vitest", "run", "test/package-artifacts.test.ts"]);
-    } finally {
-      clearInterval(monitor);
-    }
-
-    expect(entrypointWasUnavailable).toBe(false);
+    await expect(readFile(rootDistSentinel, "utf8")).resolves.toBe(sentinelContent);
   }, 240_000);
 });
 

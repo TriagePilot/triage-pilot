@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -37,10 +38,16 @@ type PackedPackage = {
   importEntry: string;
 };
 
+type ArtifactRegistry = {
+  url: string;
+  close: () => Promise<void>;
+};
+
 let packDirectory: string;
 let packedPackages: PackedPackage[];
 let rootLicense: string;
 let artifactWorkspace: string;
+let artifactRegistry: ArtifactRegistry;
 
 describe("published package artifacts", () => {
   beforeAll(async () => {
@@ -96,9 +103,12 @@ describe("published package artifacts", () => {
         importEntry: readString(dotExport.import, `${packageName} exports["."].import`),
       });
     }
+
+    artifactRegistry = await startArtifactRegistry(packedPackages);
   }, 180_000);
 
   afterAll(async () => {
+    if (artifactRegistry) await artifactRegistry.close();
     if (packDirectory) await rm(packDirectory, { recursive: true, force: true });
     if (artifactWorkspace) await rm(artifactWorkspace, { recursive: true, force: true });
   });
@@ -183,8 +193,9 @@ describe("published package artifacts", () => {
           name: "artifact-consumer",
           private: true,
           type: "module",
-          dependencies: collectExternalConsumerDependencies(packedPackages),
+          dependencies: Object.fromEntries(publishedPackages.map((packageName) => [packageName, "0.1.0"])),
           devDependencies: {
+            "@types/node": "^22.10.2",
             "@types/react": "^18.3.18",
             "@types/react-dom": "^18.3.5",
             "react": "^18.3.1",
@@ -196,6 +207,7 @@ describe("published package artifacts", () => {
         2,
       ),
     );
+    await writeFile(join(consumerRoot, ".npmrc"), `@triagepilot:registry=${artifactRegistry.url}\n`);
     await writeFile(
       join(consumerRoot, "tsconfig.json"),
       JSON.stringify(
@@ -238,13 +250,12 @@ describe("published package artifacts", () => {
     );
 
     await runPnpm(["install"], consumerRoot);
-
-    const nodeModulesRoot = join(consumerRoot, "node_modules", "@triagepilot");
-    await mkdir(nodeModulesRoot, { recursive: true });
+    const consumerLock = await readFile(join(consumerRoot, "pnpm-lock.yaml"), "utf8");
+    expect(consumerLock).not.toMatch(/(?:^|\s)(?:workspace|link|file):/m);
+    expect(consumerLock).not.toMatch(/(?:^|[\s:{])(git\+|github:|git@)/m);
+    expect(consumerLock).not.toContain(repoRoot);
     for (const artifact of packedPackages) {
-      await cp(artifact.extractedDir, join(nodeModulesRoot, artifact.name.replace("@triagepilot/", "")), {
-        recursive: true,
-      });
+      expect(consumerLock).toContain(`${artifactRegistry.url}/tarballs/${basename(artifact.tarballPath)}`);
     }
 
     await execFileAsync(
@@ -265,20 +276,21 @@ describe("published package artifacts", () => {
       { cwd: consumerRoot, env: pnpmEnv() },
     );
 
-    await execFileAsync(
-      "pnpm",
-      ["exec", "tsc", "-p", "tsconfig.json"],
-      { cwd: consumerRoot, env: pnpmEnv(), maxBuffer: 16 * 1024 * 1024 },
-    );
+    await runPnpm(["exec", "tsc", "-p", "tsconfig.json"], consumerRoot);
   }, 180_000);
 });
 
 async function runPnpm(args: string[], cwd = repoRoot, extraEnv: Record<string, string> = {}) {
-  await execFileAsync("pnpm", args, {
-    cwd,
-    env: pnpmEnv(extraEnv),
-    maxBuffer: 16 * 1024 * 1024,
-  });
+  try {
+    await execFileAsync("pnpm", args, {
+      cwd,
+      env: pnpmEnv(extraEnv),
+      maxBuffer: 16 * 1024 * 1024,
+    });
+  } catch (error) {
+    const stderr = error && typeof error === "object" && "stderr" in error ? String(error.stderr) : "";
+    throw new Error(`pnpm ${args.join(" ")} failed\n${stderr}`, { cause: error });
+  }
 }
 
 async function createArtifactWorkspace() {
@@ -288,6 +300,59 @@ async function createArtifactWorkspace() {
     filter: (source) => ![".git", ".superpowers", "dist", "node_modules"].includes(source.split("/").at(-1) ?? ""),
   });
   return workspace;
+}
+
+async function startArtifactRegistry(artifacts: PackedPackage[]): Promise<ArtifactRegistry> {
+  const entries = await Promise.all(
+    artifacts.map(async (artifact) => ({
+      ...artifact,
+      tarball: await readFile(artifact.tarballPath),
+    })),
+  );
+  let baseUrl = "";
+  const server = createServer((request, response) => {
+    const pathname = new URL(request.url ?? "/", baseUrl).pathname;
+    const packageName = decodeURIComponent(pathname.slice(1));
+    const packageEntry = entries.find((entry) => entry.name === packageName);
+    if (packageEntry) {
+      const manifest = {
+        ...packageEntry.packedManifest,
+        dist: {
+          tarball: `${baseUrl}/tarballs/${encodeURIComponent(basename(packageEntry.tarballPath))}`,
+          shasum: createHash("sha1").update(packageEntry.tarball).digest("hex"),
+        },
+      };
+      response.setHeader("content-type", "application/json");
+      response.end(
+        JSON.stringify({
+          name: packageEntry.name,
+          "dist-tags": { latest: "0.1.0" },
+          versions: { "0.1.0": manifest },
+        }),
+      );
+      return;
+    }
+
+    const tarballName = decodeURIComponent(pathname.replace(/^\/tarballs\//, ""));
+    const tarballEntry = entries.find((entry) => basename(entry.tarballPath) === tarballName);
+    if (tarballEntry) {
+      response.setHeader("content-type", "application/octet-stream");
+      response.end(tarballEntry.tarball);
+      return;
+    }
+
+    response.statusCode = 404;
+    response.end("not found");
+  });
+  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Temporary artifact registry did not bind a TCP port.");
+  baseUrl = `http://127.0.0.1:${address.port}`;
+
+  return {
+    url: baseUrl,
+    close: () => new Promise((resolveClose, rejectClose) => server.close((error) => (error ? rejectClose(error) : resolveClose()))),
+  };
 }
 
 function pnpmEnv(extraEnv: Record<string, string> = {}) {
@@ -337,17 +402,4 @@ function collectDependencyVersions(manifest: Record<string, unknown>) {
   }
 
   return versions;
-}
-
-function collectExternalConsumerDependencies(artifacts: PackedPackage[]) {
-  const externalDependencies: Record<string, string> = {};
-
-  for (const artifact of artifacts) {
-    for (const [dependencyName, version] of Object.entries(artifact.dependencyVersions)) {
-      if (publishedPackages.includes(dependencyName as PublishedPackageName)) continue;
-      externalDependencies[dependencyName] = version;
-    }
-  }
-
-  return externalDependencies;
 }
