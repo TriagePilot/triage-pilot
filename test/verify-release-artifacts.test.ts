@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -88,6 +88,97 @@ describe("verifyReleaseArtifacts", () => {
         containerDigest: fixture.containerDigest,
       }),
     ).rejects.toThrow("Saved image label org.opencontainers.image.licenses MIT does not match FSL-1.1-Apache-2.0.");
+  });
+
+  it.each([
+    {
+      name: "traversal path",
+      archive: () => createTarBuffer([{ name: "../escape", content: Buffer.from("unsafe\n") }]),
+      message: "Unsafe OCI layout archive entry ../escape.",
+    },
+    {
+      name: "symlink",
+      archive: () => createTarBuffer([{ name: "safe-symlink", content: Buffer.alloc(0), typeflag: "2", linkname: "/outside" }]),
+      message: "Unsupported OCI layout archive entry type 2 at safe-symlink.",
+    },
+    {
+      name: "hardlink",
+      archive: () => createTarBuffer([{ name: "safe-hardlink", content: Buffer.alloc(0), typeflag: "1", linkname: "/outside" }]),
+      message: "Unsupported OCI layout archive entry type 1 at safe-hardlink.",
+    },
+    {
+      name: "GNU long-name override",
+      archive: () => createTarBuffer([{ name: "GNULongName", content: Buffer.from("../escape\0"), typeflag: "L" }]),
+      message: "Unsupported OCI layout archive entry type L at GNULongName.",
+    },
+    {
+      name: "PAX path override",
+      archive: () => createTarBuffer([{ name: "pax-header", content: Buffer.from("19 path=../escape\n"), typeflag: "x" }]),
+      message: "Unsupported OCI layout archive entry type x at pax-header.",
+    },
+    {
+      name: "sub-512-byte archive",
+      archive: () => Buffer.alloc(511),
+      message: "Malformed OCI layout archive: length is not a multiple of 512 bytes.",
+    },
+    {
+      name: "truncated declared payload",
+      archive: () => Buffer.concat([createTarHeader("oci-layout", 1_024), Buffer.alloc(512)]),
+      message: "Malformed OCI layout archive: entry oci-layout payload exceeds archive size.",
+    },
+    {
+      name: "missing end marker",
+      archive: () => createTarBuffer([{ name: "oci-layout", content: Buffer.from("{}") }], { endBlocks: 0 }),
+      message: "Malformed OCI layout archive: missing end-of-archive marker.",
+    },
+    {
+      name: "single zero end block",
+      archive: () => createTarBuffer([{ name: "oci-layout", content: Buffer.from("{}") }], { endBlocks: 1 }),
+      message: "Malformed OCI layout archive: missing second zero end-of-archive block.",
+    },
+    {
+      name: "nonzero trailing block after end marker",
+      archive: () => Buffer.concat([createTarBuffer([{ name: "oci-layout", content: Buffer.from("{}") }]), Buffer.alloc(512, 1)]),
+      message: "Malformed OCI layout archive: trailing data after end-of-archive marker.",
+    },
+    {
+      name: "nonzero payload padding",
+      archive: () => Buffer.concat([
+        createTarHeader("oci-layout", 1),
+        Buffer.from("a"),
+        Buffer.alloc(510),
+        Buffer.from("x"),
+        Buffer.alloc(1_024),
+      ]),
+      message: "Malformed OCI layout archive: entry oci-layout has nonzero padding.",
+    },
+    {
+      name: "partially invalid octal size",
+      archive: () => Buffer.concat([
+        createTarHeader("oci-layout", 1, undefined, undefined, "0000000001x\0"),
+        Buffer.from("a"),
+        Buffer.alloc(511),
+        Buffer.alloc(1_024),
+      ]),
+      message: "Invalid OCI layout archive numeric field size at oci-layout.",
+    },
+  ])("rejects publishable OCI archive with $name before invoking system tar", async ({ archive, message }) => {
+    const fixture = await createArtifactFixture();
+    await writeFile(fixture.imageTarPath, archive());
+    await rewriteChecksum(fixture.artifactsDir, "container/triagepilot-0.1.0.oci.tar");
+
+    await withSystemTarProbe(async (tarProbePath) => {
+      await expect(
+        verifyReleaseArtifacts({
+          artifactsDir: fixture.artifactsDir,
+          version: "0.1.0",
+          gitCommit: fixture.gitCommit,
+          databaseMigration: "0006_decision_outbox.sql",
+          containerDigest: fixture.containerDigest,
+        }),
+      ).rejects.toThrow(message);
+      await expect(stat(tarProbePath)).rejects.toMatchObject({ code: "ENOENT" });
+    });
   });
 
   it("fails when a package tarball's bytes no longer match the manifest digest", async () => {
@@ -390,7 +481,32 @@ async function createArtifactFixture(
   }
   await writeFile(join(artifactsDir, "checksums.txt"), `${checksumLines.join("\n")}\n`);
 
-  return { artifactsDir, gitCommit, containerDigest };
+  return { artifactsDir, gitCommit, containerDigest, imageTarPath };
+}
+
+async function rewriteChecksum(artifactsDir: string, relativePath: string) {
+  const checksumsPath = join(artifactsDir, "checksums.txt");
+  const lines = (await readFile(checksumsPath, "utf8")).trimEnd().split("\n");
+  const digest = await sha256(join(artifactsDir, relativePath));
+  await writeFile(
+    checksumsPath,
+    `${lines.map((line) => (line.endsWith(`  ${relativePath}`) ? `${digest}  ${relativePath}` : line)).join("\n")}\n`,
+  );
+}
+
+async function withSystemTarProbe(callback: (tarProbePath: string) => Promise<void>) {
+  const probeRoot = await mkdtemp(join(tmpdir(), "triagepilot-fake-tar-"));
+  cleanupPaths.push(probeRoot);
+  const tarPath = join(probeRoot, "tar");
+  await writeFile(tarPath, '#!/bin/sh\nprintf invoked > "$0.invoked"\nexit 86\n');
+  await chmod(tarPath, 0o755);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${probeRoot}:${originalPath ?? ""}`;
+  try {
+    await callback(`${tarPath}.invoked`);
+  } finally {
+    process.env.PATH = originalPath;
+  }
 }
 
 async function replaceChecksumPath(artifactsDir: string, from: string, to: string) {
@@ -475,27 +591,31 @@ async function collectTarEntries(root: string, relativeDirectory = ""): Promise<
   return entries;
 }
 
-function createTarBuffer(entries: Array<{ name: string; content: Buffer }>) {
+function createTarBuffer(
+  entries: Array<{ name: string; content: Buffer; typeflag?: string; linkname?: string; sizeField?: string }>,
+  options: { endBlocks?: number } = {},
+) {
   return Buffer.concat([
     ...entries.flatMap((entry) => [
-      createTarHeader(entry.name, entry.content.length),
+      createTarHeader(entry.name, entry.content.length, entry.typeflag, entry.linkname, entry.sizeField),
       entry.content,
       tarPadding(entry.content.length),
     ]),
-    Buffer.alloc(1024),
+    Buffer.alloc((options.endBlocks ?? 2) * 512),
   ]);
 }
 
-function createTarHeader(name: string, size: number) {
+function createTarHeader(name: string, size: number, typeflag = "0", linkname = "", sizeField?: string) {
   const header = Buffer.alloc(512);
   header.write(name, 0, "utf8");
   header.write("0000644\0", 100, "ascii");
   header.write("0000000\0", 108, "ascii");
   header.write("0000000\0", 116, "ascii");
-  header.write(size.toString(8).padStart(11, "0") + "\0", 124, "ascii");
+  header.write(sizeField ?? size.toString(8).padStart(11, "0") + "\0", 124, 12, "ascii");
   header.write("00000000000\0", 136, "ascii");
   header.fill(" ", 148, 156);
-  header.write("0", 156, "ascii");
+  header.write(typeflag, 156, "ascii");
+  header.write(linkname, 157, "utf8");
   header.write("ustar\0", 257, "ascii");
   header.write("00", 263, "ascii");
   const checksum = [...header].reduce((sum, byte) => sum + byte, 0);
