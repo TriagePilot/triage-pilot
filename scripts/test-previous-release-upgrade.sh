@@ -87,19 +87,6 @@ wait_for_health() {
   curl --fail --silent --show-error --output /dev/null --retry 30 --retry-delay 2 --retry-all-errors "$health_url"
 }
 
-wait_for_postgres() {
-  local attempt
-  for attempt in {1..30}; do
-    if compose exec -T postgres pg_isready -U triagepilot -d triagepilot >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 2
-  done
-
-  echo "Timed out waiting for postgres to accept connections" >&2
-  return 1
-}
-
 query_single_value() {
   local sql=$1
   psql_exec -tA -c "$sql" | tr -d '[:space:]'
@@ -306,8 +293,7 @@ volumes:
   postgres-data:
 EOF
 
-compose up -d postgres
-wait_for_postgres
+compose up -d --wait --wait-timeout 120 postgres
 
 psql_exec <<'SQL'
 create table schema_migrations (

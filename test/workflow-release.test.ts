@@ -23,6 +23,13 @@ describe("release workflow guardrails", () => {
     expect(ci).toContain('git cat-file -e "${TRIAGEPILOT_UPGRADE_PREVIOUS_RELEASE_COMMIT}^{commit}"');
   });
 
+  it("waits for the upgrade database healthcheck rather than its temporary initialization server", async () => {
+    const upgrade = await readFile(new URL("../scripts/test-previous-release-upgrade.sh", import.meta.url), "utf8");
+
+    expect(upgrade).toContain("compose up -d --wait --wait-timeout 120 postgres");
+    expect(upgrade).not.toContain("compose up -d postgres\nwait_for_postgres");
+  });
+
   it("pins gitleaks by digest in CI and release workflows", async () => {
     const ci = await readFile(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
     const release = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
