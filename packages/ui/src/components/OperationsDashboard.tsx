@@ -107,16 +107,15 @@ export function OperationsDashboard({
       </div>
 
       <section className="status-ledger" aria-label="Installation status">
-        <StatusNode label="Organization" value={overview.organization} />
-        <StatusNode
-          label="GitHub App"
-          value={overview.githubApp.configured ? `App ${overview.githubApp.appId}` : "Not configured"}
-          detail={
-            overview.githubApp.installationId
-              ? `Installation ${overview.githubApp.installationId}`
-              : "No active installation"
-          }
-        />
+        {overview.statuses.map((status) => (
+          <StatusNode
+            key={status.id}
+            label={status.label}
+            value={status.value}
+            {...(status.detail === undefined ? {} : { detail: status.detail })}
+            {...(status.state === undefined ? {} : { state: status.state })}
+          />
+        ))}
         <StatusNode
           label="Worker"
           value={overview.worker.available ? "Worker available" : "Worker unavailable"}
@@ -142,12 +141,12 @@ export function OperationsDashboard({
             </thead>
             <tbody>
               {overview.repositories.length === 0 ? (
-                <EmptyRow columns={3}>No repositories are connected to this installation.</EmptyRow>
+                <EmptyRow columns={3}>No repositories are connected to this provider connection.</EmptyRow>
               ) : (
                 overview.repositories.map((repository) => (
                   <tr key={repository.id}>
                     <th scope="row" className="data-text">
-                      {repository.owner}/{repository.name}
+                      <ProviderLinkValue link={repository.repository} />
                     </th>
                     <td>
                       <StatusChip value={repository.configState} />
@@ -169,7 +168,7 @@ export function OperationsDashboard({
             <caption className="sr-only">Recent routing decisions</caption>
             <thead>
               <tr>
-                <th scope="col">Pull request</th>
+                <th scope="col">Change request</th>
                 <th scope="col">Risk</th>
                 <th scope="col">Route</th>
                 <th scope="col">Human review</th>
@@ -185,18 +184,12 @@ export function OperationsDashboard({
                 overview.decisions.map((decision) => (
                   <tr key={decision.id}>
                     <th scope="row">
-                      <span className="data-text">{decision.repository}</span>
+                      <span className="data-text"><ProviderLinkValue link={decision.repository} /></span>
                       <span className="cell-detail">
-                        {decision.pullNumber === null ? (
+                        {decision.changeRequest === null ? (
                           "—"
                         ) : (
-                          <a
-                            href={`https://github.com/${decision.repository}/pull/${decision.pullNumber}`}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            #{decision.pullNumber}
-                          </a>
+                          <ProviderLinkValue link={decision.changeRequest} />
                         )}
                       </span>
                     </th>
@@ -273,7 +266,7 @@ export function OperationsDashboard({
                 ) : (
                   overview.failures.actions.map((failure) => (
                     <tr key={failure.decisionId}>
-                      <th scope="row" className="data-text">{failure.repository}</th>
+                      <th scope="row" className="data-text"><ProviderLinkValue link={failure.repository} /></th>
                       <td>{failure.error}</td>
                       <td><time dateTime={failure.failedAt}>{formatDate(failure.failedAt)}</time></td>
                     </tr>
@@ -285,6 +278,12 @@ export function OperationsDashboard({
         </DataSection>
       </div>
     </section>
+  );
+}
+
+function ProviderLinkValue({ link }: { link: { label: string; href: string | null } }) {
+  return link.href === null ? link.label : (
+    <a href={link.href} target="_blank" rel="noreferrer">{link.label}</a>
   );
 }
 

@@ -1,12 +1,11 @@
 import { Hono, type Context, type MiddlewareHandler } from "hono";
-import type { OperationsOverview } from "@triagepilot/db";
-import type { EffectiveConfigurationOverview } from "@triagepilot/ui";
+import type { EffectiveConfigurationOverview, OperationsOverview } from "@triagepilot/ui";
 
 import { requireAdminSession, type AdminSessionServices } from "./auth";
 
 export interface OperationsServices extends AdminSessionServices {
   listOperationsOverview(): Promise<OperationsOverview>;
-  readEffectiveConfiguration(): Promise<EffectiveConfigurationOverview>;
+  readEffectiveConfiguration(repositoryId: string): Promise<EffectiveConfigurationOverview>;
 }
 
 export function operationsRoutes(services: OperationsServices) {
@@ -15,9 +14,11 @@ export function operationsRoutes(services: OperationsServices) {
   app.get("/overview", requireAdminSession(services), requireBoundWorkspace(services), async (c) =>
     c.json(await services.listOperationsOverview()),
   );
-  app.get("/effective-configuration", requireAdminSession(services), requireBoundWorkspace(services), async (c) =>
-    c.json(await services.readEffectiveConfiguration()),
-  );
+  app.get("/effective-configuration", requireAdminSession(services), requireBoundWorkspace(services), async (c) => {
+    const repositoryId = c.req.query("repositoryId")?.trim();
+    if (!repositoryId) return c.json({ error: "repository_required" }, 400);
+    return c.json(await services.readEffectiveConfiguration(repositoryId));
+  });
 
   return app;
 }

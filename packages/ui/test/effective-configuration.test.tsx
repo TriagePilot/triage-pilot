@@ -29,6 +29,7 @@ describe("EffectiveConfiguration", () => {
         <EffectiveConfiguration
           api={api}
           workspace={workspace}
+          repository={repository}
           authorization={{ canViewOperations: true, canManageConfiguration: false }}
           navigation={{ hrefFor: (target) => `/ops/${target}` }}
         />,
@@ -59,13 +60,20 @@ const workspace: WorkspaceContext = {
   displayName: "Self-hosted",
 };
 
+const repository = {
+  id: "repo-1",
+  repository: { label: "acme/api", href: "https://gitlab.example/acme/api" },
+};
+
 const api: OperationsApiClient = {
   async readOperationsOverview() {
     throw new Error("not used by EffectiveConfiguration");
   },
-  async readEffectiveConfiguration(inputWorkspace) {
+  async readEffectiveConfiguration(inputWorkspace, inputRepository) {
     expect(inputWorkspace).toEqual(workspace);
+    expect(inputRepository).toEqual(repository);
     return {
+      repository: repository.repository,
       trustedPath: ".triagepilot.yml",
       trustedRevision: "trusted-base-sha",
       repositoryRevision: "trusted-base-sha",

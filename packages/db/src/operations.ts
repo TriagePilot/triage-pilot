@@ -1,5 +1,14 @@
 import { sql, type Kysely } from "kysely";
-import type { ActionStatus, RepositoryMode, RiskTier, RoutingAction, ScoreComponent, WorkspaceId } from "@triagepilot/contracts";
+import type {
+  ActionStatus,
+  ProviderConnectionId,
+  RepositoryMode,
+  RepositoryRef,
+  RiskTier,
+  RoutingAction,
+  ScoreComponent,
+  WorkspaceId,
+} from "@triagepilot/contracts";
 
 import type { Database } from "./kysely.js";
 
@@ -73,6 +82,48 @@ export interface ReadOperationsOverviewInput {
   githubAppId: string;
   now: Date;
   heartbeatStaleAfterMs: number;
+}
+
+export interface RepositoryConfigurationTarget {
+  providerConnectionId: ProviderConnectionId;
+  externalConnectionId: string;
+  repository: RepositoryRef;
+}
+
+export async function findRepositoryConfigurationTarget(
+  db: Kysely<Database>,
+  workspaceId: WorkspaceId,
+  repositoryId: string,
+): Promise<RepositoryConfigurationTarget | null> {
+  const target = await db
+    .selectFrom("repositories")
+    .innerJoin("provider_connections", (join) => join
+      .onRef("provider_connections.id", "=", "repositories.provider_connection_id")
+      .onRef("provider_connections.workspace_id", "=", "repositories.workspace_id"))
+    .select([
+      "repositories.provider",
+      "repositories.external_repository_id",
+      "repositories.owner",
+      "repositories.name",
+      "repositories.provider_connection_id",
+      "provider_connections.external_connection_id",
+    ])
+    .where("repositories.workspace_id", "=", workspaceId)
+    .where("repositories.id", "=", repositoryId)
+    .where("provider_connections.status", "=", "active")
+    .executeTakeFirst();
+
+  if (!target) return null;
+  return {
+    providerConnectionId: target.provider_connection_id,
+    externalConnectionId: target.external_connection_id,
+    repository: {
+      provider: target.provider,
+      externalId: target.external_repository_id,
+      owner: target.owner,
+      name: target.name,
+    },
+  };
 }
 
 export async function readOperationsOverview(

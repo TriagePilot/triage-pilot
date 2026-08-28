@@ -81,7 +81,7 @@ describe("admin application", () => {
       />,
     );
 
-    expect(html).toContain("No repositories are connected to this installation.");
+    expect(html).toContain("No repositories are connected to this provider connection.");
     expect(html).toContain("No routing decisions have been recorded yet.");
     expect(html).toContain("No permanent job failures.");
     expect(html).toContain("No action failures.");
@@ -108,7 +108,7 @@ describe("admin application", () => {
         username="admin"
         overview={{
           ...overview,
-          decisions: [{ ...overview.decisions[0]!, pullNumber: null }],
+          decisions: [{ ...overview.decisions[0]!, changeRequest: null }],
         }}
         onLogout={async () => {}}
       />,
@@ -186,16 +186,28 @@ describe("admin application", () => {
 });
 
 const overview: OperationsOverview = {
-  organization: "acme",
-  githubApp: { appId: "123", configured: true, installationId: "9007199254740993" },
+  statuses: [
+    { id: "workspace", label: "Organization", value: "acme" },
+    {
+      id: "connection",
+      label: "GitHub App",
+      value: "App 123",
+      detail: "Installation 9007199254740993",
+    },
+  ],
   repositories: [
-    { id: "repo-1", owner: "acme", name: "api", configState: "valid", mode: "shadow" },
+    {
+      id: "repo-1",
+      repository: { label: "acme/api", href: "https://github.com/acme/api" },
+      configState: "valid",
+      mode: "shadow",
+    },
   ],
   decisions: [
     {
       id: "decision-1",
-      repository: "acme/api",
-      pullNumber: 7,
+      repository: { label: "acme/api", href: "https://github.com/acme/api" },
+      changeRequest: { label: "#7", href: "https://github.com/acme/api/pull/7" },
       mode: "shadow",
       action: "request_human_review",
       actionStatus: "not_applied",
@@ -215,7 +227,7 @@ const overview: OperationsOverview = {
     actions: [
       {
         decisionId: "decision-2",
-        repository: "acme/api",
+        repository: { label: "acme/api", href: "https://github.com/acme/api" },
         error: "Review request rejected",
         failedAt: "2026-08-18T10:02:00.000Z",
       },

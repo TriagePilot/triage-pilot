@@ -2,6 +2,7 @@ import type {
   EffectiveConfigurationOverview,
   OperationsApiClient,
   OperationsOverview,
+  RepositoryContext,
   WorkspaceContext,
 } from "@triagepilot/ui";
 
@@ -58,9 +59,9 @@ export function createSelfHostedOperationsApi(input: {
         throw caught;
       }
     },
-    async readEffectiveConfiguration(workspace) {
+    async readEffectiveConfiguration(workspace, repository) {
       try {
-        return await fetchEffectiveConfigurationForWorkspace(workspace);
+        return await fetchEffectiveConfigurationForWorkspace(workspace, repository);
       } catch (caught) {
         notifyUnauthorized(caught, input.onUnauthorized);
         throw caught;
@@ -87,8 +88,10 @@ export async function fetchOperationsOverviewForWorkspace(
 
 export async function fetchEffectiveConfigurationForWorkspace(
   workspace: WorkspaceContext,
+  repository: RepositoryContext,
 ): Promise<EffectiveConfigurationOverview> {
-  const response = await fetch("/api/operations/effective-configuration", {
+  const query = new URLSearchParams({ repositoryId: repository.id });
+  const response = await fetch(`/api/operations/effective-configuration?${query}`, {
     credentials: "same-origin",
     headers: workspaceHeaders(workspace),
   });

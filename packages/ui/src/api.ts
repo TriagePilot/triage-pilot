@@ -18,21 +18,39 @@ export interface NavigationHost {
 
 export interface OperationsApiClient {
   readOperationsOverview(workspace: WorkspaceContext): Promise<OperationsOverview>;
-  readEffectiveConfiguration(workspace: WorkspaceContext): Promise<EffectiveConfigurationOverview>;
+  readEffectiveConfiguration(
+    workspace: WorkspaceContext,
+    repository: RepositoryContext,
+  ): Promise<EffectiveConfigurationOverview>;
 }
 
-export interface RepositoryOverview {
+export interface ProviderLink {
+  label: string;
+  href: string | null;
+}
+
+export interface RepositoryContext {
   id: string;
-  owner: string;
-  name: string;
+  repository: ProviderLink;
+}
+
+export interface ProviderStatusOverview {
+  id: string;
+  label: string;
+  value: string;
+  detail?: string;
+  state?: "neutral" | "healthy" | "failed";
+}
+
+export interface RepositoryOverview extends RepositoryContext {
   configState: string;
   mode: RepositoryMode;
 }
 
 export interface DecisionOverview {
   id: string;
-  repository: string;
-  pullNumber: number | null;
+  repository: ProviderLink;
+  changeRequest: ProviderLink | null;
   mode: RepositoryMode;
   action: RoutingAction;
   actionStatus: ActionStatus;
@@ -59,18 +77,13 @@ export interface JobFailureOverview {
 
 export interface ActionFailureOverview {
   decisionId: string;
-  repository: string;
+  repository: ProviderLink;
   error: string;
   failedAt: string;
 }
 
 export interface OperationsOverview {
-  organization: string;
-  githubApp: {
-    appId: string;
-    configured: boolean;
-    installationId: string | null;
-  };
+  statuses: ProviderStatusOverview[];
   repositories: RepositoryOverview[];
   decisions: DecisionOverview[];
   failures: {
@@ -85,6 +98,7 @@ export interface OperationsOverview {
 }
 
 export interface EffectiveConfigurationOverview {
+  repository: ProviderLink;
   trustedPath: string | null;
   trustedRevision: string;
   repositoryRevision: string | null;

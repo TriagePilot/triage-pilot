@@ -106,8 +106,9 @@ describe("mounted admin application", () => {
         });
       }
       if (input === "/api/operations/overview") return Response.json(emptyOverview);
-      if (input === "/api/operations/effective-configuration") {
+      if (input === "/api/operations/effective-configuration?repositoryId=repo-1") {
         return Response.json({
+          repository: { label: "acme/api", href: "https://github.com/acme/api" },
           trustedPath: ".triagepilot.yml",
           trustedRevision: "trusted-base-sha",
           repositoryRevision: "trusted-base-sha",
@@ -145,7 +146,7 @@ describe("mounted admin application", () => {
         },
       ],
       [
-        "/api/operations/effective-configuration",
+        "/api/operations/effective-configuration?repositoryId=repo-1",
         {
           credentials: "same-origin",
           headers: { "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
@@ -182,9 +183,18 @@ async function flushAsyncWork(): Promise<void> {
 }
 
 const emptyOverview: OperationsOverview = {
-  organization: "acme",
-  githubApp: { appId: "123", configured: true, installationId: "99" },
-  repositories: [],
+  statuses: [
+    { id: "workspace", label: "Organization", value: "acme" },
+    { id: "connection", label: "GitHub App", value: "App 123", detail: "Installation 99" },
+  ],
+  repositories: [
+    {
+      id: "repo-1",
+      repository: { label: "acme/api", href: "https://github.com/acme/api" },
+      configState: "valid",
+      mode: "shadow",
+    },
+  ],
   decisions: [],
   failures: { jobs: [], actions: [] },
   worker: { available: true, workerId: "worker-1", lastHeartbeatAt: "2026-08-18T12:00:00.000Z" },

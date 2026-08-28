@@ -48,6 +48,12 @@ describe("OperationsDashboard", () => {
     expect(
       Array.from(container.querySelectorAll("a")).some((link) => link.getAttribute("href") === "/ops/configuration"),
     ).toBe(true);
+    expect(
+      Array.from(container.querySelectorAll("a")).some(
+        (link) => link.getAttribute("href") === "https://gitlab.example/acme/api/-/merge_requests/7",
+      ),
+    ).toBe(true);
+    expect(container.innerHTML).not.toContain("github.com");
   });
 
   it("does not expose configuration editing when the host denies that capability", async () => {
@@ -81,16 +87,26 @@ const api: OperationsApiClient = {
   async readOperationsOverview(inputWorkspace) {
     expect(inputWorkspace).toEqual(workspace);
     return {
-      organization: "acme",
-      githubApp: { appId: "123", configured: true, installationId: "9007199254740993" },
+      statuses: [
+        { id: "workspace", label: "Group", value: "acme" },
+        { id: "connection", label: "GitLab application", value: "Connected", detail: "Connection 42" },
+      ],
       repositories: [
-        { id: "repo-1", owner: "acme", name: "api", configState: "valid", mode: "shadow" },
+        {
+          id: "repo-1",
+          repository: { label: "acme/api", href: "https://gitlab.example/acme/api" },
+          configState: "valid",
+          mode: "shadow",
+        },
       ],
       decisions: [
         {
           id: "decision-1",
-          repository: "acme/api",
-          pullNumber: 7,
+          repository: { label: "acme/api", href: "https://gitlab.example/acme/api" },
+          changeRequest: {
+            label: "!7",
+            href: "https://gitlab.example/acme/api/-/merge_requests/7",
+          },
           mode: "shadow",
           action: "request_human_review",
           actionStatus: "failed",
@@ -118,7 +134,7 @@ const api: OperationsApiClient = {
         actions: [
           {
             decisionId: "decision-1",
-            repository: "acme/api",
+            repository: { label: "acme/api", href: "https://gitlab.example/acme/api" },
             error: "Review request rejected",
             failedAt: "2026-08-18T10:02:00.000Z",
           },

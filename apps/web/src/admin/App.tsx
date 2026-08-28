@@ -66,7 +66,10 @@ export function App() {
     try {
       const api = createSelfHostedOperationsApi({ onUnauthorized: showSignedOut });
       const nextOverview = await api.readOperationsOverview(activeWorkspace);
-      const nextEffectiveConfiguration = await api.readEffectiveConfiguration(activeWorkspace);
+      const repository = nextOverview.repositories[0];
+      const nextEffectiveConfiguration = repository
+        ? await api.readEffectiveConfiguration(activeWorkspace, repository)
+        : null;
       setOverview(nextOverview);
       setEffectiveConfiguration(nextEffectiveConfiguration);
     } catch (caught) {
@@ -119,7 +122,7 @@ export function App() {
   if (authState === "signed-out") {
     return <LoginScreen error={error} submitting={false} onSubmit={handleLogin} />;
   }
-  if (!overview || !effectiveConfiguration || !workspace) {
+  if (!overview || !workspace) {
     if (error) {
       return (
         <main className="center-stage">
@@ -149,7 +152,7 @@ export function App() {
       username={username}
       workspace={workspace}
       overview={overview}
-      effectiveConfiguration={effectiveConfiguration}
+      {...(effectiveConfiguration === null ? {} : { effectiveConfiguration })}
       error={error}
       onLogout={handleLogout}
     />
@@ -246,6 +249,7 @@ export function Dashboard({
       : createSelfHostedOperationsApi(onUnauthorized ? { onUnauthorized } : {}),
     [overview, onUnauthorized],
   );
+  const effectiveRepository = overview?.repositories[0];
 
   return (
     <main className="shell" aria-labelledby="dashboard-title">
@@ -270,10 +274,11 @@ export function Dashboard({
           </div>
         }
       />
-      {effectiveConfiguration ? (
+      {effectiveConfiguration && effectiveRepository ? (
         <EffectiveConfiguration
           api={api}
           workspace={workspace}
+          repository={effectiveRepository}
           authorization={readOnlyAuthorization}
           navigation={localNavigation}
           initialConfiguration={effectiveConfiguration}

@@ -2,6 +2,8 @@ export {
   createInstallationRequester,
   GitHubAdapter,
   GitHubConfigurationSource,
+  githubChangeRequestUrl,
+  githubRepositoryUrl,
   type CheckRunRef,
   type PullRequestRef,
   type PullRequestReview,

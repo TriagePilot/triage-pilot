@@ -4,13 +4,14 @@ import { createWebApp } from "../src/app";
 import { buildServices } from "./helpers";
 
 const overview = {
-  organization: "acme",
-  githubApp: { appId: "123", configured: true, installationId: "99" },
+  statuses: [
+    { id: "workspace", label: "Organization", value: "acme" },
+    { id: "connection", label: "GitHub App", value: "App 123", detail: "Installation 99" },
+  ],
   repositories: [
     {
       id: "repo-1",
-      owner: "acme",
-      name: "api",
+      repository: { label: "acme/api", href: "https://github.com/acme/api" },
       configState: "valid",
       mode: "shadow" as const,
     },
@@ -18,8 +19,8 @@ const overview = {
   decisions: [
     {
       id: "decision-1",
-      repository: "acme/api",
-      pullNumber: 7,
+      repository: { label: "acme/api", href: "https://github.com/acme/api" },
+      changeRequest: { label: "#7", href: "https://github.com/acme/api/pull/7" },
       mode: "shadow" as const,
       action: "request_human_review" as const,
       actionStatus: "not_applied" as const,
@@ -130,12 +131,23 @@ describe("operations routes", () => {
       readEffectiveConfiguration: async () => effectiveConfiguration,
     });
 
-    const response = await app.request("/api/operations/effective-configuration", {
+    const response = await app.request("/api/operations/effective-configuration?repositoryId=repo-1", {
       headers: { cookie, "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
     });
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(effectiveConfiguration);
+  });
+
+  it("requires effective-configuration queries to name a repository", async () => {
+    const { app, cookie } = await authenticatedApp();
+
+    const response = await app.request("/api/operations/effective-configuration", {
+      headers: { cookie, "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "repository_required" });
   });
 
   it.each(["/api/setup/status", "/api/setup/github-app", "/api/operations/recent"])(
@@ -151,6 +163,7 @@ describe("operations routes", () => {
 });
 
 const effectiveConfiguration = {
+  repository: { label: "acme/api", href: "https://github.com/acme/api" },
   trustedPath: ".triagepilot.yml",
   trustedRevision: "trusted-base-sha",
   repositoryRevision: "trusted-base-sha",

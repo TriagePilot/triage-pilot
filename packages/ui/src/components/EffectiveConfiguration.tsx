@@ -5,12 +5,14 @@ import type {
   EffectiveConfigurationOverview,
   NavigationHost,
   OperationsApiClient,
+  RepositoryContext,
   WorkspaceContext,
 } from "../api.js";
 
 export interface EffectiveConfigurationProps {
   api: OperationsApiClient;
   workspace: WorkspaceContext;
+  repository: RepositoryContext;
   authorization: AuthorizationCapabilities;
   navigation: NavigationHost;
   initialConfiguration?: EffectiveConfigurationOverview;
@@ -24,6 +26,7 @@ type LoadState =
 export function EffectiveConfiguration({
   api,
   workspace,
+  repository,
   authorization,
   navigation,
   initialConfiguration,
@@ -39,7 +42,7 @@ export function EffectiveConfiguration({
     }
     setState({ status: "loading" });
     try {
-      setState({ status: "ready", configuration: await api.readEffectiveConfiguration(workspace) });
+      setState({ status: "ready", configuration: await api.readEffectiveConfiguration(workspace, repository) });
     } catch (caught) {
       setState({ status: "failed", message: messageFrom(caught, "Could not load the effective configuration.") });
     }
@@ -51,7 +54,7 @@ export function EffectiveConfiguration({
       return;
     }
     void loadConfiguration();
-  }, [api, workspace.id, authorization.canViewOperations, initialConfiguration]);
+  }, [api, workspace.id, repository.id, authorization.canViewOperations, initialConfiguration]);
 
   if (state.status === "loading") {
     return (
@@ -92,6 +95,10 @@ export function EffectiveConfiguration({
         <div>
           <dt>Workspace</dt>
           <dd>{workspace.displayName}</dd>
+        </div>
+        <div>
+          <dt>Repository</dt>
+          <dd><ProviderLinkValue link={configuration.repository} /></dd>
         </div>
         <div>
           <dt>Trusted path</dt>
@@ -143,6 +150,12 @@ export function EffectiveConfiguration({
         </table>
       </div>
     </section>
+  );
+}
+
+function ProviderLinkValue({ link }: { link: EffectiveConfigurationOverview["repository"] }) {
+  return link.href === null ? link.label : (
+    <a href={link.href} target="_blank" rel="noreferrer">{link.label}</a>
   );
 }
 

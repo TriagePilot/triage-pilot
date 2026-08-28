@@ -43,11 +43,13 @@ export {
 } from "./deliveries.js";
 export { readWorkerHeartbeat, updateWorkerHeartbeat, type WorkerHeartbeat } from "./heartbeat.js";
 export {
+  findRepositoryConfigurationTarget,
   readOperationsOverview,
   type ActionFailureOverview,
   type DecisionOverview,
   type JobFailureOverview,
   type OperationsOverview,
+  type RepositoryConfigurationTarget,
   type ReadOperationsOverviewInput,
   type RepositoryOverview,
 } from "./operations.js";

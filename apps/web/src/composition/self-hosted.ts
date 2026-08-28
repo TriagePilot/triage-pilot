@@ -9,6 +9,11 @@ import {
 } from "@triagepilot/db";
 import type { EffectiveConfigurationOverview, EffectiveConfigurationValue } from "@triagepilot/ui";
 import {
+  createInstallationRequester,
+  GitHubAdapter,
+  GitHubConfigurationSource,
+  GitHubCredentialProvider,
+  githubRepositoryUrl,
   normalizeGitHubWebhook,
   verifyGitHubSignature,
 } from "@triagepilot/provider-github";
@@ -37,7 +42,14 @@ export interface SelfHostedWebComposition {
   close(): Promise<void>;
 }
 
-export async function createSelfHostedWebComposition(env: WebRuntimeEnv): Promise<SelfHostedWebComposition> {
+export interface SelfHostedWebCompositionDependencies {
+  createRequester?: typeof createInstallationRequester;
+}
+
+export async function createSelfHostedWebComposition(
+  env: WebRuntimeEnv,
+  dependencies: SelfHostedWebCompositionDependencies = {},
+): Promise<SelfHostedWebComposition> {
   const db = createDatabase(env.databaseUrl);
   const workspaceId = await ensureLocalWorkspace(db);
   const localRepositories = createWorkspaceRepositories(db, workspaceId);
@@ -56,7 +68,13 @@ export async function createSelfHostedWebComposition(env: WebRuntimeEnv): Promis
     github: env.github,
     verifySignature: verifyGitHubSignature,
     normalizeGitHubWebhook,
-    readEffectiveConfiguration: () => readSelfHostedEffectiveConfiguration(configuration),
+    readEffectiveConfiguration: (repositoryId) => readSelfHostedEffectiveConfiguration({
+      workspaceId,
+      repositoryId,
+      repositories: localRepositories,
+      github: env.github,
+      ...(dependencies.createRequester === undefined ? {} : { createRequester: dependencies.createRequester }),
+    }),
   });
 
   return {
@@ -114,18 +132,55 @@ class ProbeConfigurationSource implements ConfigurationSource {
   }
 }
 
-async function readSelfHostedEffectiveConfiguration(
-  configuration: SelfHostedConfigurationProbe,
-): Promise<EffectiveConfigurationOverview> {
-  const result = await configuration.resolve({ repositoryDocument: null });
+export async function readSelfHostedEffectiveConfiguration(input: {
+  workspaceId: WorkspaceId;
+  repositoryId: string;
+  repositories: Pick<WorkspaceRepositories, "findRepositoryConfigurationTarget">;
+  github: WebRuntimeEnv["github"];
+  createRequester?: typeof createInstallationRequester;
+}): Promise<EffectiveConfigurationOverview> {
+  const target = await input.repositories.findRepositoryConfigurationTarget(input.repositoryId);
+  if (target === null) throw new Error("repository is unavailable in this workspace");
+  if (target.repository.provider !== "github") {
+    throw new Error(`unsupported self-hosted provider ${target.repository.provider}`);
+  }
+
+  const credentialProvider = new GitHubCredentialProvider(input.github);
+  const credentials = await credentialProvider.getCredential({
+    workspaceId: input.workspaceId,
+    providerConnectionId: target.providerConnectionId,
+  });
+  const requester = await (input.createRequester ?? createInstallationRequester)({
+    appId: credentials.appId,
+    privateKey: credentials.privateKey,
+    installationId: toSafeInteger(target.externalConnectionId),
+  });
+  const trustedRevision = await new GitHubAdapter(requester).fetchDefaultBranchRevision(target.repository);
+  const result = await resolveConfiguration({
+    workspaceId: input.workspaceId,
+    repository: target.repository,
+    trustedRevision,
+    source: new GitHubConfigurationSource(requester),
+    allowOrganizationEnforce: false,
+  });
   return {
+    repository: {
+      label: `${target.repository.owner}/${target.repository.name}`,
+      href: githubRepositoryUrl(target.repository),
+    },
     trustedPath: result.provenance.repositoryPath,
-    trustedRevision: result.provenance.repositoryRevision ?? "self-hosted-probe",
+    trustedRevision,
     repositoryRevision: result.provenance.repositoryRevision,
     inheritanceMode: result.provenance.inheritanceMode,
     effectiveHash: result.provenance.effectiveHash,
     values: result.ok ? flattenConfigurationValues(result.config, result.provenance.sources) : [],
   };
+}
+
+function toSafeInteger(value: string): number {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 1) throw new Error(`invalid GitHub installation ID ${value}`);
+  return number;
 }
 
 function flattenConfigurationValues(

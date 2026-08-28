@@ -1,11 +1,16 @@
 import {
   createWorkspaceRepositories,
   type createDatabase,
+  type OperationsOverview as DatabaseOperationsOverview,
   type WorkspaceRepositories,
 } from "@triagepilot/db";
-import type { EffectiveConfigurationOverview } from "@triagepilot/ui";
+import type { EffectiveConfigurationOverview, OperationsOverview, ProviderLink } from "@triagepilot/ui";
 import type { WorkspaceId } from "@triagepilot/contracts";
-import type { GitHubAppCredentialShape } from "@triagepilot/provider-github";
+import {
+  githubChangeRequestUrl,
+  githubRepositoryUrl,
+  type GitHubAppCredentialShape,
+} from "@triagepilot/provider-github";
 import { formatLog } from "@triagepilot/shared";
 import { sql } from "kysely";
 
@@ -25,7 +30,7 @@ interface WebRuntimeServicesInput {
   github: GitHubAppCredentialShape;
   verifySignature: WebServices["verifySignature"];
   normalizeGitHubWebhook: WebServices["normalizeGitHubWebhook"];
-  readEffectiveConfiguration: () => Promise<EffectiveConfigurationOverview>;
+  readEffectiveConfiguration: (repositoryId: string) => Promise<EffectiveConfigurationOverview>;
 }
 
 export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebServices {
@@ -112,18 +117,81 @@ export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebSer
     },
 
     async listOperationsOverview() {
-      return await repositories.readOperations({
+      const overview = await repositories.readOperations({
         githubOrganization: input.githubOrganization,
         githubAppId: input.github.appId,
         now: input.now(),
         heartbeatStaleAfterMs: 30_000,
       });
+      return toGitHubOperationsOverview(overview);
     },
 
-    async readEffectiveConfiguration() {
-      return await input.readEffectiveConfiguration();
+    async readEffectiveConfiguration(repositoryId) {
+      return await input.readEffectiveConfiguration(repositoryId);
     },
   };
+}
+
+function toGitHubOperationsOverview(overview: DatabaseOperationsOverview): OperationsOverview {
+  return {
+    statuses: [
+      { id: "workspace", label: "Organization", value: overview.organization },
+      {
+        id: "connection",
+        label: "GitHub App",
+        value: overview.githubApp.configured ? `App ${overview.githubApp.appId}` : "Not configured",
+        detail: overview.githubApp.installationId
+          ? `Installation ${overview.githubApp.installationId}`
+          : "No active installation",
+      },
+    ],
+    repositories: overview.repositories.map((repository) => ({
+      id: repository.id,
+      repository: githubLink(repository.owner, repository.name),
+      configState: repository.configState,
+      mode: repository.mode,
+    })),
+    decisions: overview.decisions.map((decision) => {
+      const { pullNumber, ...providerNeutralDecision } = decision;
+      const repository = githubLinkFromName(decision.repository);
+      return {
+        ...providerNeutralDecision,
+        repository,
+        changeRequest: pullNumber === null
+          ? null
+          : {
+              label: `#${pullNumber}`,
+              href: githubChangeRequestUrl(repositoryRefFromName(decision.repository), pullNumber),
+            },
+      };
+    }),
+    failures: {
+      jobs: overview.failures.jobs,
+      actions: overview.failures.actions.map((failure) => ({
+        ...failure,
+        repository: githubLinkFromName(failure.repository),
+      })),
+    },
+    worker: overview.worker,
+  };
+}
+
+function githubLink(owner: string, name: string): ProviderLink {
+  const repository = { owner, name };
+  return { label: `${owner}/${name}`, href: githubRepositoryUrl(repository) };
+}
+
+function githubLinkFromName(name: string): ProviderLink {
+  const repository = repositoryRefFromName(name);
+  return { label: name, href: githubRepositoryUrl(repository) };
+}
+
+function repositoryRefFromName(name: string): { owner: string; name: string } {
+  const separator = name.indexOf("/");
+  if (separator <= 0 || separator === name.length - 1) {
+    return { owner: "", name };
+  }
+  return { owner: name.slice(0, separator), name: name.slice(separator + 1) };
 }
 
 function toProviderConnection(input: { githubInstallationId: string; accountLogin?: string }) {

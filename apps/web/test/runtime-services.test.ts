@@ -143,16 +143,28 @@ describe("web runtime services", () => {
         const overview = await services.listOperationsOverview();
 
         expect(overview).toEqual({
-          organization: "acme",
-          githubApp: { appId: "123", configured: true, installationId: "9007199254740993" },
+          statuses: [
+            { id: "workspace", label: "Organization", value: "acme" },
+            {
+              id: "connection",
+              label: "GitHub App",
+              value: "App 123",
+              detail: "Installation 9007199254740993",
+            },
+          ],
           repositories: [
-            { id: repository.id, owner: "acme", name: "api", configState: "valid", mode: "shadow" },
+            {
+              id: repository.id,
+              repository: { label: "acme/api", href: "https://github.com/acme/api" },
+              configState: "valid",
+              mode: "shadow",
+            },
           ],
           decisions: [
             {
               id: decision.id,
-              repository: "acme/api",
-              pullNumber: 7,
+              repository: { label: "acme/api", href: "https://github.com/acme/api" },
+              changeRequest: { label: "#7", href: "https://github.com/acme/api/pull/7" },
               mode: "shadow",
               action: "request_human_review",
               actionStatus: "not_applied",
@@ -230,6 +242,7 @@ function runtimeInput(
     verifySignature: async () => {},
     normalizeGitHubWebhook: () => null,
     readEffectiveConfiguration: async () => ({
+      repository: { label: "acme/api", href: "https://github.com/acme/api" },
       trustedPath: null,
       trustedRevision: "self-hosted-probe",
       repositoryRevision: null,

@@ -25,14 +25,17 @@ export function buildServices(overrides: Partial<WebServices> = {}): WebServices
     deleteConfiguredInstallation: async () => {},
     logIgnoredWebhook: () => {},
     listOperationsOverview: async () => ({
-      organization: "acme",
-      githubApp: { appId: "123", configured: false, installationId: null },
+      statuses: [
+        { id: "workspace", label: "Organization", value: "acme" },
+        { id: "connection", label: "GitHub App", value: "Not configured", detail: "No active installation" },
+      ],
       repositories: [],
       decisions: [],
       failures: { jobs: [], actions: [] },
       worker: { available: false, workerId: null, lastHeartbeatAt: null },
     }),
     readEffectiveConfiguration: async () => ({
+      repository: { label: "acme/api", href: "https://github.com/acme/api" },
       trustedPath: null,
       trustedRevision: "self-hosted-probe",
       repositoryRevision: null,

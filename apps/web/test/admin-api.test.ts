@@ -76,8 +76,9 @@ describe("admin API", () => {
     vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       calls.push([input, init]);
       if (input === "/api/operations/overview") return Response.json(emptyOverview);
-      if (input === "/api/operations/effective-configuration") {
+      if (input === "/api/operations/effective-configuration?repositoryId=repo-1") {
         return Response.json({
+          repository: repository.repository,
           trustedPath: null,
           trustedRevision: "self-hosted-probe",
           repositoryRevision: null,
@@ -90,7 +91,7 @@ describe("admin API", () => {
     });
 
     await fetchOperationsOverviewForWorkspace(workspace);
-    await fetchEffectiveConfigurationForWorkspace(workspace);
+    await fetchEffectiveConfigurationForWorkspace(workspace, repository);
 
     expect(calls).toEqual([
       [
@@ -101,7 +102,7 @@ describe("admin API", () => {
         },
       ],
       [
-        "/api/operations/effective-configuration",
+        "/api/operations/effective-configuration?repositoryId=repo-1",
         {
           credentials: "same-origin",
           headers: { "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
@@ -129,8 +130,10 @@ describe("admin API", () => {
 });
 
 const emptyOverview = {
-  organization: "acme",
-  githubApp: { appId: "123", configured: true, installationId: null },
+  statuses: [
+    { id: "workspace", label: "Organization", value: "acme" },
+    { id: "connection", label: "GitHub App", value: "App 123", detail: "No active installation" },
+  ],
   repositories: [],
   decisions: [],
   failures: { jobs: [], actions: [] },
@@ -140,4 +143,9 @@ const emptyOverview = {
 const workspace = {
   id: "00000000-0000-4000-8000-000000000001",
   displayName: "Self-hosted",
+};
+
+const repository = {
+  id: "repo-1",
+  repository: { label: "acme/api", href: "https://github.com/acme/api" },
 };

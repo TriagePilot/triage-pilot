@@ -20,7 +20,13 @@ import {
   type RoutingDeliveryInput,
 } from "./deliveries.js";
 import { createWorkspaceJobQueue, recoverStaleJobs, type WorkspaceJobQueue } from "./jobs.js";
-import { readOperationsOverview, type OperationsOverview, type ReadOperationsOverviewInput } from "./operations.js";
+import {
+  findRepositoryConfigurationTarget,
+  readOperationsOverview,
+  type OperationsOverview,
+  type ReadOperationsOverviewInput,
+  type RepositoryConfigurationTarget,
+} from "./operations.js";
 import {
   activateConfiguredProviderConnection,
   deleteConfiguredProviderConnection,
@@ -58,6 +64,7 @@ export interface WorkspaceRepositories {
   markActionSucceeded(decisionId: string, at: Date): Promise<void>;
   markActionFailed(decisionId: string, error: string, at: Date): Promise<void>;
   readOperations(input: ReadOperationsOverviewInput): Promise<OperationsOverview>;
+  findRepositoryConfigurationTarget(repositoryId: string): Promise<RepositoryConfigurationTarget | null>;
   recoverStaleJobs(now: Date, staleAfterMs?: number): Promise<void>;
   applyFixedRetention(now: Date): Promise<void>;
   acceptRoutingDelivery(input: RoutingDeliveryInput): Promise<{ inserted: boolean; jobId: string | null }>;
@@ -84,6 +91,8 @@ export function createWorkspaceRepositories(
     markActionSucceeded: (decisionId, at) => markActionSucceeded(db, workspaceId, decisionId, at),
     markActionFailed: (decisionId, error, at) => markActionFailed(db, workspaceId, decisionId, error, at),
     readOperations: (input) => readOperationsOverview(db, workspaceId, input),
+    findRepositoryConfigurationTarget: (repositoryId) =>
+      findRepositoryConfigurationTarget(db, workspaceId, repositoryId),
     recoverStaleJobs: (now, staleAfterMs) => recoverStaleJobs(db, workspaceId, now, staleAfterMs),
     applyFixedRetention: (now) => applyFixedRetention(db, workspaceId, now),
     acceptRoutingDelivery: (input) => acceptRoutingDelivery(db, workspaceId, input),

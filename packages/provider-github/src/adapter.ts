@@ -88,6 +88,20 @@ export async function createInstallationRequester(input: {
 export class GitHubAdapter {
   constructor(private readonly octokit: Requester) {}
 
+  async fetchDefaultBranchRevision(repository: ContractRepositoryRef): Promise<string> {
+    const repositoryResponse = await this.octokit.request("GET /repos/{owner}/{repo}", {
+      owner: repository.owner,
+      repo: repository.name,
+    });
+    const defaultBranch = readRequiredString(repositoryResponse.data, "default_branch", "GitHub repository default branch");
+    const commitResponse = await this.octokit.request("GET /repos/{owner}/{repo}/commits/{ref}", {
+      owner: repository.owner,
+      repo: repository.name,
+      ref: defaultBranch,
+    });
+    return readRequiredString(commitResponse.data, "sha", "GitHub default branch revision");
+  }
+
   async upsertRoutingComment(input: { pullRequest: PullRequestRef; decisionId: string; body: string }) {
     const marker = decisionMarker(input.decisionId);
     const existing = await findPaginated(
@@ -324,6 +338,17 @@ export class GitHubAdapter {
   }
 }
 
+export function githubRepositoryUrl(repository: Pick<ContractRepositoryRef, "owner" | "name">): string {
+  return `https://github.com/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
+}
+
+export function githubChangeRequestUrl(
+  repository: Pick<ContractRepositoryRef, "owner" | "name">,
+  changeRequestNumber: number,
+): string {
+  return `${githubRepositoryUrl(repository)}/pull/${changeRequestNumber}`;
+}
+
 function toRepositoryParams(ref: RepositoryRef) {
   return { owner: ref.owner, repo: ref.repo };
 }
@@ -352,6 +377,13 @@ function readLabelName(label: unknown): string | undefined {
   if (typeof label !== "object" || label === null || !("name" in label)) return undefined;
   const name = String(label.name).trim();
   return name || undefined;
+}
+
+function readRequiredString(value: unknown, key: string, label: string): string {
+  if (!isRecord(value) || typeof value[key] !== "string" || value[key].trim().length === 0) {
+    throw new Error(`${label} is unavailable`);
+  }
+  return value[key].trim();
 }
 
 function decodeGitHubContent(data: unknown): string {
