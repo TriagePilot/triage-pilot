@@ -43,17 +43,15 @@ export interface ResolveConfigurationInput {
 export async function resolveConfiguration(
   input: ResolveConfigurationInput,
 ): Promise<EffectiveConfigurationResult> {
-  const [organizationSource, repositorySource] = await Promise.all([
-    input.source.loadOrganization(input.workspaceId),
-    input.source.loadRepository({
-      workspaceId: input.workspaceId,
-      repository: input.repository,
-      trustedRevision: input.trustedRevision,
-    }),
-  ]);
+  const repositorySource = await input.source.loadRepository({
+    workspaceId: input.workspaceId,
+    repository: input.repository,
+    trustedRevision: input.trustedRevision,
+  });
+  let organizationSource = null as Awaited<ReturnType<ConfigurationSource["loadOrganization"]>>;
 
   let inheritanceMode: EffectiveConfigurationProvenance["inheritanceMode"] = repositorySource === null
-    ? organizationSource === null ? "defaults" : "organization"
+    ? "defaults"
     : "replace";
   const baseProvenance = (): EffectiveConfigurationProvenance => ({
     organizationVersion: organizationSource?.version ?? null,
@@ -73,7 +71,7 @@ export async function resolveConfiguration(
 
   const repositoryDocument = repositoryResult?.document ?? null;
   inheritanceMode = repositoryDocument === null
-    ? organizationSource === null ? "defaults" : "organization"
+    ? "defaults"
     : repositoryDocument.inheritance === true ? "inherit" : "replace";
 
   if (repositorySource !== null && inheritanceMode === "replace") {
@@ -81,6 +79,13 @@ export async function resolveConfiguration(
     if (!fullRepositoryResult.ok) {
       return { ok: false, diagnostics: fullRepositoryResult.diagnostics, provenance: baseProvenance() };
     }
+  }
+
+  if (inheritanceMode !== "replace") {
+    organizationSource = await input.source.loadOrganization(input.workspaceId);
+    inheritanceMode = repositoryDocument === null
+      ? organizationSource === null ? "defaults" : "organization"
+      : "inherit";
   }
 
   let organizationDocument: ConfigurationDocumentValue | null = null;

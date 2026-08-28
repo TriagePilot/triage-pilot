@@ -141,6 +141,33 @@ describe("resolveConfiguration", () => {
     });
   });
 
+  it("resolves replacement repository configuration without loading the organization source", async () => {
+    const loadOrganization = vi.fn().mockRejectedValue(new Error("organization store unavailable"));
+    const source: ConfigurationSource = {
+      loadOrganization,
+      loadRepository: vi.fn().mockResolvedValue(repositoryDocument("mode: enforce")),
+    };
+
+    const result = await resolveConfiguration({
+      workspaceId: "workspace-1",
+      repository,
+      trustedRevision: "base-sha",
+      source,
+      allowOrganizationEnforce: true,
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      config: { mode: "enforce" },
+      provenance: {
+        organizationVersion: null,
+        inheritanceMode: "replace",
+        sources: { "$.mode": "repository" },
+      },
+    });
+    expect(loadOrganization).not.toHaveBeenCalled();
+  });
+
   it("preserves organization provenance when OSS organization mode is already shadow", async () => {
     const result = await resolveFixture({
       organization: "mode: shadow",
