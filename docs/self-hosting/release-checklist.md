@@ -47,23 +47,13 @@ Publish from the protected `public-release` environment only after those artifac
 
 At the rendered-configuration validation boundary, the smoke shell owns and supplies the four generated secret-mount source paths. The validator treats those paths as expected binds but independently derives the canonical physical repository root from its own module location; no build-root value crosses the CLI boundary. Before starting a container, it requires the exact PostgreSQL and web healthchecks, no worker healthcheck, and no Compose lifecycle or develop/watch hooks. The later health-URL mode accepts only Docker's published loopback address and validates that address before using it.
 
-## Phase 0 Candidate Evidence — 2026-08-28
+## Phase 0 Release Evidence Contract
 
-The candidate source commit is `41f5d98d7b9e4966756934b348388de057acbc29` and the synchronized version is `0.1.0`. The highest public migration is `0006_decision_outbox.sql`. Candidate artifact metadata uses `FSL-1.1-Apache-2.0`, `publishedAt` `2026-08-28T15:00:00.000Z`, and `futureLicenseEffectiveAt` `2028-08-28T15:00:00.000Z`.
+Before tagging, run the automated gate from a clean detached checkout: frozen install, exact parallel tests, build, boundary checks, container/Compose/upgrade checks, secret scan, and whitespace check. Artifact verification must install all seven packed packages by name through a temporary registry, compile and import them from the consumer, and reject lockfile references using `workspace:`, `link:`, `file:`, Git, or source paths. Dry-run output is review evidence only and must not be presented as the future tag's published digests or timestamps.
 
-The generated manifest binds the same source commit and version to OCI digest `sha256:d47bdeda8a8a83ae23fd56059b9e00f1775c397cbe8ea2185fec8e36ee3d1540`. Its package SHA-256 values are:
+After review and explicit approval, the protected tag workflow is authoritative. It takes the tag target as `gitCommit`, synchronizes `version` with the tag, chooses `publishedAt` once, derives the future-license timestamp, identifies the highest shipped public migration, and produces `release-manifest.json`, release notes, OCI archive, and checksums. Record the resulting version, commit, migration, package SHA-256 values, OCI digest, license identifier, and timestamps from those workflow outputs; their byte-level annotations and checksums must agree.
 
-- `@triagepilot/application`: `1d8de8e032ee9d24d2cf5651def91b8508d9465921c1d955f32329c4353d9386`
-- `@triagepilot/config`: `5f1e5e3d905d495d0f62173b9caa475da6c68a695f6f2ec4e283483e499c5723`
-- `@triagepilot/contracts`: `132208470a71dec344590db137e3ae22b4e1fdd663885479a228018efddc4850`
-- `@triagepilot/core`: `db96cf1d8b72749c34e0b4c38e0b83d73ed7fcdec05515ecb811770633870607`
-- `@triagepilot/db`: `8e8c3107949cda3748b10ec8a437585386eda63a0bfb15483d2af9087feb7334`
-- `@triagepilot/provider-github`: `500925e2752bdb5157ed992f54ced1f5ca4418f2287855136a35fc8ce8d8589a`
-- `@triagepilot/ui`: `221658d0d8365cf1b24a5edce5d801eb428c11f5527916232148818434914144`
-
-Focused contracts/config/application/provider/UI suites (96 tests) and DB suites (48 tests) passed with disposable PostgreSQL; the latter applied migrations through `0006_decision_outbox.sql`. Type checking, build, package-boundary and public-boundary checks, Docker build, Compose smoke, previous-release upgrade, Gitleaks, whitespace check, offline detached-checkout build, external artifact consumer, and built-image health checks also passed. The external consumer compiled and imported all seven artifacts through a temporary artifact registry and its generated lockfile contained no `workspace:`, `link:`, `file:`, Git, or source-checkout dependency.
-
-The exact parallel `pnpm test` gate now passes: artifact verification copies the source into a disposable workspace before installing, building, and packing it, so it cannot remove the shared `dist` entrypoints used by concurrently running suites. All release-gate commands now exit zero. Do not tag this candidate yet: obtain review and explicit release approval before creating the signed `v0.1.0` tag.
+The exact parallel `pnpm test` gate packages in a disposable source workspace, so it does not mutate root `dist` entries used by concurrent suites. Do not tag until the clean-checkout gate passes, review is complete, and explicit release approval is granted.
 
 ## Live Test-Organization Flow
 
