@@ -40,17 +40,20 @@ type PackedPackage = {
 let packDirectory: string;
 let packedPackages: PackedPackage[];
 let rootLicense: string;
+let artifactWorkspace: string;
 
 describe("published package artifacts", () => {
   beforeAll(async () => {
     packDirectory = await mkdtemp(join(tmpdir(), "triagepilot-artifacts-"));
-    rootLicense = await readFile(join(repoRoot, "LICENSE"), "utf8");
-    await runPnpm(["build"]);
+    artifactWorkspace = await createArtifactWorkspace();
+    rootLicense = await readFile(join(artifactWorkspace, "LICENSE"), "utf8");
+    await runPnpm(["install", "--frozen-lockfile"], artifactWorkspace);
+    await runPnpm(["build"], artifactWorkspace);
     packedPackages = [];
 
     for (const packageName of publishedPackages) {
       const packageSlug = packageName.replace("@triagepilot/", "");
-      const packageRoot = join(repoRoot, "packages", packageSlug);
+      const packageRoot = join(artifactWorkspace, "packages", packageSlug);
       await runPnpm(["pack", "--pack-destination", packDirectory], packageRoot, {
         TRIAGEPILOT_ARTIFACT_PUBLISHED_AT: publishedAt,
         TRIAGEPILOT_ARTIFACT_FUTURE_LICENSE_EFFECTIVE_AT: futureLicenseEffectiveAt,
@@ -63,7 +66,7 @@ describe("published package artifacts", () => {
       const extractedDir = join(packDirectory, `${packageSlug}-package`);
       await mkdir(extractedDir, { recursive: true });
       await execFileAsync("tar", ["-xzf", tarballPath, "-C", extractedDir, "--strip-components=1"], {
-        cwd: repoRoot,
+        cwd: artifactWorkspace,
       });
 
       const packedManifest = JSON.parse(await readFile(join(extractedDir, "package.json"), "utf8")) as Record<
@@ -71,7 +74,7 @@ describe("published package artifacts", () => {
         unknown
       >;
       const { stdout: fileList } = await execFileAsync("tar", ["-tzf", tarballPath], {
-        cwd: repoRoot,
+        cwd: artifactWorkspace,
         maxBuffer: 16 * 1024 * 1024,
       });
 
@@ -97,10 +100,11 @@ describe("published package artifacts", () => {
 
   afterAll(async () => {
     if (packDirectory) await rm(packDirectory, { recursive: true, force: true });
+    if (artifactWorkspace) await rm(artifactWorkspace, { recursive: true, force: true });
   });
 
   it("packs synchronized compiled artifacts without source or private graph leakage", async () => {
-    const rootVersion = await readVersion(join(repoRoot, "package.json"));
+    const rootVersion = await readVersion(join(artifactWorkspace, "package.json"));
     const packedMetadataDates = new Set(
       packedPackages.map((artifact) =>
         [
@@ -275,6 +279,15 @@ async function runPnpm(args: string[], cwd = repoRoot, extraEnv: Record<string, 
     env: pnpmEnv(extraEnv),
     maxBuffer: 16 * 1024 * 1024,
   });
+}
+
+async function createArtifactWorkspace() {
+  const workspace = await mkdtemp(join(tmpdir(), "triagepilot-artifact-workspace-"));
+  await cp(repoRoot, workspace, {
+    recursive: true,
+    filter: (source) => ![".git", ".superpowers", "dist", "node_modules"].includes(source.split("/").at(-1) ?? ""),
+  });
+  return workspace;
 }
 
 function pnpmEnv(extraEnv: Record<string, string> = {}) {
