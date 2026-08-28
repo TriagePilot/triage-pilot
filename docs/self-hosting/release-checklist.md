@@ -47,6 +47,24 @@ Publish from the protected `public-release` environment only after those artifac
 
 At the rendered-configuration validation boundary, the smoke shell owns and supplies the four generated secret-mount source paths. The validator treats those paths as expected binds but independently derives the canonical physical repository root from its own module location; no build-root value crosses the CLI boundary. Before starting a container, it requires the exact PostgreSQL and web healthchecks, no worker healthcheck, and no Compose lifecycle or develop/watch hooks. The later health-URL mode accepts only Docker's published loopback address and validates that address before using it.
 
+## Phase 0 Candidate Evidence — 2026-08-28
+
+The candidate source commit is `52d6761344bb8dca71cc4a75b5e3bbea5db437a7` and the synchronized version is `0.1.0`. The highest public migration is `0006_decision_outbox.sql`. Candidate artifact metadata uses `FSL-1.1-Apache-2.0`, `publishedAt` `2026-08-28T12:27:53.000Z`, and `futureLicenseEffectiveAt` `2028-08-28T12:27:53.000Z`.
+
+The generated manifest binds the same source commit and version to OCI digest `sha256:0f213155389ddcb8ca28d78f7476364a0f4ac3a74daf7b7b773131fef3aa38bf`. Its package SHA-256 values are:
+
+- `@triagepilot/application`: `fd858904b19b53636de399ba6d8aa26c607bf0749db86f28b272b1c6528e49f6`
+- `@triagepilot/config`: `a99050a662832661c1af61daaac8661d7df373667b216a30baf0c1b6d5939401`
+- `@triagepilot/contracts`: `29dee09f150672094b1cfc5f79fb0df406f5d65db560b1faf2d4a19e88765792`
+- `@triagepilot/core`: `851437e19ae18aff76386d46c7bdf396c33e9089798b8d0c1d7764f5470fcb89`
+- `@triagepilot/db`: `a20a17d4bfd292a48d3ca34a242fb5cf8119143d671c73c185ea69b57d1b7719`
+- `@triagepilot/provider-github`: `4ba043160866980cfa1a9eab105a663783670fad1a0d31d1a466cc411da8dacf`
+- `@triagepilot/ui`: `bbd1cd8bd6da26a95c7c97b5f8917fcbf6afee466aaa2be5d2ce277a13200abe`
+
+Focused contracts/config/application/provider/UI suites (96 tests) and DB suites (48 tests) passed with disposable PostgreSQL; the latter applied migrations through `0006_decision_outbox.sql`. Type checking, build, package-boundary and public-boundary checks, Docker build, Compose smoke, previous-release upgrade, Gitleaks, whitespace check, offline detached-checkout build, external artifact consumer, and built-image health checks also passed. The external consumer compiled and imported all seven artifacts through a temporary artifact registry and its generated lockfile contained no `workspace:`, `link:`, `file:`, Git, or source-checkout dependency.
+
+Do not tag this candidate yet. The exact parallel `pnpm test` command is not deterministic because `test/package-artifacts.test.ts` runs `pnpm build` concurrently with suites importing package `dist` entrypoints; the observed run completed 60 files/518 tests and failed two import-resolution suites. `pnpm vitest run --no-file-parallelism` completed the full suite, which confirms the race but does not replace the canonical release gate. Resolve that test isolation issue, rerun the exact release gate with all commands exiting zero, obtain explicit release approval, and only then create the signed `v0.1.0` tag.
+
 ## Live Test-Organization Flow
 
 Use a disposable GitHub App and organization that are safe for acceptance testing:
