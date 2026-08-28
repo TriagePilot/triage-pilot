@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 
 import { readImageReleaseMetadata, validateReleaseManifest } from "./create-release-manifest.mjs";
 import { renderReleaseNotes } from "./create-release-notes.mjs";
+import { validateOciLayoutArchive } from "./safe-oci-layout-tar.mjs";
 
 const defaultRepoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const execFileAsync = promisify(execFile);
@@ -141,6 +142,7 @@ export async function verifyReleaseArtifacts(options) {
 }
 
 export async function readPublishableImageMetadata(imageTarPath, digest) {
+  await validateOciLayoutArchive(imageTarPath);
   const { stdout: indexJson } = await execFileAsync("tar", ["-xOf", imageTarPath, "index.json"], {
     maxBuffer: 16 * 1024 * 1024,
   });

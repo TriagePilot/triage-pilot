@@ -97,6 +97,37 @@ describe("publishReleaseArtifacts", () => {
     expect(runner.calls.some((call) => call.command === "oras" && call.args[0] === "cp")).toBe(false);
   });
 
+  it.each([
+    {
+      name: "symlink",
+      entry: { name: "safe-symlink", content: Buffer.alloc(0), typeflag: "2", linkname: "/outside" },
+      message: "Unsupported OCI layout archive entry type 2 at safe-symlink.",
+    },
+    {
+      name: "hardlink",
+      entry: { name: "safe-hardlink", content: Buffer.alloc(0), typeflag: "1", linkname: "/outside" },
+      message: "Unsupported OCI layout archive entry type 1 at safe-hardlink.",
+    },
+    {
+      name: "GNU long-name override",
+      entry: { name: "GNULongName", content: Buffer.from("../escape\0"), typeflag: "L" },
+      message: "Unsupported OCI layout archive entry type L at GNULongName.",
+    },
+    {
+      name: "PAX path override",
+      entry: { name: "pax-header", content: Buffer.from("19 path=../escape\n"), typeflag: "x" },
+      message: "Unsupported OCI layout archive entry type x at pax-header.",
+    },
+  ])("rejects $name entries before invoking ORAS copy", async ({ entry, message }) => {
+    const fixture = await createPublishFixture();
+    await rewriteImageArchiveWithEntries(fixture.imageTarPath, [entry]);
+    await rewriteChecksum(fixture.artifactsDir, "container/triagepilot-0.1.0.oci.tar");
+    const runner = createPublishRunner(fixture, { remoteContainerExists: false });
+
+    await expect(publishReleaseArtifacts(createPublishOptions(fixture), runner.command)).rejects.toThrow(message);
+    expect(runner.calls.some((call) => call.command === "oras" && call.args[0] === "cp")).toBe(false);
+  });
+
   it("cleans the extracted OCI layout when ORAS copy fails", async () => {
     const fixture = await createPublishFixture();
     const runner = createPublishRunner(fixture, { remoteContainerExists: false, failContainerCopy: true });
@@ -413,16 +444,23 @@ async function createImageTarball(
   );
   await writeFile(join(stageRoot, "blobs", "sha256", configDigest), config);
   await writeFile(join(stageRoot, "blobs", "sha256", manifestDigest), manifest);
-  await execFileAsync("tar", ["-cf", path, "-C", stageRoot, "oci-layout", "index.json", "blobs"]);
+  await writeFile(path, createTarBuffer(await collectTarEntries(stageRoot)));
   return { digest: `sha256:${manifestDigest}`, manifest, config };
 }
 
 async function rewriteImageArchiveWithUnsafeEntry(imageTarPath: string, unsafeEntryName: string) {
+  await rewriteImageArchiveWithEntries(imageTarPath, [{ name: unsafeEntryName, content: Buffer.from("unsafe\n") }]);
+}
+
+async function rewriteImageArchiveWithEntries(
+  imageTarPath: string,
+  additionalEntries: Array<{ name: string; content: Buffer; typeflag?: string; linkname?: string }>,
+) {
   const extractedRoot = await mkdtemp(join(tmpdir(), "triagepilot-oci-extract-"));
   cleanupPaths.push(extractedRoot);
   await execFileAsync("tar", ["-xf", imageTarPath, "-C", extractedRoot]);
   const entries = await collectTarEntries(extractedRoot);
-  entries.push({ name: unsafeEntryName, content: Buffer.from("unsafe\n") });
+  entries.push(...additionalEntries);
   await writeFile(imageTarPath, createTarBuffer(entries));
 }
 
@@ -436,7 +474,10 @@ async function rewriteChecksum(artifactsDir: string, relativePath: string) {
   );
 }
 
-async function collectTarEntries(root: string, relativeDirectory = ""): Promise<Array<{ name: string; content: Buffer }>> {
+async function collectTarEntries(
+  root: string,
+  relativeDirectory = "",
+): Promise<Array<{ name: string; content: Buffer; typeflag?: string; linkname?: string }>> {
   const directory = relativeDirectory.length === 0 ? root : join(root, relativeDirectory);
   const entries = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -450,11 +491,18 @@ async function collectTarEntries(root: string, relativeDirectory = ""): Promise<
   return entries;
 }
 
-function createTarBuffer(entries: Array<{ name: string; content: Buffer }>) {
-  return Buffer.concat([...entries.flatMap((entry) => [createTarHeader(entry.name, entry.content.length), entry.content, tarPadding(entry.content.length)]), Buffer.alloc(1024)]);
+function createTarBuffer(entries: Array<{ name: string; content: Buffer; typeflag?: string; linkname?: string }>) {
+  return Buffer.concat([
+    ...entries.flatMap((entry) => [
+      createTarHeader(entry.name, entry.content.length, entry.typeflag, entry.linkname),
+      entry.content,
+      tarPadding(entry.content.length),
+    ]),
+    Buffer.alloc(1024),
+  ]);
 }
 
-function createTarHeader(name: string, size: number) {
+function createTarHeader(name: string, size: number, typeflag = "0", linkname = "") {
   const header = Buffer.alloc(512);
   header.write(name, 0, "utf8");
   header.write("0000644\0", 100, "ascii");
@@ -463,7 +511,8 @@ function createTarHeader(name: string, size: number) {
   header.write(size.toString(8).padStart(11, "0") + "\0", 124, "ascii");
   header.write("00000000000\0", 136, "ascii");
   header.fill(" ", 148, 156);
-  header.write("0", 156, "ascii");
+  header.write(typeflag, 156, "ascii");
+  header.write(linkname, 157, "utf8");
   header.write("ustar\0", 257, "ascii");
   header.write("00", 263, "ascii");
   const checksum = [...header].reduce((sum, byte) => sum + byte, 0);

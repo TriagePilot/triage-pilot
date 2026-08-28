@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -457,8 +457,54 @@ async function createImageTarball(
   );
   await writeFile(join(stageRoot, "blobs", "sha256", configDigest), configContent);
   await writeFile(join(stageRoot, "blobs", "sha256", manifestDigest), manifestContent);
-  await execFileAsync("tar", ["-cf", path, "-C", stageRoot, "oci-layout", "index.json", "blobs"]);
+  await writeFile(path, createTarBuffer(await collectTarEntries(stageRoot)));
   return `sha256:${manifestDigest}`;
+}
+
+async function collectTarEntries(root: string, relativeDirectory = ""): Promise<Array<{ name: string; content: Buffer }>> {
+  const directory = relativeDirectory.length === 0 ? root : join(root, relativeDirectory);
+  const entries = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const relativePath = relativeDirectory.length === 0 ? entry.name : `${relativeDirectory}/${entry.name}`;
+    if (entry.isDirectory()) {
+      entries.push(...(await collectTarEntries(root, relativePath)));
+      continue;
+    }
+    entries.push({ name: relativePath, content: await readFile(join(root, relativePath)) });
+  }
+  return entries;
+}
+
+function createTarBuffer(entries: Array<{ name: string; content: Buffer }>) {
+  return Buffer.concat([
+    ...entries.flatMap((entry) => [
+      createTarHeader(entry.name, entry.content.length),
+      entry.content,
+      tarPadding(entry.content.length),
+    ]),
+    Buffer.alloc(1024),
+  ]);
+}
+
+function createTarHeader(name: string, size: number) {
+  const header = Buffer.alloc(512);
+  header.write(name, 0, "utf8");
+  header.write("0000644\0", 100, "ascii");
+  header.write("0000000\0", 108, "ascii");
+  header.write("0000000\0", 116, "ascii");
+  header.write(size.toString(8).padStart(11, "0") + "\0", 124, "ascii");
+  header.write("00000000000\0", 136, "ascii");
+  header.fill(" ", 148, 156);
+  header.write("0", 156, "ascii");
+  header.write("ustar\0", 257, "ascii");
+  header.write("00", 263, "ascii");
+  const checksum = [...header].reduce((sum, byte) => sum + byte, 0);
+  header.write(checksum.toString(8).padStart(6, "0") + "\0 ", 148, "ascii");
+  return header;
+}
+
+function tarPadding(size: number) {
+  return Buffer.alloc((512 - (size % 512)) % 512);
 }
 
 async function sha256(path: string) {
