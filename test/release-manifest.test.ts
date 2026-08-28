@@ -142,6 +142,8 @@ function createValidManifest() {
     packages: publishedPackages.map((name, index) => ({
       name,
       version: "0.1.0",
+      publishedAt,
+      futureLicenseEffectiveAt,
       tarball: `${name.replace("@triagepilot/", "triagepilot-")}-0.1.0.tgz`,
       sha256: `${index + 1}`.repeat(64),
     })),

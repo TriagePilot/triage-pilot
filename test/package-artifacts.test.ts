@@ -19,6 +19,8 @@ const publishedPackages = [
   "@triagepilot/ui",
 ] as const;
 const licenseId = "FSL-1.1-Apache-2.0";
+const publishedAt = "2026-08-28T10:20:30.000Z";
+const futureLicenseEffectiveAt = "2028-08-28T10:20:30.000Z";
 const staleAgplPattern = /AGPL-3\.0|GNU Affero General Public License|Affero GPL/i;
 
 type PublishedPackageName = (typeof publishedPackages)[number];
@@ -49,7 +51,10 @@ describe("published package artifacts", () => {
     for (const packageName of publishedPackages) {
       const packageSlug = packageName.replace("@triagepilot/", "");
       const packageRoot = join(repoRoot, "packages", packageSlug);
-      await runPnpm(["pack", "--pack-destination", packDirectory], packageRoot);
+      await runPnpm(["pack", "--pack-destination", packDirectory], packageRoot, {
+        TRIAGEPILOT_ARTIFACT_PUBLISHED_AT: publishedAt,
+        TRIAGEPILOT_ARTIFACT_FUTURE_LICENSE_EFFECTIVE_AT: futureLicenseEffectiveAt,
+      });
 
       const tarballName = `${packageName.replace("@triagepilot/", "triagepilot-").replace(/\//g, "-")}-${await readVersion(
         join(packageRoot, "package.json"),
@@ -96,10 +101,27 @@ describe("published package artifacts", () => {
 
   it("packs synchronized compiled artifacts without source or private graph leakage", async () => {
     const rootVersion = await readVersion(join(repoRoot, "package.json"));
+    const packedMetadataDates = new Set(
+      packedPackages.map((artifact) =>
+        [
+          readString(artifact.packedManifest.publishedAt, `${artifact.name} publishedAt`),
+          readString(
+            artifact.packedManifest.futureLicenseEffectiveAt,
+            `${artifact.name} futureLicenseEffectiveAt`,
+          ),
+        ].join(" -> "),
+      ),
+    );
 
+    expect(packedPackages).toHaveLength(publishedPackages.length);
+    expect(packedMetadataDates).toEqual(new Set([`${publishedAt} -> ${futureLicenseEffectiveAt}`]));
     for (const artifact of packedPackages) {
       expect(readString(artifact.packedManifest.version, `${artifact.name} version`)).toBe(rootVersion);
       expect(readString(artifact.packedManifest.license, `${artifact.name} license`)).toBe(licenseId);
+      expect(readString(artifact.packedManifest.publishedAt, `${artifact.name} publishedAt`)).toBe(publishedAt);
+      expect(readString(artifact.packedManifest.futureLicenseEffectiveAt, `${artifact.name} futureLicenseEffectiveAt`)).toBe(
+        futureLicenseEffectiveAt,
+      );
       expect(JSON.stringify(artifact.packedManifest), `${artifact.name} packed metadata`).not.toMatch(staleAgplPattern);
       expect(artifact.packedManifest.private).not.toBe(true);
       expect(readString(artifact.packedManifest.main, `${artifact.name} main`)).toBe("./dist/index.js");
@@ -119,6 +141,13 @@ describe("published package artifacts", () => {
         expect(readFiles(artifact.packedManifest.files, `${artifact.name} files`)).toContain("migrations");
         expect(artifact.fileEntries.some((entry) => entry.startsWith("migrations/"))).toBe(true);
       }
+
+      const sourceManifest = JSON.parse(await readFile(join(artifact.rootDir, "package.json"), "utf8")) as Record<
+        string,
+        unknown
+      >;
+      expect(sourceManifest.publishedAt, `${artifact.name} source publishedAt`).toBeUndefined();
+      expect(sourceManifest.futureLicenseEffectiveAt, `${artifact.name} source futureLicenseEffectiveAt`).toBeUndefined();
 
       for (const [dependencyName, version] of Object.entries(artifact.dependencyVersions)) {
         expect(version, `${artifact.name} -> ${dependencyName}`).not.toMatch(/^(workspace|file|link):/);
@@ -240,17 +269,18 @@ describe("published package artifacts", () => {
   }, 180_000);
 });
 
-async function runPnpm(args: string[], cwd = repoRoot) {
+async function runPnpm(args: string[], cwd = repoRoot, extraEnv: Record<string, string> = {}) {
   await execFileAsync("pnpm", args, {
     cwd,
-    env: pnpmEnv(),
+    env: pnpmEnv(extraEnv),
     maxBuffer: 16 * 1024 * 1024,
   });
 }
 
-function pnpmEnv() {
+function pnpmEnv(extraEnv: Record<string, string> = {}) {
   return {
     ...process.env,
+    ...extraEnv,
     PATH: [dirname(process.execPath), process.env.PATH ?? ""]
       .filter(Boolean)
       .join(":"),

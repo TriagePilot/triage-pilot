@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { verifyReleaseArtifacts } from "../scripts/verify-release-artifacts.mjs";
+import { renderReleaseNotes } from "../scripts/create-release-notes.mjs";
 
 const execFileAsync = promisify(execFile);
 const cleanupPaths: string[] = [];
@@ -42,7 +43,37 @@ describe("verifyReleaseArtifacts", () => {
       }),
     ).resolves.toMatchObject({
       manifestPath: join(fixture.artifactsDir, "release-manifest.json"),
+      releaseNotesPath: join(fixture.artifactsDir, "release-notes.md"),
     });
+  });
+
+  it("fails when release notes no longer match the verified manifest", async () => {
+    const fixture = await createArtifactFixture();
+    await writeFile(join(fixture.artifactsDir, "release-notes.md"), "tampered\n");
+
+    await expect(
+      verifyReleaseArtifacts({
+        artifactsDir: fixture.artifactsDir,
+        version: "0.1.0",
+        gitCommit: fixture.gitCommit,
+        databaseMigration: "0006_decision_outbox.sql",
+        containerDigest: fixture.containerDigest,
+      }),
+    ).rejects.toThrow("release-notes.md does not match the release manifest.");
+  });
+
+  it("fails when saved image config labels disagree with verified OCI annotations", async () => {
+    const fixture = await createArtifactFixture({ imageLabelOverrides: { "org.opencontainers.image.licenses": "MIT" } });
+
+    await expect(
+      verifyReleaseArtifacts({
+        artifactsDir: fixture.artifactsDir,
+        version: "0.1.0",
+        gitCommit: fixture.gitCommit,
+        databaseMigration: "0006_decision_outbox.sql",
+        containerDigest: fixture.containerDigest,
+      }),
+    ).rejects.toThrow("Saved image label org.opencontainers.image.licenses MIT does not match FSL-1.1-Apache-2.0.");
   });
 
   it("fails when a package tarball's bytes no longer match the manifest digest", async () => {
@@ -246,7 +277,7 @@ describe("verifyReleaseArtifacts", () => {
   });
 });
 
-async function createArtifactFixture() {
+async function createArtifactFixture(options: { imageLabelOverrides?: Record<string, string> } = {}) {
   const root = await mkdtemp(join(tmpdir(), "triagepilot-release-artifacts-"));
   cleanupPaths.push(root);
   const artifactsDir = join(root, "artifacts");
@@ -263,6 +294,8 @@ async function createArtifactFixture() {
     packageEntries.push({
       name: packageName,
       version: "0.1.0",
+      publishedAt,
+      futureLicenseEffectiveAt,
       tarball,
       sha256: await sha256(join(packagesDir, tarball)),
     });
@@ -289,9 +322,6 @@ async function createArtifactFixture() {
       2,
     ),
   );
-  const imageTarPath = join(containerDir, "triagepilot-0.1.0.tar");
-  await writeFile(imageTarPath, "image-bytes\n");
-
   const manifest = {
     version: "0.1.0",
     gitCommit,
@@ -315,11 +345,23 @@ async function createArtifactFixture() {
     },
   };
   await writeFile(join(artifactsDir, "release-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+  await writeFile(join(artifactsDir, "release-notes.md"), renderReleaseNotes(manifest));
+
+  const imageTarPath = join(containerDir, "triagepilot-0.1.0.tar");
+  await createImageTarball(imageTarPath, {
+    "org.opencontainers.image.version": "0.1.0",
+    "org.opencontainers.image.licenses": licenseId,
+    "org.opencontainers.image.revision": gitCommit,
+    "org.opencontainers.image.created": publishedAt,
+    "org.triagepilot.future-license-effective-at": futureLicenseEffectiveAt,
+    ...options.imageLabelOverrides,
+  });
 
   const checksumLines = [];
   for (const relativePath of [
     "container/metadata.json",
     "container/triagepilot-0.1.0.tar",
+    "release-notes.md",
     "release-manifest.json",
     ...packageEntries.map((entry) => `packages/${entry.tarball}`),
   ]) {
@@ -353,6 +395,15 @@ async function createPackageTarball(root: string, packageName: string, version: 
   const tarballPath = join(root, `${slug}-${version}.tgz`);
   await execFileAsync("tar", ["-czf", tarballPath, "-C", stageRoot, "package"]);
   return `${slug}-${version}.tgz`;
+}
+
+async function createImageTarball(path: string, labels: Record<string, string>) {
+  const stageRoot = await mkdtemp(join(tmpdir(), "triagepilot-image-stage-"));
+  cleanupPaths.push(stageRoot);
+  const configName = "config.json";
+  await writeFile(join(stageRoot, configName), JSON.stringify({ config: { Labels: labels } }, null, 2));
+  await writeFile(join(stageRoot, "manifest.json"), JSON.stringify([{ Config: configName, RepoTags: ["triagepilot-release:0.1.0"], Layers: [] }], null, 2));
+  await execFileAsync("tar", ["-cf", path, "-C", stageRoot, "manifest.json", configName]);
 }
 
 async function sha256(path: string) {

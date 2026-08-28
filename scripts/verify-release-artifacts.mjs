@@ -1,17 +1,29 @@
 #!/usr/bin/env node
 
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 
 import { readImageReleaseMetadata, validateReleaseManifest } from "./create-release-manifest.mjs";
+import { renderReleaseNotes } from "./create-release-notes.mjs";
 
 const defaultRepoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const execFileAsync = promisify(execFile);
+const imageMetadataKeys = [
+  "org.opencontainers.image.version",
+  "org.opencontainers.image.licenses",
+  "org.opencontainers.image.revision",
+  "org.opencontainers.image.created",
+  "org.triagepilot.future-license-effective-at",
+];
 
 export async function verifyReleaseArtifacts(options) {
   const artifactsDir = resolve(options.artifactsDir ?? join(defaultRepoRoot, "artifacts"));
   const manifestPath = join(artifactsDir, "release-manifest.json");
+  const releaseNotesPath = join(artifactsDir, "release-notes.md");
   const checksumsPath = join(artifactsDir, "checksums.txt");
   const metadataPath = join(artifactsDir, "container", "metadata.json");
   const imageTarRelativePath = `container/triagepilot-${options.version}.tar`;
@@ -49,11 +61,31 @@ export async function verifyReleaseArtifacts(options) {
       `Buildx metadata futureLicenseEffectiveAt ${imageMetadata.futureLicenseEffectiveAt} does not match manifest futureLicenseEffectiveAt ${manifest.futureLicenseEffectiveAt}.`,
     );
   }
+  const savedImageLabels = await readSavedImageLabels(imageTarPath);
+  const expectedImageValues = {
+    "org.opencontainers.image.version": manifest.version,
+    "org.opencontainers.image.licenses": manifest.license,
+    "org.opencontainers.image.revision": manifest.gitCommit,
+    "org.opencontainers.image.created": manifest.publishedAt,
+    "org.triagepilot.future-license-effective-at": manifest.futureLicenseEffectiveAt,
+  };
+  for (const key of imageMetadataKeys) {
+    if (savedImageLabels[key] !== expectedImageValues[key]) {
+      throw new Error(`Saved image label ${key} ${savedImageLabels[key]} does not match ${expectedImageValues[key]}.`);
+    }
+  }
+
+  const expectedReleaseNotes = renderReleaseNotes(manifest);
+  const actualReleaseNotes = await readFile(releaseNotesPath, "utf8");
+  if (actualReleaseNotes !== expectedReleaseNotes) {
+    throw new Error("release-notes.md does not match the release manifest.");
+  }
 
   const checksumEntries = parseChecksums(await readFile(checksumsPath, "utf8"));
   const expectedRelativePaths = new Set([
     "checksums.txt",
     "release-manifest.json",
+    "release-notes.md",
     "container/metadata.json",
     imageTarRelativePath,
     ...manifest.packages.map((entry) => `packages/${basename(entry.tarball)}`),
@@ -100,7 +132,27 @@ export async function verifyReleaseArtifacts(options) {
     }
   }
 
-  return { manifestPath, checksumsPath, imageTarPath, packageRelativePaths: expectedPackageRelativePaths };
+  return { manifestPath, releaseNotesPath, checksumsPath, imageTarPath, packageRelativePaths: expectedPackageRelativePaths };
+}
+
+async function readSavedImageLabels(imageTarPath) {
+  const { stdout: manifestJson } = await execFileAsync("tar", ["-xOf", imageTarPath, "manifest.json"], {
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  const manifest = JSON.parse(manifestJson);
+  const entry = manifest[0];
+  if (!entry || typeof entry !== "object" || typeof entry.Config !== "string") {
+    throw new Error("Saved image archive is missing manifest config metadata.");
+  }
+  const { stdout: configJson } = await execFileAsync("tar", ["-xOf", imageTarPath, entry.Config], {
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  const config = JSON.parse(configJson);
+  const labels = config?.config?.Labels;
+  if (!labels || typeof labels !== "object" || Array.isArray(labels)) {
+    throw new Error("Saved image config is missing labels.");
+  }
+  return labels;
 }
 
 function parseChecksums(content) {
@@ -214,6 +266,7 @@ async function main() {
     manifestPath: result.manifestPath,
     checksumsPath: result.checksumsPath,
     imageTarPath: result.imageTarPath,
+    releaseNotesPath: result.releaseNotesPath,
     packageRelativePaths: result.packageRelativePaths,
   })}\n`);
 }

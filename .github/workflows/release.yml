@@ -115,6 +115,11 @@ jobs:
             --build-arg "TRIAGEPILOT_GIT_COMMIT=${{ steps.release_meta.outputs.git_commit }}" \
             --build-arg "TRIAGEPILOT_PUBLISHED_AT=${{ steps.release_meta.outputs.artifact_published_at }}" \
             --build-arg "TRIAGEPILOT_FUTURE_LICENSE_EFFECTIVE_AT=${{ steps.release_meta.outputs.artifact_future_license_effective_at }}" \
+            --annotation "org.opencontainers.image.version=${{ steps.release_meta.outputs.version }}" \
+            --annotation "org.opencontainers.image.licenses=FSL-1.1-Apache-2.0" \
+            --annotation "org.opencontainers.image.revision=${{ steps.release_meta.outputs.git_commit }}" \
+            --annotation "org.opencontainers.image.created=${{ steps.release_meta.outputs.artifact_published_at }}" \
+            --annotation "org.triagepilot.future-license-effective-at=${{ steps.release_meta.outputs.artifact_future_license_effective_at }}" \
             --tag "triagepilot-release:${{ steps.release_meta.outputs.version }}" \
             .
           docker save \
@@ -153,7 +158,9 @@ jobs:
             packages/provider-github \
             packages/ui
           do
-            pnpm --dir "$package_dir" pack --pack-destination "$GITHUB_WORKSPACE/artifacts/packages"
+            TRIAGEPILOT_ARTIFACT_PUBLISHED_AT="${{ steps.release_meta.outputs.artifact_published_at }}" \
+            TRIAGEPILOT_ARTIFACT_FUTURE_LICENSE_EFFECTIVE_AT="${{ steps.release_meta.outputs.artifact_future_license_effective_at }}" \
+              pnpm --dir "$package_dir" pack --pack-destination "$GITHUB_WORKSPACE/artifacts/packages"
           done
 
       - name: Verify packed packages in a temporary consumer
@@ -206,6 +213,9 @@ jobs:
             --oci-metadata "$GITHUB_WORKSPACE/artifacts/container/metadata.json" \
             "${manifest_args[@]}"
           cp "$snapshot_dir/artifacts/release-manifest.json" "$GITHUB_WORKSPACE/artifacts/release-manifest.json"
+          node scripts/create-release-notes.mjs \
+            --manifest "$GITHUB_WORKSPACE/artifacts/release-manifest.json" \
+            --output "$GITHUB_WORKSPACE/artifacts/release-notes.md"
           git worktree remove "$snapshot_dir" --force
           (
             cd "$GITHUB_WORKSPACE/artifacts"
@@ -213,6 +223,7 @@ jobs:
               container/metadata.json \
               "container/triagepilot-${{ steps.release_meta.outputs.version }}.tar" \
               release-manifest.json \
+              release-notes.md \
               $(find packages -maxdepth 1 -type f -name '*.tgz' -print | sort) \
               > checksums.txt
           )
@@ -229,7 +240,7 @@ jobs:
     needs: build_verify
     environment: public-release
     permissions:
-      contents: read
+      contents: write
       packages: write
       id-token: write
     steps:
@@ -298,3 +309,13 @@ jobs:
           for tarball in "${package_tarballs[@]}"; do
             npm publish "$tarball" --provenance --access public
           done
+
+      - name: Publish GitHub release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "TriagePilot ${{ needs.build_verify.outputs.version }}" \
+            --notes-file artifacts/release-notes.md

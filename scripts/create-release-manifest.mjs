@@ -65,11 +65,21 @@ export async function createReleaseManifest(options) {
     if (manifest.license !== licenseId) {
       throw new Error(`Package ${manifest.name} license ${manifest.license} does not match ${licenseId}.`);
     }
+    if (manifest.publishedAt !== publishedAt) {
+      throw new Error(`Package ${manifest.name} publishedAt ${manifest.publishedAt} does not match ${publishedAt}.`);
+    }
+    if (manifest.futureLicenseEffectiveAt !== futureLicenseEffectiveAt) {
+      throw new Error(
+        `Package ${manifest.name} futureLicenseEffectiveAt ${manifest.futureLicenseEffectiveAt} does not match ${futureLicenseEffectiveAt}.`,
+      );
+    }
     seenPackages.add(manifest.name);
 
     packages.push({
       name: manifest.name,
       version: manifest.version,
+      publishedAt: manifest.publishedAt,
+      futureLicenseEffectiveAt: manifest.futureLicenseEffectiveAt,
       tarball: basename(absoluteTarballPath),
       sha256: createHash("sha256").update(await readFile(absoluteTarballPath)).digest("hex"),
     });
@@ -82,20 +92,20 @@ export async function createReleaseManifest(options) {
 
   const imageMetadata = await readImageReleaseMetadata(options.ociMetadataPath, options.containerDigest);
   if (imageMetadata.version !== options.version) {
-    throw new Error(`OCI metadata label org.opencontainers.image.version ${imageMetadata.version} does not match ${options.version}.`);
+    throw new Error(`OCI metadata annotation org.opencontainers.image.version ${imageMetadata.version} does not match ${options.version}.`);
   }
   if (imageMetadata.license !== licenseId) {
-    throw new Error(`OCI metadata label ${imageLicenseLabel} ${imageMetadata.license} does not match ${licenseId}.`);
+    throw new Error(`OCI metadata annotation ${imageLicenseLabel} ${imageMetadata.license} does not match ${licenseId}.`);
   }
   if (imageMetadata.revision !== options.gitCommit) {
-    throw new Error(`OCI metadata label ${imageRevisionLabel} ${imageMetadata.revision} does not match ${options.gitCommit}.`);
+    throw new Error(`OCI metadata annotation ${imageRevisionLabel} ${imageMetadata.revision} does not match ${options.gitCommit}.`);
   }
   if (imageMetadata.publishedAt !== publishedAt) {
-    throw new Error(`OCI metadata label ${imagePublishedAtLabel} ${imageMetadata.publishedAt} does not match ${publishedAt}.`);
+    throw new Error(`OCI metadata annotation ${imagePublishedAtLabel} ${imageMetadata.publishedAt} does not match ${publishedAt}.`);
   }
   if (imageMetadata.futureLicenseEffectiveAt !== futureLicenseEffectiveAt) {
     throw new Error(
-      `OCI metadata label ${imageFutureLicenseEffectiveAtLabel} ${imageMetadata.futureLicenseEffectiveAt} does not match ${futureLicenseEffectiveAt}.`,
+      `OCI metadata annotation ${imageFutureLicenseEffectiveAtLabel} ${imageMetadata.futureLicenseEffectiveAt} does not match ${futureLicenseEffectiveAt}.`,
     );
   }
 
@@ -180,6 +190,14 @@ export function validateReleaseManifest(manifest, expectations) {
 
     if (entry.version !== expectations.version) {
       throw new Error(`Package ${entry.name} version ${entry.version} does not match ${expectations.version}.`);
+    }
+    if (entry.publishedAt !== publishedAt) {
+      throw new Error(`Package ${entry.name} publishedAt ${entry.publishedAt} does not match ${publishedAt}.`);
+    }
+    if (entry.futureLicenseEffectiveAt !== futureLicenseEffectiveAt) {
+      throw new Error(
+        `Package ${entry.name} futureLicenseEffectiveAt ${entry.futureLicenseEffectiveAt} does not match ${futureLicenseEffectiveAt}.`,
+      );
     }
     if (typeof entry.tarball !== "string" || entry.tarball.length === 0) {
       throw new Error(`Package ${entry.name} tarball is missing.`);
@@ -286,26 +304,26 @@ export async function readImageReleaseMetadata(ociMetadataPath, digest) {
     throw new Error(`OCI metadata does not describe digest ${digest}.`);
   }
 
-  const labels = readLabels(match);
-  const version = labels["org.opencontainers.image.version"];
+  const annotations = readAnnotations(match);
+  const version = annotations["org.opencontainers.image.version"];
   if (typeof version !== "string" || version.length === 0) {
-    throw new Error("OCI metadata is missing org.opencontainers.image.version.");
+    throw new Error("OCI metadata is missing annotation org.opencontainers.image.version.");
   }
-  const imageLicense = labels[imageLicenseLabel];
+  const imageLicense = annotations[imageLicenseLabel];
   if (typeof imageLicense !== "string" || imageLicense.length === 0) {
-    throw new Error(`OCI metadata is missing ${imageLicenseLabel}.`);
+    throw new Error(`OCI metadata is missing annotation ${imageLicenseLabel}.`);
   }
-  const revision = labels[imageRevisionLabel];
+  const revision = annotations[imageRevisionLabel];
   if (typeof revision !== "string" || revision.length === 0) {
-    throw new Error(`OCI metadata is missing ${imageRevisionLabel}.`);
+    throw new Error(`OCI metadata is missing annotation ${imageRevisionLabel}.`);
   }
-  const publishedAt = labels[imagePublishedAtLabel];
+  const publishedAt = annotations[imagePublishedAtLabel];
   if (typeof publishedAt !== "string" || publishedAt.length === 0) {
-    throw new Error(`OCI metadata is missing ${imagePublishedAtLabel}.`);
+    throw new Error(`OCI metadata is missing annotation ${imagePublishedAtLabel}.`);
   }
-  const futureLicenseEffectiveAt = labels[imageFutureLicenseEffectiveAtLabel];
+  const futureLicenseEffectiveAt = annotations[imageFutureLicenseEffectiveAtLabel];
   if (typeof futureLicenseEffectiveAt !== "string" || futureLicenseEffectiveAt.length === 0) {
-    throw new Error(`OCI metadata is missing ${imageFutureLicenseEffectiveAtLabel}.`);
+    throw new Error(`OCI metadata is missing annotation ${imageFutureLicenseEffectiveAtLabel}.`);
   }
   return { version, license: imageLicense, revision, publishedAt, futureLicenseEffectiveAt };
 }
@@ -328,30 +346,25 @@ function metadataMatchesDigest(candidate, digest) {
   return repoDigests.some((entry) => typeof entry === "string" && entry.endsWith(`@${digest}`));
 }
 
-function readLabels(candidate) {
-  if (!candidate || typeof candidate !== "object") return {};
-  if (candidate.labels && typeof candidate.labels === "object" && !Array.isArray(candidate.labels)) {
-    return candidate.labels;
+function readAnnotations(candidate) {
+  const annotations = {};
+  if (!candidate || typeof candidate !== "object") return annotations;
+
+  for (const source of [
+    candidate.annotations,
+    candidate.Annotations,
+    candidate["containerimage.descriptor"]?.annotations,
+  ]) {
+    if (!source || typeof source !== "object" || Array.isArray(source)) continue;
+    for (const [key, value] of Object.entries(source)) {
+      if (annotations[key] !== undefined && annotations[key] !== value) {
+        throw new Error(`OCI metadata annotation ${key} has conflicting values.`);
+      }
+      annotations[key] = value;
+    }
   }
-  if (
-    candidate.Config &&
-    typeof candidate.Config === "object" &&
-    candidate.Config.Labels &&
-    typeof candidate.Config.Labels === "object" &&
-    !Array.isArray(candidate.Config.Labels)
-  ) {
-    return candidate.Config.Labels;
-  }
-  if (
-    candidate["containerimage.descriptor"] &&
-    typeof candidate["containerimage.descriptor"] === "object" &&
-    candidate["containerimage.descriptor"].annotations &&
-    typeof candidate["containerimage.descriptor"].annotations === "object" &&
-    !Array.isArray(candidate["containerimage.descriptor"].annotations)
-  ) {
-    return candidate["containerimage.descriptor"].annotations;
-  }
-  return {};
+
+  return annotations;
 }
 
 export function deriveFutureLicenseEffectiveAt(publishedAt) {

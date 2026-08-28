@@ -1,6 +1,8 @@
 export interface ReleaseManifestPackage {
   name: string;
   version: string;
+  publishedAt: string;
+  futureLicenseEffectiveAt: string;
   tarball: string;
   sha256: string;
 }

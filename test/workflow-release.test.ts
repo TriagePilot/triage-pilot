@@ -33,6 +33,16 @@ describe("release workflow guardrails", () => {
     expect(release).toContain('--build-arg "TRIAGEPILOT_GIT_COMMIT=${{ steps.release_meta.outputs.git_commit }}"');
     expect(release).toContain('--build-arg "TRIAGEPILOT_PUBLISHED_AT=${{ steps.release_meta.outputs.artifact_published_at }}"');
     expect(release).toContain('--build-arg "TRIAGEPILOT_FUTURE_LICENSE_EFFECTIVE_AT=${{ steps.release_meta.outputs.artifact_future_license_effective_at }}"');
+    expect(release).toContain('--annotation "org.opencontainers.image.licenses=FSL-1.1-Apache-2.0"');
+    expect(release).toContain('--annotation "org.opencontainers.image.revision=${{ steps.release_meta.outputs.git_commit }}"');
+    expect(release).toContain('--annotation "org.opencontainers.image.created=${{ steps.release_meta.outputs.artifact_published_at }}"');
+    expect(release).toContain('--annotation "org.triagepilot.future-license-effective-at=${{ steps.release_meta.outputs.artifact_future_license_effective_at }}"');
+    expect(release).toContain('TRIAGEPILOT_ARTIFACT_PUBLISHED_AT="${{ steps.release_meta.outputs.artifact_published_at }}"');
+    expect(release).toContain('TRIAGEPILOT_ARTIFACT_FUTURE_LICENSE_EFFECTIVE_AT="${{ steps.release_meta.outputs.artifact_future_license_effective_at }}"');
     expect(release).toContain('--published-at "${{ steps.release_meta.outputs.artifact_published_at }}"');
+    expect(release).toContain('node scripts/create-release-notes.mjs');
+    expect(release).toContain('release-notes.md');
+    expect(release).toContain('gh release create "$GITHUB_REF_NAME"');
+    expect(release).toContain('--notes-file artifacts/release-notes.md');
   });
 });
