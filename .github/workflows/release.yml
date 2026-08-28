@@ -104,13 +104,24 @@ jobs:
       - run: pnpm check:public-boundary
       - run: docker compose config
 
-      - name: Build single release image
+      - name: Build local release test image
+        run: |
+          set -Eeuo pipefail
+          docker build \
+            --build-arg "TRIAGEPILOT_VERSION=${{ steps.release_meta.outputs.version }}" \
+            --build-arg "TRIAGEPILOT_GIT_COMMIT=${{ steps.release_meta.outputs.git_commit }}" \
+            --build-arg "TRIAGEPILOT_PUBLISHED_AT=${{ steps.release_meta.outputs.artifact_published_at }}" \
+            --build-arg "TRIAGEPILOT_FUTURE_LICENSE_EFFECTIVE_AT=${{ steps.release_meta.outputs.artifact_future_license_effective_at }}" \
+            --tag "triagepilot-release:${{ steps.release_meta.outputs.version }}" \
+            .
+
+      - name: Build publishable OCI image archive
         run: |
           set -Eeuo pipefail
           mkdir -p artifacts/container
           BUILDX_METADATA_PROVENANCE=max docker buildx build \
-            --load \
             --metadata-file artifacts/container/metadata.json \
+            --output "type=oci,dest=artifacts/container/triagepilot-${{ steps.release_meta.outputs.version }}.oci.tar,name=${{ steps.release_meta.outputs.image_name }}" \
             --build-arg "TRIAGEPILOT_VERSION=${{ steps.release_meta.outputs.version }}" \
             --build-arg "TRIAGEPILOT_GIT_COMMIT=${{ steps.release_meta.outputs.git_commit }}" \
             --build-arg "TRIAGEPILOT_PUBLISHED_AT=${{ steps.release_meta.outputs.artifact_published_at }}" \
@@ -122,9 +133,6 @@ jobs:
             --annotation "org.triagepilot.future-license-effective-at=${{ steps.release_meta.outputs.artifact_future_license_effective_at }}" \
             --tag "triagepilot-release:${{ steps.release_meta.outputs.version }}" \
             .
-          docker save \
-            --output "artifacts/container/triagepilot-${{ steps.release_meta.outputs.version }}.tar" \
-            "triagepilot-release:${{ steps.release_meta.outputs.version }}"
 
       - id: container_meta
         name: Capture release image digest
@@ -221,7 +229,7 @@ jobs:
             cd "$GITHUB_WORKSPACE/artifacts"
             sha256sum \
               container/metadata.json \
-              "container/triagepilot-${{ steps.release_meta.outputs.version }}.tar" \
+              "container/triagepilot-${{ steps.release_meta.outputs.version }}.oci.tar" \
               release-manifest.json \
               release-notes.md \
               $(find packages -maxdepth 1 -type f -name '*.tgz' -print | sort) \
@@ -258,64 +266,28 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          version: 1.3.3
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: public-release-artifacts
           path: artifacts
 
-      - name: Revalidate downloaded release manifest
-        run: |
-          set -Eeuo pipefail
-          verification_json="$(node scripts/verify-release-artifacts.mjs \
-            --artifacts-dir artifacts \
-            --version "${{ needs.build_verify.outputs.version }}" \
-            --git-commit "${{ needs.build_verify.outputs.git_commit }}" \
-            --database-migration 0006_decision_outbox.sql \
-            --container-digest "${{ needs.build_verify.outputs.container_digest }}")"
-          printf '%s\n' "$verification_json" > artifacts/verified-release.json
-
-      - name: Publish container image
-        run: |
-          set -Eeuo pipefail
-          docker load --input "artifacts/container/triagepilot-${{ needs.build_verify.outputs.version }}.tar"
-          docker tag \
-            "triagepilot-release:${{ needs.build_verify.outputs.version }}" \
-            "${{ needs.build_verify.outputs.image_name }}"
-          docker push "${{ needs.build_verify.outputs.image_name }}"
-          repo_digests="$(docker image inspect "${{ needs.build_verify.outputs.image_name }}" --format '{{json .RepoDigests}}')"
-          if [[ "$repo_digests" != *"${{ needs.build_verify.outputs.container_digest }}"* ]]; then
-            echo "Pushed image digest did not match ${{ needs.build_verify.outputs.container_digest }}." >&2
-            exit 1
-          fi
-
-      - name: Publish packages with npm provenance
-        run: |
-          set -Eeuo pipefail
-          mapfile -t package_tarballs < <(node --input-type=module <<'NODE'
-          import { readFileSync } from "node:fs";
-
-          const verification = JSON.parse(readFileSync("artifacts/verified-release.json", "utf8"));
-          for (const relativePath of verification.packageRelativePaths) {
-            process.stdout.write(`artifacts/${relativePath}\n`);
-          }
-          NODE
-          )
-          for tarball in "${package_tarballs[@]}"; do
-            npm publish "$tarball" --provenance --access public
-          done
-
-      - name: Publish GitHub release notes
+      - name: Publish verified artifacts idempotently
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -Eeuo pipefail
-          gh release create "$GITHUB_REF_NAME" \
-            --verify-tag \
-            --title "TriagePilot ${{ needs.build_verify.outputs.version }}" \
-            --notes-file artifacts/release-notes.md
+          oras version
+          printf '%s' "$GH_TOKEN" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
+          node scripts/publish-release-artifacts.mjs \
+            --artifacts-dir artifacts \
+            --version "${{ needs.build_verify.outputs.version }}" \
+            --tag-name "$GITHUB_REF_NAME" \
+            --image-name "${{ needs.build_verify.outputs.image_name }}" \
+            --git-commit "${{ needs.build_verify.outputs.git_commit }}" \
+            --database-migration 0006_decision_outbox.sql \
+            --container-digest "${{ needs.build_verify.outputs.container_digest }}"

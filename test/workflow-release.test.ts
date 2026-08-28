@@ -21,18 +21,23 @@ describe("release workflow guardrails", () => {
 
   it("enforces exact annotated semver tags and verifies downloaded artifacts before publish", async () => {
     const release = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+    const publishScript = await readFile(new URL("../scripts/publish-release-artifacts.mjs", import.meta.url), "utf8");
 
     expect(release).toMatch(/\[\[\s+!\s+"\$GITHUB_REF_NAME"\s+=~\s+\^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$\s+\]\]/);
-    expect(release).toContain('node scripts/verify-release-artifacts.mjs');
+    expect(publishScript).toContain('verifyReleaseArtifacts({');
     expect(release).toContain('cd "$GITHUB_WORKSPACE/artifacts"');
     expect(release).toContain('find packages -maxdepth 1 -type f -name \'*.tgz\' -print | sort');
     expect(release).not.toContain('for tarball in artifacts/packages/*.tgz; do');
-    expect(release).toContain('mapfile -t package_tarballs < <(node --input-type=module');
     expect(release).toContain('artifact_published_at="$(node --input-type=module');
     expect(release).toContain('artifact_future_license_effective_at="$(ARTIFACT_PUBLISHED_AT="$artifact_published_at" node --input-type=module');
     expect(release).toContain('--build-arg "TRIAGEPILOT_GIT_COMMIT=${{ steps.release_meta.outputs.git_commit }}"');
     expect(release).toContain('--build-arg "TRIAGEPILOT_PUBLISHED_AT=${{ steps.release_meta.outputs.artifact_published_at }}"');
     expect(release).toContain('--build-arg "TRIAGEPILOT_FUTURE_LICENSE_EFFECTIVE_AT=${{ steps.release_meta.outputs.artifact_future_license_effective_at }}"');
+    expect(release).not.toContain("--load");
+    expect(release).not.toContain("docker save");
+    expect(release).not.toContain("docker load --input");
+    expect(release).not.toContain("docker push");
+    expect(release).toContain('--output "type=oci,dest=artifacts/container/triagepilot-${{ steps.release_meta.outputs.version }}.oci.tar');
     expect(release).toContain('--annotation "org.opencontainers.image.licenses=FSL-1.1-Apache-2.0"');
     expect(release).toContain('--annotation "org.opencontainers.image.revision=${{ steps.release_meta.outputs.git_commit }}"');
     expect(release).toContain('--annotation "org.opencontainers.image.created=${{ steps.release_meta.outputs.artifact_published_at }}"');
@@ -42,7 +47,13 @@ describe("release workflow guardrails", () => {
     expect(release).toContain('--published-at "${{ steps.release_meta.outputs.artifact_published_at }}"');
     expect(release).toContain('node scripts/create-release-notes.mjs');
     expect(release).toContain('release-notes.md');
-    expect(release).toContain('gh release create "$GITHUB_REF_NAME"');
-    expect(release).toContain('--notes-file artifacts/release-notes.md');
+    expect(release).toContain('oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d');
+    expect(release).toContain("node scripts/publish-release-artifacts.mjs");
+    expect(publishScript).toContain('"oras", ["cp", "--from-oci-layout-path"');
+    expect(publishScript).toContain('"oras", ["resolve", options.imageName]');
+    expect(publishScript).toContain('"oras", ["manifest", "fetch", reference]');
+    expect(publishScript).toContain('"gh", ["release", "view"');
+    expect(publishScript).toContain('"create"');
+    expect(publishScript).toContain('"--notes-file"');
   });
 });

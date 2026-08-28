@@ -26,7 +26,7 @@ export async function verifyReleaseArtifacts(options) {
   const releaseNotesPath = join(artifactsDir, "release-notes.md");
   const checksumsPath = join(artifactsDir, "checksums.txt");
   const metadataPath = join(artifactsDir, "container", "metadata.json");
-  const imageTarRelativePath = `container/triagepilot-${options.version}.tar`;
+  const imageTarRelativePath = `container/triagepilot-${options.version}.oci.tar`;
   const imageTarPath = join(artifactsDir, imageTarRelativePath);
 
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
@@ -61,7 +61,7 @@ export async function verifyReleaseArtifacts(options) {
       `Buildx metadata futureLicenseEffectiveAt ${imageMetadata.futureLicenseEffectiveAt} does not match manifest futureLicenseEffectiveAt ${manifest.futureLicenseEffectiveAt}.`,
     );
   }
-  const savedImageLabels = await readSavedImageLabels(imageTarPath);
+  const publishableImageMetadata = await readPublishableImageMetadata(imageTarPath, options.containerDigest);
   const expectedImageValues = {
     "org.opencontainers.image.version": manifest.version,
     "org.opencontainers.image.licenses": manifest.license,
@@ -70,8 +70,13 @@ export async function verifyReleaseArtifacts(options) {
     "org.triagepilot.future-license-effective-at": manifest.futureLicenseEffectiveAt,
   };
   for (const key of imageMetadataKeys) {
-    if (savedImageLabels[key] !== expectedImageValues[key]) {
-      throw new Error(`Saved image label ${key} ${savedImageLabels[key]} does not match ${expectedImageValues[key]}.`);
+    if (publishableImageMetadata.annotations[key] !== expectedImageValues[key]) {
+      throw new Error(
+        `Publishable image annotation ${key} ${publishableImageMetadata.annotations[key]} does not match ${expectedImageValues[key]}.`,
+      );
+    }
+    if (publishableImageMetadata.labels[key] !== expectedImageValues[key]) {
+      throw new Error(`Saved image label ${key} ${publishableImageMetadata.labels[key]} does not match ${expectedImageValues[key]}.`);
     }
   }
 
@@ -135,24 +140,45 @@ export async function verifyReleaseArtifacts(options) {
   return { manifestPath, releaseNotesPath, checksumsPath, imageTarPath, packageRelativePaths: expectedPackageRelativePaths };
 }
 
-async function readSavedImageLabels(imageTarPath) {
-  const { stdout: manifestJson } = await execFileAsync("tar", ["-xOf", imageTarPath, "manifest.json"], {
+export async function readPublishableImageMetadata(imageTarPath, digest) {
+  const { stdout: indexJson } = await execFileAsync("tar", ["-xOf", imageTarPath, "index.json"], {
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  const index = JSON.parse(indexJson);
+  const descriptor = index?.manifests?.find((entry) => entry?.digest === digest);
+  if (!descriptor) {
+    throw new Error(`Publishable OCI image archive does not describe digest ${digest}.`);
+  }
+
+  const { stdout: manifestJson } = await execFileAsync("tar", ["-xOf", imageTarPath, blobPathForDigest(digest)], {
     maxBuffer: 16 * 1024 * 1024,
   });
   const manifest = JSON.parse(manifestJson);
-  const entry = manifest[0];
-  if (!entry || typeof entry !== "object" || typeof entry.Config !== "string") {
-    throw new Error("Saved image archive is missing manifest config metadata.");
+  const annotations = readRecord(manifest.annotations, "publishable image annotations");
+  const configDigest = manifest?.config?.digest;
+  if (typeof configDigest !== "string" || configDigest.length === 0) {
+    throw new Error("Publishable OCI image manifest is missing config digest.");
   }
-  const { stdout: configJson } = await execFileAsync("tar", ["-xOf", imageTarPath, entry.Config], {
+
+  const { stdout: configJson } = await execFileAsync("tar", ["-xOf", imageTarPath, blobPathForDigest(configDigest)], {
     maxBuffer: 16 * 1024 * 1024,
   });
   const config = JSON.parse(configJson);
-  const labels = config?.config?.Labels;
-  if (!labels || typeof labels !== "object" || Array.isArray(labels)) {
-    throw new Error("Saved image config is missing labels.");
+  const labels = readRecord(config?.config?.Labels, "saved image config labels");
+  return { annotations, labels };
+}
+
+function blobPathForDigest(digest) {
+  const match = /^sha256:([0-9a-f]{64})$/.exec(digest);
+  if (!match) throw new Error(`Unsupported OCI digest ${digest}.`);
+  return `blobs/sha256/${match[1]}`;
+}
+
+function readRecord(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Expected ${label} to be an object.`);
   }
-  return labels;
+  return value;
 }
 
 function parseChecksums(content) {
