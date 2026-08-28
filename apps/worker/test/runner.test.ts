@@ -409,17 +409,20 @@ describe("runWorkerOnce", () => {
       },
       reviewerLoad: vi.fn(async () => ({})),
       decisions: {
-        persist: vi.fn(async () => ({
-          decisionId: "decision-1",
-          actionStatus: "pending" as const,
-          actionError: null,
-          actionAppliedAt: null,
-        })),
+        persistWithEvent: vi.fn(async (_input, event) => {
+          const persisted = {
+            decisionId: "decision-1",
+            actionStatus: "pending" as const,
+            actionError: null,
+            actionAppliedAt: null,
+          };
+          event(persisted);
+          return persisted;
+        }),
         markActionSucceeded: vi.fn(async () => {}),
         markActionFailed: vi.fn(async () => {}),
       },
       enqueueReviewPolicy: vi.fn(async () => {}),
-      stageDecisionEvent: vi.fn(async () => {}),
       clock: { now: () => new Date("2026-08-18T10:00:00.000Z") },
     };
 

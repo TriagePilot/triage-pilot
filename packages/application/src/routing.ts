@@ -53,6 +53,8 @@ export interface PersistedDecision {
   actionAppliedAt: Date | null;
 }
 
+export type DecisionEventFactory = (persisted: PersistedDecision) => DecisionEventV1;
+
 export interface RoutingApplicationPorts {
   resolveConfiguration(job: RoutingJobPayload): Promise<EffectiveConfigurationResult>;
   provider: {
@@ -82,12 +84,11 @@ export interface RoutingApplicationPorts {
   };
   reviewerLoad(input: { workspaceId: WorkspaceId; actors: ExternalActorId[] }): Promise<Record<string, number>>;
   decisions: {
-    persist(input: DecisionInput): Promise<PersistedDecision>;
+    persistWithEvent(input: DecisionInput, event: DecisionEventFactory): Promise<PersistedDecision>;
     markActionSucceeded(decisionId: string, at: Date): Promise<void>;
     markActionFailed(decisionId: string, error: string, at: Date): Promise<void>;
   };
   enqueueReviewPolicy(input: HumanReviewPolicyJobPayload): Promise<void>;
-  stageDecisionEvent(event: DecisionEventV1): Promise<void>;
   clock: Clock;
 }
 
@@ -102,25 +103,27 @@ export async function processChangeRequest(
 ): Promise<RoutingOutcome> {
   const configuration = await ports.resolveConfiguration(job);
   if (!configuration.ok) {
-    const persisted = await ports.decisions.persist({
-      ...decisionIdentity(job),
-      mode: "shadow",
-      action: "configuration_failure",
-      actionStatus: "not_applied",
-      riskScore: 0,
-      details: { changeRequestNumber: job.changeRequest.number, diagnostics: configuration.diagnostics },
-      ...persistenceProvenance(configuration.provenance, configuration.diagnostics),
-    });
-    await ports.stageDecisionEvent(decisionEvent({
-      job,
-      decisionId: persisted.decisionId,
-      mode: "shadow",
-      action: "configuration_failure",
-      riskScore: 0,
-      selectedActors: [],
-      effectiveConfigurationHash: configuration.provenance.effectiveHash ?? "invalid",
-      occurredAt: ports.clock.now(),
-    }));
+    const persisted = await ports.decisions.persistWithEvent(
+      {
+        ...decisionIdentity(job),
+        mode: "shadow",
+        action: "configuration_failure",
+        actionStatus: "not_applied",
+        riskScore: 0,
+        details: { changeRequestNumber: job.changeRequest.number, diagnostics: configuration.diagnostics },
+        ...persistenceProvenance(configuration.provenance, configuration.diagnostics),
+      },
+      ({ decisionId }) => decisionEvent({
+        job,
+        decisionId,
+        mode: "shadow",
+        action: "configuration_failure",
+        riskScore: 0,
+        selectedActors: [],
+        effectiveConfigurationHash: configuration.provenance.effectiveHash ?? "invalid",
+        occurredAt: ports.clock.now(),
+      }),
+    );
     return { status: "configuration_failure", decisionId: persisted.decisionId };
   }
 
@@ -187,17 +190,19 @@ export async function processChangeRequest(
   if (routing.selectedReviewers.length > 0) decision.selectedActors = routing.selectedReviewers;
   if (routing.noHumanReason !== undefined) decision.noHumanReason = routing.noHumanReason;
 
-  const persisted = await ports.decisions.persist(decision);
-  await ports.stageDecisionEvent(decisionEvent({
-    job,
-    decisionId: persisted.decisionId,
-    mode: config.mode,
-    action: routing.action,
-    riskScore: risk.score,
-    selectedActors: routing.selectedReviewers,
-    effectiveConfigurationHash: provenance.effectiveHash ?? "invalid",
-    occurredAt: ports.clock.now(),
-  }));
+  const persisted = await ports.decisions.persistWithEvent(
+    decision,
+    ({ decisionId }) => decisionEvent({
+      job,
+      decisionId,
+      mode: config.mode,
+      action: routing.action,
+      riskScore: risk.score,
+      selectedActors: routing.selectedReviewers,
+      effectiveConfigurationHash: provenance.effectiveHash ?? "invalid",
+      occurredAt: ports.clock.now(),
+    }),
+  );
   if (persisted.actionStatus === "succeeded") {
     return { status: "decided", decisionId: persisted.decisionId, mode: config.mode, actionStatus: "succeeded" };
   }

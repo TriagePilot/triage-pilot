@@ -23,12 +23,16 @@ const message: RoutingJobPayload = {
 
 describe("processRoutingJob", () => {
   it("delegates worker jobs to the provider-neutral application service", async () => {
-    const persist = vi.fn(async () => ({
-      decisionId: "decision-1",
-      actionStatus: "not_applied" as const,
-      actionError: null,
-      actionAppliedAt: null,
-    }));
+    const persistWithEvent = vi.fn(async (_input, event) => {
+      const persisted = {
+        decisionId: "decision-1",
+        actionStatus: "not_applied" as const,
+        actionError: null,
+        actionAppliedAt: null,
+      };
+      event(persisted);
+      return persisted;
+    });
     const ports: RoutingApplicationPorts = {
       resolveConfiguration: vi.fn<RoutingApplicationPorts["resolveConfiguration"]>(async () => ({
         ok: true as const,
@@ -74,17 +78,16 @@ describe("processRoutingJob", () => {
       },
       reviewerLoad: vi.fn(async () => ({})),
       decisions: {
-        persist,
+        persistWithEvent,
         markActionSucceeded: vi.fn(async () => {}),
         markActionFailed: vi.fn(async () => {}),
       },
       enqueueReviewPolicy: vi.fn(async () => {}),
-      stageDecisionEvent: vi.fn(async () => {}),
       clock: { now: () => new Date("2026-08-27T10:00:00.000Z") },
     };
 
     await processRoutingJob(message, ports);
 
-    expect(persist).toHaveBeenCalledOnce();
+    expect(persistWithEvent).toHaveBeenCalledOnce();
   });
 });

@@ -283,7 +283,7 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
       },
 
       decisions: {
-        async persist(decision) {
+        async persistWithEvent(decision, event) {
           const persisted = await persistDecisionWithEvent(input.db, message.workspaceId, {
             decision: {
               repositoryId: await repositoryId(),
@@ -306,22 +306,7 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
               configDiagnostics: decision.configDiagnostics,
               configSources: decision.configSources,
             },
-            event: ({ decisionId }) => ({
-              schemaVersion: 1,
-              eventId: `decision:${decisionId}:v1`,
-              occurredAt: clock.now().toISOString(),
-              workspaceId: message.workspaceId,
-              provider: repository.provider,
-              decisionId,
-              repositoryId: repository.externalId,
-              changeRequestId: changeRequest.externalId,
-              routingKey: decision.routingKey,
-              mode: decision.mode,
-              action: decision.action,
-              riskScore: decision.riskScore,
-              selectedActors: decision.selectedActors ?? [],
-              effectiveConfigurationHash: decision.effectiveConfigHash ?? "invalid",
-            }),
+            event,
           });
           persistedDecisionId = persisted.decisionId;
           return persisted;
@@ -335,8 +320,6 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
           await persistActionFailed(input.db, message.workspaceId, decisionId, error, at);
         },
       },
-
-      async stageDecisionEvent() {},
 
       clock,
 

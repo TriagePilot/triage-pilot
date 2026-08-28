@@ -75,57 +75,109 @@ function buildPorts(configuration = effectiveConfiguration("version: 1\nmode: sh
       async ({ actors }) => Object.fromEntries(actors.map((actor) => [actor, 0])),
     ),
     decisions: {
-      persist: vi.fn(async (input: DecisionInput) => ({
-        decisionId: "decision-1",
-        actionStatus: input.actionStatus,
-        actionError: null,
-        actionAppliedAt: null,
-      })),
+      persistWithEvent: vi.fn(async (input: DecisionInput, event) => {
+        const persisted = {
+          decisionId: "decision-1",
+          actionStatus: input.actionStatus,
+          actionError: null,
+          actionAppliedAt: null,
+        };
+        event(persisted);
+        return persisted;
+      }),
       markActionSucceeded: vi.fn(async () => {}),
       markActionFailed: vi.fn(async () => {}),
     },
     enqueueReviewPolicy: vi.fn(async () => {}),
-    stageDecisionEvent: vi.fn(async () => {}),
     clock: { now: vi.fn(() => new Date("2026-08-27T10:00:00.000Z")) },
   };
 }
 
 describe("processChangeRequest", () => {
-  it("persists invalid configuration with provenance and stages only after persistence", async () => {
-    const ports = buildPorts(effectiveConfiguration("version: 1\nmode: observe\n"));
-    const order: string[] = [];
-    vi.mocked(ports.decisions.persist).mockImplementationOnce(async (input) => {
-      order.push("persist");
-      return { decisionId: "decision-invalid", actionStatus: input.actionStatus, actionError: null, actionAppliedAt: null };
+  it("persists each routing decision and its event through one atomic application port", async () => {
+    const baseline = buildPorts();
+    const persistWithEvent = vi.fn(async (input: DecisionInput, event: (persisted: {
+      decisionId: string;
+      actionStatus: "not_applied" | "pending" | "succeeded" | "failed";
+      actionError: string | null;
+      actionAppliedAt: Date | null;
+    }) => unknown) => {
+      const persisted = {
+        decisionId: "decision-atomic",
+        actionStatus: input.actionStatus,
+        actionError: null,
+        actionAppliedAt: null,
+      };
+      expect(event(persisted)).toMatchObject({
+        schemaVersion: 1,
+        decisionId: "decision-atomic",
+        workspaceId: "ws-a",
+        provider: "gitlab",
+      });
+      return persisted;
     });
-    vi.mocked(ports.stageDecisionEvent).mockImplementationOnce(async () => { order.push("stage"); });
+    const ports = {
+      ...baseline,
+      decisions: {
+        persistWithEvent,
+        markActionSucceeded: baseline.decisions.markActionSucceeded,
+        markActionFailed: baseline.decisions.markActionFailed,
+      },
+    } as RoutingApplicationPorts;
+
+    await expect(processChangeRequest(job, ports)).resolves.toEqual({
+      status: "decided",
+      decisionId: "decision-atomic",
+      mode: "shadow",
+      actionStatus: "not_applied",
+    });
+    expect(persistWithEvent).toHaveBeenCalledOnce();
+  });
+
+  it("persists invalid configuration and its event through the atomic port", async () => {
+    const ports = buildPorts(effectiveConfiguration("version: 1\nmode: observe\n"));
+    let stagedEvent: unknown;
+    vi.mocked(ports.decisions.persistWithEvent).mockImplementationOnce(async (input, event) => {
+      const persisted = {
+        decisionId: "decision-invalid",
+        actionStatus: input.actionStatus,
+        actionError: null,
+        actionAppliedAt: null,
+      };
+      stagedEvent = event(persisted);
+      return persisted;
+    });
 
     const outcome = await processChangeRequest(job, ports);
 
     expect(outcome).toEqual({ status: "configuration_failure", decisionId: "decision-invalid" });
-    expect(ports.decisions.persist).toHaveBeenCalledWith(expect.objectContaining({
-      workspaceId: "ws-a",
-      repository: job.changeRequest.repository,
+    expect(ports.decisions.persistWithEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: "ws-a",
+        repository: job.changeRequest.repository,
+        action: "configuration_failure",
+        actionStatus: "not_applied",
+        organizationConfigVersion: "org-v3",
+        repositoryConfigPath: ".triagepilot.yml",
+        repositoryConfigRevision: "base-sha",
+        inheritanceMode: "inherit",
+        configDiagnostics: expect.arrayContaining([expect.objectContaining({ path: "$.mode" })]),
+      }),
+      expect.any(Function),
+    );
+    expect(stagedEvent).toMatchObject({
+      decisionId: "decision-invalid",
       action: "configuration_failure",
-      actionStatus: "not_applied",
-      organizationConfigVersion: "org-v3",
-      repositoryConfigPath: ".triagepilot.yml",
-      repositoryConfigRevision: "base-sha",
-      inheritanceMode: "inherit",
-      configDiagnostics: expect.arrayContaining([expect.objectContaining({ path: "$.mode" })]),
-    }));
-    expect(order).toEqual(["persist", "stage"]);
+    });
     expect(ports.provider.fetchChangeRequestMetadata).not.toHaveBeenCalled();
     expect(ports.provider.applyActions).not.toHaveBeenCalled();
   });
 
-  it("does not stage an event when first decision persistence fails", async () => {
+  it("leaves event staging to the atomic port when decision persistence fails", async () => {
     const ports = buildPorts();
-    vi.mocked(ports.decisions.persist).mockRejectedValueOnce(new Error("storage unavailable"));
+    vi.mocked(ports.decisions.persistWithEvent).mockRejectedValueOnce(new Error("storage unavailable"));
 
     await expect(processChangeRequest(job, ports)).rejects.toThrow("storage unavailable");
-
-    expect(ports.stageDecisionEvent).not.toHaveBeenCalled();
   });
 
   it("skips drafts before provider reads unless configuration includes drafts", async () => {
@@ -135,7 +187,7 @@ describe("processChangeRequest", () => {
 
     expect(outcome).toEqual({ status: "skipped", reason: "draft" });
     expect(ports.provider.fetchChangeRequestMetadata).not.toHaveBeenCalled();
-    expect(ports.decisions.persist).not.toHaveBeenCalled();
+    expect(ports.decisions.persistWithEvent).not.toHaveBeenCalled();
   });
 
   it("routes drafts when explicitly configured", async () => {
@@ -167,7 +219,7 @@ describe("processChangeRequest", () => {
 
     expect(outcome).toEqual({ status: "skipped", reason });
     expect(ports.provider.fetchChangedFiles).not.toHaveBeenCalled();
-    expect(ports.decisions.persist).not.toHaveBeenCalled();
+    expect(ports.decisions.persistWithEvent).not.toHaveBeenCalled();
   });
 
   it("skips a stale revision before scoring or applying actions", async () => {
@@ -204,13 +256,16 @@ ownership:
     const outcome = await processChangeRequest(job, ports);
 
     expect(outcome).toEqual({ status: "decided", decisionId: "decision-1", mode: "shadow", actionStatus: "not_applied" });
-    expect(ports.decisions.persist).toHaveBeenCalledWith(expect.objectContaining({
-      riskScore: 100,
-      action: "request_human_review",
-      selectedActors: ["@user-2e7d4b", "@user-a91f5c"],
-      effectiveConfigHash: "effective-hash",
-      configSources: { "$.mode": "repository" },
-    }));
+    expect(ports.decisions.persistWithEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        riskScore: 100,
+        action: "request_human_review",
+        selectedActors: ["@user-2e7d4b", "@user-a91f5c"],
+        effectiveConfigHash: "effective-hash",
+        configSources: { "$.mode": "repository" },
+      }),
+      expect.any(Function),
+    );
     expect(ports.provider.applyActions).not.toHaveBeenCalled();
     expect(ports.enqueueReviewPolicy).not.toHaveBeenCalled();
   });
@@ -232,7 +287,10 @@ ownership:
     await processChangeRequest(job, ports);
 
     expect(ports.reviewerLoad).toHaveBeenCalledWith({ workspaceId: "ws-a", actors: ["@user-a91f5c", "@user-2e7d4b"] });
-    expect(ports.decisions.persist).toHaveBeenCalledWith(expect.objectContaining({ selectedActors: ["@user-a91f5c"] }));
+    expect(ports.decisions.persistWithEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ selectedActors: ["@user-a91f5c"] }),
+      expect.any(Function),
+    );
   });
 
   it("credits active human approvals, including approvals that predate routing", async () => {
@@ -253,9 +311,10 @@ ownership:
 
     await processChangeRequest(job, ports);
 
-    expect(ports.decisions.persist).toHaveBeenCalledWith(expect.objectContaining({
-      selectedActors: ["@user-4d8a2e", "@user-7c1f9b"],
-    }));
+    expect(ports.decisions.persistWithEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ selectedActors: ["@user-4d8a2e", "@user-7c1f9b"] }),
+      expect.any(Function),
+    );
     expect(ports.provider.applyActions).toHaveBeenCalledWith(expect.objectContaining({
       selectedActors: ["@user-4d8a2e", "@user-7c1f9b"],
       actorsToRequest: [],
@@ -300,7 +359,7 @@ ownership:
 
   it("does not reapply or re-enqueue an already succeeded decision", async () => {
     const ports = buildPorts(effectiveConfiguration("version: 1\nmode: enforce\n"));
-    vi.mocked(ports.decisions.persist).mockResolvedValueOnce({
+    vi.mocked(ports.decisions.persistWithEvent).mockResolvedValueOnce({
       decisionId: "decision-1",
       actionStatus: "succeeded",
       actionError: null,
