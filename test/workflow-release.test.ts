@@ -57,6 +57,7 @@ describe("release workflow guardrails", () => {
     expect(release).toContain("--provenance=false");
     expect(release).toContain('--metadata-file "$RUNNER_TEMP/buildx-metadata.json"');
     expect(release).toContain("node scripts/create-release-image-metadata.mjs");
+    expect(release).toContain('--oci-archive "artifacts/container/triagepilot-${{ steps.release_meta.outputs.version }}.oci.tar"');
     expect(release).toContain('--output "type=oci,dest=artifacts/container/triagepilot-${{ steps.release_meta.outputs.version }}.oci.tar');
     expect(release).toContain("rewrite-timestamp=true");
     expect(release).toContain('--annotation "index,manifest:org.opencontainers.image.licenses=FSL-1.1-Apache-2.0"');

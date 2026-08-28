@@ -146,6 +146,7 @@ jobs:
             .
           node scripts/create-release-image-metadata.mjs \
             --input "$RUNNER_TEMP/buildx-metadata.json" \
+            --oci-archive "artifacts/container/triagepilot-${{ steps.release_meta.outputs.version }}.oci.tar" \
             --output artifacts/container/metadata.json
 
       - id: container_meta
