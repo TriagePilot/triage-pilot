@@ -293,7 +293,42 @@ ownership:
     );
   });
 
-  it("credits active human approvals, including approvals that predate routing", async () => {
+  it("passes matched owners as the preferred routing tier while retaining fallback capacity", async () => {
+    const ports = buildPorts(effectiveConfiguration(`
+version: 1
+mode: shadow
+risk:
+  paths:
+    - pattern: README.md
+      weight: 30
+      tag: docs
+ownership:
+  fallback_reviewers: ["@user-a91f5c"]
+  rules:
+    - paths: [README.md]
+      reviewers: ["@user-2e7d4b"]
+`));
+    vi.mocked(ports.reviewerLoad).mockResolvedValueOnce({ "@user-2e7d4b": 9, "@user-a91f5c": 0 });
+
+    await processChangeRequest(job, ports);
+
+    expect(ports.reviewerLoad).toHaveBeenCalledWith({
+      workspaceId: "ws-a",
+      actors: ["@user-2e7d4b", "@user-a91f5c"],
+    });
+    expect(ports.decisions.persistWithEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selectedActors: ["@user-2e7d4b"],
+        details: expect.objectContaining({
+          ownership: expect.objectContaining({ preferredReviewers: ["@user-2e7d4b"] }),
+          routing: expect.objectContaining({ requestedReviewerCount: 1, reviewerShortfall: 0 }),
+        }),
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it("keeps active human approvals out of the requested reviewer cohort", async () => {
     const ports = buildPorts(effectiveConfiguration(`
 version: 1
 mode: enforce
@@ -312,12 +347,17 @@ ownership:
     await processChangeRequest(job, ports);
 
     expect(ports.decisions.persistWithEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ selectedActors: ["@user-4d8a2e", "@user-7c1f9b"] }),
+      expect.objectContaining({
+        selectedActors: ["@user-a91f5c"],
+        details: expect.objectContaining({
+          routing: expect.objectContaining({ requestedReviewerCount: 2, reviewerShortfall: 1 }),
+        }),
+      }),
       expect.any(Function),
     );
     expect(ports.provider.applyActions).toHaveBeenCalledWith(expect.objectContaining({
-      selectedActors: ["@user-4d8a2e", "@user-7c1f9b"],
-      actorsToRequest: [],
+      selectedActors: ["@user-a91f5c"],
+      actorsToRequest: ["@user-a91f5c"],
     }));
   });
 

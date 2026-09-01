@@ -45,6 +45,8 @@ describe("OperationsDashboard", () => {
     expect(container.textContent).toContain("Review request rejected");
     expect(container.textContent).toContain("Score breakdown");
     expect(container.textContent).toContain("Large line delta");
+    expect(container.textContent).toContain("1 of 2 required · shortfall 1");
+    expect(container.textContent).not.toContain("0 of 0 required");
     expect(
       Array.from(container.querySelectorAll("a")).some((link) => link.getAttribute("href") === "/ops/configuration"),
     ).toBe(true);
@@ -125,7 +127,9 @@ const api: OperationsApiClient = {
             ],
           },
           selectedReviewer: "@team-a7f19c/reviewers",
-          selectedReviewers: ["@team-a7f19c/reviewers", "@user-b4e82d"],
+          selectedReviewers: ["@team-a7f19c/reviewers"],
+          requestedReviewerCount: 2,
+          reviewerShortfall: 1,
           createdAt: "2026-08-18T10:00:00.000Z",
         },
       ],

@@ -58,6 +58,8 @@ export interface DecisionOverview {
   policyCheckState: "not_started" | "in_progress" | "success" | "failure";
   riskScore: number;
   riskBreakdown: RiskBreakdown | null;
+  requestedReviewerCount: number | null;
+  reviewerShortfall: number | null;
   selectedReviewer: string | null;
   selectedReviewers: string[];
   createdAt: string;

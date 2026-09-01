@@ -12,14 +12,19 @@ describe("matchOwnership", () => {
 
     expect(result.matchedRules).toEqual([
       {
-        index: 0,
-        paths: ["src/billing/**"],
+        pattern: "src/billing/**",
         reviewers: ["@user-b4e82d", "@user-5c9f21"],
         matchedFiles: ["src/billing/invoice.ts"],
       },
     ]);
-    expect(result.eligibleReviewers).toEqual(["@user-b4e82d", "@user-5c9f21"]);
+    expect(result.preferredReviewers).toEqual(["@user-b4e82d", "@user-5c9f21"]);
+    expect(result.eligibleReviewers).toEqual([
+      "@user-b4e82d",
+      "@user-5c9f21",
+      "@team-a7f19c/engineers",
+    ]);
     expect(result.uncoveredFiles).toEqual(["docs/readme.md"]);
+    expect(result.usedFallback).toBe(false);
   });
 
   it("uses fallback reviewers when no ownership rule matches", () => {
@@ -29,6 +34,7 @@ describe("matchOwnership", () => {
       fallbackReviewers: ["@team-a7f19c/engineers"],
     });
 
+    expect(result.preferredReviewers).toEqual(["@team-a7f19c/engineers"]);
     expect(result.eligibleReviewers).toEqual(["@team-a7f19c/engineers"]);
     expect(result.usedFallback).toBe(true);
   });

@@ -3,6 +3,7 @@ import type { RiskTier, RoutingAction } from "@triagepilot/contracts";
 export interface RoutingInput {
   risk: { score: number; tier: RiskTier };
   author: string;
+  preferredReviewers?: string[];
   eligibleReviewers: string[];
   existingApprovedReviewers?: string[];
   load: Record<string, number>;
@@ -28,6 +29,10 @@ export function decideRouting(input: RoutingInput): RoutingDecision {
   const candidates = uniqueReviewers(input.eligibleReviewers)
     .filter((reviewer) => reviewer !== normalizeReviewer(input.author) && !existingApprovedReviewers.includes(reviewer))
     .sort();
+  const candidateSet = new Set(candidates);
+  const preferredCandidates = uniqueReviewers(input.preferredReviewers ?? []).filter((reviewer) => candidateSet.has(reviewer));
+  const preferredCandidateSet = new Set(preferredCandidates);
+  const fallbackCandidates = candidates.filter((reviewer) => !preferredCandidateSet.has(reviewer));
   const loadSnapshot = Object.fromEntries(candidates.map((candidate) => [candidate, input.load[candidate] ?? 0]));
 
   if (input.risk.tier === "low") {
@@ -44,14 +49,20 @@ export function decideRouting(input: RoutingInput): RoutingDecision {
   }
 
   const requestedReviewerCount = input.risk.tier === "high" ? input.highRiskReviewers : 1;
-  const creditedReviewers = existingApprovedReviewers.slice(0, requestedReviewerCount);
-  const reviewersToRequest = selectLowestLoadReviewers(
-    candidates,
+  const preferredReviewersToRequest = selectLowestLoadReviewers(
+    preferredCandidates,
     input.load,
     input.selectionKey,
-    requestedReviewerCount - creditedReviewers.length,
+    requestedReviewerCount,
   );
-  const selectedReviewers = [...creditedReviewers, ...reviewersToRequest];
+  const fallbackReviewersToRequest = selectLowestLoadReviewers(
+    fallbackCandidates,
+    input.load,
+    input.selectionKey,
+    requestedReviewerCount - preferredReviewersToRequest.length,
+  );
+  const reviewersToRequest = [...preferredReviewersToRequest, ...fallbackReviewersToRequest];
+  const selectedReviewers = reviewersToRequest;
   const reviewerShortfall = requestedReviewerCount - selectedReviewers.length;
 
   if (selectedReviewers.length === 0) {

@@ -46,6 +46,7 @@ describe("mounted admin application", () => {
     expect(new Set(names).size).toBe(4);
     expect(regions.every((region) => region.getAttribute("role") === "region")).toBe(true);
     expect(regions.every((region) => region.tabIndex === 0)).toBe(true);
+    expect(container.textContent).toContain("1 of 2 required · shortfall 1");
   });
 
   it("moves an expired overview session to login while retaining recovery for other errors", async () => {
@@ -195,7 +196,25 @@ const emptyOverview: OperationsOverview = {
       mode: "shadow",
     },
   ],
-  decisions: [],
+  decisions: [
+    {
+      id: "decision-1",
+      repository: { label: "acme/api", href: "https://github.com/acme/api" },
+      changeRequest: { label: "#7", href: "https://github.com/acme/api/pull/7" },
+      mode: "shadow",
+      action: "request_human_review",
+      actionStatus: "not_applied",
+      actionError: null,
+      policyCheckState: "not_started",
+      riskScore: 55,
+      riskBreakdown: null,
+      selectedReviewer: "@user-b4e82d",
+      selectedReviewers: ["@user-b4e82d"],
+      requestedReviewerCount: 2,
+      reviewerShortfall: 1,
+      createdAt: "2026-08-18T12:00:00.000Z",
+    },
+  ],
   failures: { jobs: [], actions: [] },
   worker: { available: true, workerId: "worker-1", lastHeartbeatAt: "2026-08-18T12:00:00.000Z" },
 };

@@ -64,6 +64,10 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
                         },
                       ],
                     },
+                    routing: {
+                      requestedReviewerCount: 2,
+                      reviewerShortfall: 1,
+                    },
                   }
                 : { pullNumber: 100 + index, rawSecret: "decision-payload-secret" },
             effective_config_hash: `legacy-${index}`,
@@ -133,6 +137,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
         actionError: "action error 51",
         policyCheckState: "in_progress",
         riskScore: 51,
+        requestedReviewerCount: 2,
+        reviewerShortfall: 1,
         selectedReviewer: null,
         selectedReviewers: [],
         riskBreakdown: {
@@ -147,6 +153,10 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
           ],
         },
         createdAt: "2026-08-18T11:59:00.000Z",
+      });
+      expect(overview.decisions[1]).toMatchObject({
+        requestedReviewerCount: null,
+        reviewerShortfall: null,
       });
       expect(overview.failures.jobs).toHaveLength(25);
       expect(overview.failures.jobs.map((failure) => failure.id)).toEqual(jobIds.slice(2).reverse());
@@ -207,11 +217,31 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
         "valid",
       );
       const fixtures = [
-        { details: { pullNumber: 7 }, expected: 7 },
-        { details: {}, expected: null },
-        { details: { pullNumber: "7" }, expected: null },
-        { details: { pullNumber: 1.5 }, expected: null },
-        { details: { pullNumber: 2_147_483_648 }, expected: null },
+        {
+          details: { pullNumber: 7, routing: { requestedReviewerCount: 1, reviewerShortfall: 1 } },
+          expected: 7,
+          quota: { requestedReviewerCount: 1, reviewerShortfall: 1 },
+        },
+        {
+          details: {},
+          expected: null,
+          quota: { requestedReviewerCount: null, reviewerShortfall: null },
+        },
+        {
+          details: { pullNumber: "7", routing: { requestedReviewerCount: 3, reviewerShortfall: 0 } },
+          expected: null,
+          quota: { requestedReviewerCount: null, reviewerShortfall: null },
+        },
+        {
+          details: { pullNumber: 1.5, routing: { requestedReviewerCount: 2 } },
+          expected: null,
+          quota: { requestedReviewerCount: 2, reviewerShortfall: 2 },
+        },
+        {
+          details: { pullNumber: 2_147_483_648 },
+          expected: null,
+          quota: { requestedReviewerCount: null, reviewerShortfall: null },
+        },
       ];
 
       for (const [index, fixture] of fixtures.entries()) {
@@ -250,6 +280,10 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
       expect(overview.decisions.map((decision) => decision.pullNumber)).toEqual(
         fixtures.map((fixture) => fixture.expected).reverse(),
       );
+      expect(overview.decisions.map(({ requestedReviewerCount, reviewerShortfall }) => ({
+        requestedReviewerCount,
+        reviewerShortfall,
+      }))).toEqual(fixtures.map((fixture) => fixture.quota).reverse());
       expect(overview.decisions.at(-1)).toMatchObject({
         action: "configuration_failure",
         pullNumber: 7,

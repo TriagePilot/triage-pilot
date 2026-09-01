@@ -13,11 +13,11 @@ export interface OwnershipInput {
 
 export interface OwnershipMatchResult {
   matchedRules: Array<{
-    index: number;
-    paths: string[];
+    pattern: string;
     reviewers: string[];
     matchedFiles: string[];
   }>;
+  preferredReviewers: string[];
   eligibleReviewers: string[];
   uncoveredFiles: string[];
   usedFallback: boolean;
@@ -25,21 +25,22 @@ export interface OwnershipMatchResult {
 
 export function matchOwnership(input: OwnershipInput): OwnershipMatchResult {
   const matchedRules = input.rules
-    .map((rule, index) => ({
-      index,
-      paths: rule.paths,
+    .flatMap((rule) => rule.paths.map((pattern) => ({
+      pattern,
       reviewers: rule.reviewers,
-      matchedFiles: input.files.filter((file) => rule.paths.some((pattern) => minimatch(file, pattern, { dot: true, matchBase: true }))),
-    }))
+      matchedFiles: input.files.filter((file) => minimatch(file, pattern, { dot: true, matchBase: true })),
+    })))
     .filter((rule) => rule.matchedFiles.length > 0);
 
   const matchedFiles = new Set(matchedRules.flatMap((rule) => rule.matchedFiles));
-  const directReviewers = dedupe(matchedRules.flatMap((rule) => rule.reviewers));
-  const usedFallback = directReviewers.length === 0;
+  const matchedReviewers = dedupe(matchedRules.flatMap((rule) => rule.reviewers));
+  const usedFallback = matchedReviewers.length === 0;
+  const preferredReviewers = usedFallback ? dedupe(input.fallbackReviewers) : matchedReviewers;
 
   return {
     matchedRules,
-    eligibleReviewers: usedFallback ? dedupe(input.fallbackReviewers) : directReviewers,
+    preferredReviewers,
+    eligibleReviewers: dedupe([...preferredReviewers, ...input.fallbackReviewers]),
     uncoveredFiles: input.files.filter((file) => !matchedFiles.has(file)),
     usedFallback,
   };

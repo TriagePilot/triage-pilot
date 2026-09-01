@@ -208,7 +208,10 @@ export function OperationsDashboard({
                       <StatusChip value={decision.actionStatus} />
                       {decision.actionError ? <span className="cell-error">{decision.actionError}</span> : null}
                     </td>
-                    <td className="data-text">{decision.selectedReviewers.join(", ") || "—"}</td>
+                    <td>
+                      <span className="data-text">{decision.selectedReviewers.join(", ") || "—"}</span>
+                      <ReviewerRequirement decision={decision} />
+                    </td>
                     <td>
                       <time dateTime={decision.createdAt}>{formatDate(decision.createdAt)}</time>
                     </td>
@@ -308,6 +311,20 @@ function RiskBreakdown({ breakdown }: { breakdown: OperationsOverview["decisions
         ))}
       </ul>
     </details>
+  );
+}
+
+function ReviewerRequirement({ decision }: { decision: OperationsOverview["decisions"][number] }) {
+  if (decision.requestedReviewerCount === null || decision.requestedReviewerCount <= 0) return null;
+  const reviewerShortfall = decision.reviewerShortfall ?? Math.max(
+    0,
+    decision.requestedReviewerCount - decision.selectedReviewers.length,
+  );
+  return (
+    <span className="cell-detail">
+      {decision.selectedReviewers.length} of {decision.requestedReviewerCount} required
+      {reviewerShortfall > 0 ? ` · shortfall ${reviewerShortfall}` : ""}
+    </span>
   );
 }
 

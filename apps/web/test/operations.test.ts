@@ -28,6 +28,8 @@ const overview = {
       policyCheckState: "in_progress" as const,
       riskScore: 55,
       riskBreakdown: null,
+      requestedReviewerCount: 2,
+      reviewerShortfall: 0,
       selectedReviewer: "@team-a7f19c/reviewers",
       selectedReviewers: ["@team-a7f19c/reviewers", "@user-b4e82d"],
       createdAt: "2026-08-18T10:00:00.000Z",

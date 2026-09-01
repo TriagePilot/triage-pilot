@@ -33,6 +33,8 @@ export interface DecisionOverview {
   policyCheckState: PolicyCheckState;
   riskScore: number;
   riskBreakdown: RiskBreakdown | null;
+  requestedReviewerCount: number | null;
+  reviewerShortfall: number | null;
   selectedReviewer: string | null;
   selectedReviewers: string[];
   createdAt: string;
@@ -248,21 +250,26 @@ export async function readOperationsOverview(
       configState: repository.config_state,
       mode: repository.last_config_mode,
     })),
-    decisions: decisions.map((decision) => ({
-      id: decision.id,
-      repository: `${decision.owner}/${decision.name}`,
-      pullNumber: decision.pull_number,
-      mode: decision.mode,
-      action: decision.action as RoutingAction,
-      actionStatus: decision.action_status,
-      actionError: decision.action_error,
-      policyCheckState: normalizePolicyCheckState(decision.policy_check_state),
-      riskScore: decision.risk_score,
-      riskBreakdown: readRiskBreakdown(decision.details),
-      selectedReviewer: decision.selected_reviewer,
-      selectedReviewers: readSelectedReviewers(decision.selected_reviewers, decision.selected_reviewer),
-      createdAt: decision.created_at.toISOString(),
-    })),
+    decisions: decisions.map((decision) => {
+      const selectedReviewers = readSelectedReviewers(decision.selected_reviewers, decision.selected_reviewer);
+      const reviewerQuota = readReviewerQuota(decision.details, selectedReviewers);
+      return {
+        id: decision.id,
+        repository: `${decision.owner}/${decision.name}`,
+        pullNumber: decision.pull_number,
+        mode: decision.mode,
+        action: decision.action as RoutingAction,
+        actionStatus: decision.action_status,
+        actionError: decision.action_error,
+        policyCheckState: normalizePolicyCheckState(decision.policy_check_state),
+        riskScore: decision.risk_score,
+        riskBreakdown: readRiskBreakdown(decision.details),
+        ...reviewerQuota,
+        selectedReviewer: decision.selected_reviewer,
+        selectedReviewers,
+        createdAt: decision.created_at.toISOString(),
+      };
+    }),
     failures: {
       jobs: jobFailures.map((failure) => ({
         id: failure.id,
@@ -335,4 +342,34 @@ function readSelectedReviewers(value: unknown, legacyReviewer: string | null): s
     return value.filter((reviewer): reviewer is string => typeof reviewer === "string").slice(0, 2);
   }
   return legacyReviewer ? [legacyReviewer] : [];
+}
+
+function readReviewerQuota(
+  details: unknown,
+  selectedReviewers: string[],
+): Pick<DecisionOverview, "requestedReviewerCount" | "reviewerShortfall"> {
+  const routing = readRecord(readRecord(details)?.routing);
+  if (routing === null) {
+    return { requestedReviewerCount: null, reviewerShortfall: null };
+  }
+  if (!isReviewerCount(routing.requestedReviewerCount)) {
+    return { requestedReviewerCount: null, reviewerShortfall: null };
+  }
+
+  const requestedReviewerCount = routing.requestedReviewerCount;
+  const fallbackShortfall = Math.max(0, requestedReviewerCount - selectedReviewers.length);
+  return {
+    requestedReviewerCount,
+    reviewerShortfall:
+      typeof routing.reviewerShortfall === "number" &&
+      Number.isInteger(routing.reviewerShortfall) &&
+      routing.reviewerShortfall >= 0 &&
+      routing.reviewerShortfall <= requestedReviewerCount
+        ? routing.reviewerShortfall
+        : fallbackShortfall,
+  };
+}
+
+function isReviewerCount(value: unknown): value is 0 | 1 | 2 {
+  return value === 0 || value === 1 || value === 2;
 }

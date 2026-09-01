@@ -169,6 +169,7 @@ export async function processChangeRequest(
   const routing = decideRouting({
     risk,
     author: metadata.author,
+    preferredReviewers: ownership.preferredReviewers,
     eligibleReviewers: ownership.eligibleReviewers,
     existingApprovedReviewers,
     load,
