@@ -1,7 +1,10 @@
-import { describe, expect, expectTypeOf, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   activateReviewerAbsence,
+  assertPersistReviewerReplacementInput,
+  assertReviewerReplacementFinalizerRecovery,
+  parseReviewerMutationIntentId,
   type ReviewerAbsenceActivation,
   type ReviewerAvailabilityPorts,
   type ReviewerReplacementCandidateDecision,
@@ -60,7 +63,7 @@ const providerState: ReviewerReplacementProviderState = {
 };
 
 const preparedIntent = {
-  id: "reviewer-mutation-intent-1",
+  id: parseReviewerMutationIntentId("reviewer-mutation-intent-1"),
   workspaceId: job.workspaceId,
   provider: candidate.provider,
   providerConnectionId: job.providerConnectionId,
@@ -109,9 +112,52 @@ function buildPorts(overrides: Partial<ReviewerAvailabilityPorts> = {}): Reviewe
 }
 
 describe("activateReviewerAbsence", () => {
-  it("requires explicit mutation-intent linkage on pending finalizer records", () => {
-    expectTypeOf<ReviewerReplacementFinalizerRecord>()
-      .toMatchTypeOf<{ mutationIntentId: string | null }>();
+  it("rejects a replaced pending finalizer without mutation provenance before replay", async () => {
+    const ports = buildPorts({
+      availability: {
+        listPendingFinalizers: vi.fn(async () => [{
+          id: "replacement-malformed",
+          decisionId: candidate.decisionId,
+          replacementActorId: null,
+          mutationIntentId: null,
+          outcome: "replaced",
+          state: "finalizer_pending",
+        }] as ReviewerReplacementFinalizerRecord[]),
+      } as never,
+    });
+
+    await expect(activateReviewerAbsence(job, ports)).rejects.toThrow(
+      "Replaced reviewer outcome requires durable mutation provenance",
+    );
+
+    expect(ports.finalizers.run).not.toHaveBeenCalled();
+    expect(ports.availability.updateReplacementState).not.toHaveBeenCalled();
+    expect(ports.provider.inspectChangeRequest).not.toHaveBeenCalled();
+    expect(ports.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed replaced persistence and recovery at runtime validation boundaries", async () => {
+    let validPersistence: unknown;
+    const ports = buildPorts({
+      availability: {
+        persistReplacement: vi.fn(async (input) => {
+          validPersistence = input;
+          throw new Error("database unavailable");
+        }),
+      } as never,
+    });
+    const outcome = await activateReviewerAbsence(job, ports);
+    expect(outcome.status).toBe("finalizer_pending");
+    if (outcome.status !== "finalizer_pending") throw new Error("Expected replacement recovery");
+
+    expect(() => assertPersistReviewerReplacementInput({
+      ...(validPersistence as object),
+      mutationIntentId: "   ",
+    })).toThrow("Replaced reviewer outcome requires durable mutation provenance");
+    expect(() => assertReviewerReplacementFinalizerRecovery({
+      ...outcome.recovery,
+      mutationIntentId: null,
+    })).toThrow("Provider-effect recovery requires durable mutation provenance");
   });
 
   it("treats a stale or cancelled absence revision as a successful job-level no-op", async () => {
@@ -357,6 +403,117 @@ describe("activateReviewerAbsence", () => {
       outcome: "permanent_failure",
       mutationIntentId: intent.id,
       lastError: "Durable reviewer mutation intent does not match the immutable activation source.",
+    }));
+  });
+
+  it("rejects an existing durable intent that targets the current change-request author", async () => {
+    const ports = buildPorts({
+      availability: {
+        loadMutationIntent: vi.fn(async () => preparedIntent),
+      } as never,
+      provider: {
+        inspectChangeRequest: vi.fn(async () => ({
+          ...providerState,
+          authorActor: preparedIntent.replacementActorId,
+        })),
+      } as never,
+    });
+
+    await expect(activateReviewerAbsence(job, ports)).resolves.toMatchObject({
+      status: "completed",
+      results: [{
+        outcome: "permanent_failure",
+        replacementActor: null,
+        mutationIntentId: preparedIntent.id,
+      }],
+    });
+
+    expect(ports.provider.inspectChangeRequest).toHaveBeenCalledTimes(2);
+    expect(ports.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+    expect(ports.availability.persistReplacement).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "permanent_failure",
+      replacementActorId: null,
+      mutationIntentId: preparedIntent.id,
+      lastError: `Durable replacement actor ${preparedIntent.replacementActorId} is the current change-request author.`,
+    }));
+  });
+
+  it("revalidates author drift after prepare and process death while retaining intent linkage on persistence retry", async () => {
+    let durableIntent: typeof preparedIntent | null = null;
+    const loadMutationIntent = vi.fn(async () => durableIntent);
+    const prepareMutationIntent = vi.fn(async (input: Omit<typeof preparedIntent, "id">) => {
+      durableIntent ??= { id: preparedIntent.id, ...input };
+      return durableIntent;
+    });
+    const reconcileReviewRequest = vi.fn(async () => ({ changed: true }));
+    const firstInspect = vi.fn()
+      .mockResolvedValueOnce(providerState)
+      .mockRejectedValueOnce(new Error("process terminated after intent prepare"));
+    const firstPorts = buildPorts({
+      availability: { loadMutationIntent, prepareMutationIntent } as never,
+      provider: { inspectChangeRequest: firstInspect, reconcileReviewRequest } as never,
+    });
+
+    await expect(activateReviewerAbsence(job, firstPorts)).rejects.toThrow(
+      "process terminated after intent prepare",
+    );
+    expect(durableIntent).toMatchObject({
+      id: preparedIntent.id,
+      replacementActorId: preparedIntent.replacementActorId,
+    });
+    expect(reconcileReviewRequest).not.toHaveBeenCalled();
+    expect(firstPorts.availability.persistReplacement).not.toHaveBeenCalled();
+
+    const authorChangedState = {
+      ...providerState,
+      authorActor: preparedIntent.replacementActorId,
+    };
+    const persistReplacement = vi.fn()
+      .mockRejectedValueOnce(new Error("database unavailable"))
+      .mockImplementationOnce(async (input) => ({
+        inserted: true,
+        activationCurrent: true,
+        replacement: { id: "replacement-1", state: input.state },
+      }));
+    const retryPorts = buildPorts({
+      availability: { loadMutationIntent, prepareMutationIntent, persistReplacement } as never,
+      provider: {
+        inspectChangeRequest: vi.fn(async () => authorChangedState),
+        reconcileReviewRequest,
+      } as never,
+    });
+
+    await expect(activateReviewerAbsence(job, retryPorts)).rejects.toThrow("database unavailable");
+    expect(reconcileReviewRequest).not.toHaveBeenCalled();
+    expect(persistReplacement).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      outcome: "permanent_failure",
+      replacementActorId: null,
+      mutationIntentId: preparedIntent.id,
+    }));
+
+    const finalRetryPorts = buildPorts({
+      availability: { loadMutationIntent, prepareMutationIntent, persistReplacement } as never,
+      provider: {
+        inspectChangeRequest: vi.fn(async () => authorChangedState),
+        reconcileReviewRequest,
+      } as never,
+    });
+    await expect(activateReviewerAbsence(job, finalRetryPorts)).resolves.toMatchObject({
+      status: "completed",
+      results: [{
+        outcome: "permanent_failure",
+        replacementActor: null,
+        mutationIntentId: preparedIntent.id,
+      }],
+    });
+
+    expect(prepareMutationIntent).toHaveBeenCalledOnce();
+    expect(reconcileReviewRequest).not.toHaveBeenCalled();
+    expect(persistReplacement).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      outcome: "permanent_failure",
+      replacementActorId: null,
+      mutationIntentId: preparedIntent.id,
+      lastError: `Durable replacement actor ${preparedIntent.replacementActorId} is the current change-request author.`,
     }));
   });
 
@@ -1121,7 +1278,8 @@ describe("activateReviewerAbsence", () => {
         listPendingFinalizers: vi.fn(async () => [{
           id: "replacement-pending",
           decisionId: candidate.decisionId,
-          mutationIntentId: null,
+          replacementActorId: preparedIntent.replacementActorId,
+          mutationIntentId: preparedIntent.id,
           outcome: "replaced",
           state: "finalizer_pending",
         }]),
@@ -1135,8 +1293,8 @@ describe("activateReviewerAbsence", () => {
       results: [{
         decisionId: candidate.decisionId,
         outcome: "replaced",
-        replacementActor: null,
-        mutationIntentId: null,
+        replacementActor: preparedIntent.replacementActorId,
+        mutationIntentId: preparedIntent.id,
         finalized: true,
       }],
     });

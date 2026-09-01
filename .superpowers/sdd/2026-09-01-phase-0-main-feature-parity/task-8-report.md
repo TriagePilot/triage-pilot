@@ -182,3 +182,43 @@ This fix round is committed separately with subject:
 ```text
 fix: revalidate durable reviewer intent
 ```
+
+## Fix round 4: required mutation provenance and current-author revalidation
+
+### RED
+
+The focused application RED ran 40 tests and failed the three intended regressions. A `replaced` pending-finalizer row with null actor/intent provenance replayed successfully, a loaded durable intent could request the current change-request author, and an author change after intent prepare/process death led to reviewer mutation plus provider-effect recovery instead of a linked zero-effect terminal failure.
+
+The standalone application type-contract RED failed three assertions. `ReviewerReplacementFinalizerRecord`, `PersistReviewerReplacementInput`, and `ReviewerReplacementFinalizerRecovery` each still admitted the malformed `replaced` plus null-provenance shape.
+
+### GREEN
+
+The focused replacement application/GitHub adapter suites pass 95/95 tests. All application, provider, and core suites pass 170/170. The application package check includes the negative type-contract suite and passes. Task 6 availability/outbox PostgreSQL contracts pass 38/38 against UUID-named disposable databases, with zero disposable databases remaining. The default full suite passes 590 tests with 101 expected integration skips.
+
+Repository gates pass: `pnpm check`, `pnpm build` through that check, `docker build .`, `pnpm check:package-boundary`, `git diff --check`, and both Git-history and working-directory Gitleaks scans. The standalone public-boundary diagnostic still reports only its two documented pre-existing Task 6 report findings; it reports no new source finding.
+
+### Discriminated provenance contracts
+
+`ReviewerMutationIntentId` is now a branded string produced by `parseReviewerMutationIntentId`, which rejects blank runtime IDs. `ReviewerReplacementProvenance<Outcome>` is the shared outcome discriminant:
+
+- `replaced` requires a non-null replacement actor and branded mutation-intent ID;
+- `simulated_replacement` requires a non-null replacement actor and an explicit null mutation-intent ID;
+- every non-mutating outcome requires an explicit null replacement actor and carries either a validated existing intent link or explicit null.
+
+Pending-finalizer records admit only the three mapped finalizer outcomes. Persistence also discriminates its replacement actor, mutation intent, cohort-replacement flag, and event outcome/actor. Recovery now carries its outcome and replacement actor directly: `replaced` recovery is always provider-effecting and fully linked; provider-effecting `permanent_failure` also requires a branded intent ID in both recovery and persistence; policy-only recoveries are explicitly provider-write-free. Phase fields are discriminated so persist recovery requires its exact persistence input while replayed run/complete recovery may omit it only after a durable replacement row exists.
+
+Runtime assertions validate the same provenance invariants at pending-finalizer load, persistence construction, and recovery construction/parsing boundaries. Invalid pending data fails before the policy finalizer runs. The valid replay regression retains the linked actor/intent and continues to perform no provider inspection, DELETE, or POST.
+
+### Current-author revalidation
+
+The final durable-intent eligibility check now compares the intended replacement with `authorActor` from the latest provider inspection before any reviewer mutation. This runs for both loaded and newly prepared intents, in addition to current absence and current-head approval validation.
+
+An existing intent targeting the current author persists a linked `permanent_failure` with zero provider effects. The process-death regression prepares an intent, terminates before reviewer mutation, changes the observed author, and retries twice: the first terminal-persistence attempt fails as an ordinary job retry without a provider-effect recovery; the next attempt loads the same intent ID and persists the same linked terminal failure. Neither retry invokes reviewer reconciliation.
+
+### Fix commit
+
+This fix round is committed separately with subject:
+
+```text
+fix: require reviewer mutation provenance
+```

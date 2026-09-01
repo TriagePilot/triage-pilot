@@ -19,6 +19,20 @@ import {
 } from "@triagepilot/core";
 
 const NO_REPLACEMENT_POLICY_SUMMARY = "No replacement is available for an absent required reviewer.";
+const reviewerMutationIntentIdBrand: unique symbol = Symbol("ReviewerMutationIntentId");
+
+export type ReviewerMutationIntentId = string & {
+  readonly [reviewerMutationIntentIdBrand]: true;
+};
+
+export class ReviewerReplacementContractError extends Error {}
+
+export function parseReviewerMutationIntentId(value: unknown): ReviewerMutationIntentId {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new ReviewerReplacementContractError("Reviewer mutation intent ID must not be empty");
+  }
+  return value as ReviewerMutationIntentId;
+}
 
 export interface ReviewerReplacementCandidateDecision {
   decisionId: string;
@@ -79,10 +93,37 @@ export interface PrepareReviewerMutationIntentInput extends ReviewerMutationInte
 }
 
 export interface ReviewerMutationIntent extends PrepareReviewerMutationIntentInput {
-  id: string;
+  id: ReviewerMutationIntentId;
 }
 
-export interface PersistReviewerReplacementInput {
+type ReviewerReplacementNonMutationOutcome = Exclude<
+  ReviewerReplacementOutcome,
+  "replaced" | "simulated_replacement"
+>;
+
+export type ReviewerReplacementProvenance<
+  Outcome extends ReviewerReplacementOutcome = ReviewerReplacementOutcome,
+> = Outcome extends "replaced"
+  ? {
+    outcome: Outcome;
+    replacementActorId: ExternalActorId;
+    mutationIntentId: ReviewerMutationIntentId;
+  }
+  : Outcome extends "simulated_replacement"
+    ? {
+      outcome: Outcome;
+      replacementActorId: ExternalActorId;
+      mutationIntentId: null;
+    }
+    : Outcome extends ReviewerReplacementNonMutationOutcome
+      ? {
+        outcome: Outcome;
+        replacementActorId: null;
+        mutationIntentId: ReviewerMutationIntentId | null;
+      }
+      : never;
+
+interface PersistReviewerReplacementCommon {
   provider: ProviderKind;
   providerConnectionId: ProviderConnectionId;
   absenceId: string;
@@ -90,26 +131,46 @@ export interface PersistReviewerReplacementInput {
   decisionId: string;
   expectedHeadRevision: string;
   unavailableActorId: ExternalActorId;
-  replacementActorId: ExternalActorId | null;
-  mutationIntentId: string | null;
-  outcome: ReviewerReplacementOutcome;
   reason: string;
   state: ReviewerReplacementState;
   lastError: string | null;
   startedAt: Date;
   completedAt: Date;
-  replaceCohort: boolean;
-  event: ReviewerReplacementEventV1;
 }
 
-export interface ReviewerReplacementFinalizerRecord {
+type PersistReviewerReplacementFor<Outcome extends ReviewerReplacementOutcome> =
+  Outcome extends ReviewerReplacementOutcome
+    ? PersistReviewerReplacementCommon
+      & ReviewerReplacementProvenance<Outcome>
+      & {
+        replaceCohort: Outcome extends "replaced" | "simulated_replacement" ? true : false;
+        event: Omit<ReviewerReplacementEventV1, "outcome" | "replacementActor"> & {
+          outcome: Outcome;
+          replacementActor: ReviewerReplacementProvenance<Outcome>["replacementActorId"];
+        };
+      }
+    : never;
+
+export type PersistReviewerReplacementInput = PersistReviewerReplacementFor<ReviewerReplacementOutcome>;
+
+type ReviewerReplacementFinalizerOutcome =
+  | "replaced"
+  | "skipped_policy_satisfied"
+  | "no_replacement_available";
+
+interface ReviewerReplacementFinalizerRecordCommon {
   id: string;
   decisionId: string;
-  replacementActorId?: ExternalActorId | null;
-  mutationIntentId: string | null;
-  outcome: ReviewerReplacementOutcome;
   state: "finalizer_pending";
 }
+
+type ReviewerReplacementFinalizerRecordFor<Outcome extends ReviewerReplacementFinalizerOutcome> =
+  Outcome extends ReviewerReplacementFinalizerOutcome
+    ? ReviewerReplacementFinalizerRecordCommon & ReviewerReplacementProvenance<Outcome>
+    : never;
+
+export type ReviewerReplacementFinalizerRecord =
+  ReviewerReplacementFinalizerRecordFor<ReviewerReplacementFinalizerOutcome>;
 
 export interface PersistReviewerReplacementResult {
   inserted: boolean;
@@ -123,17 +184,63 @@ export type ReviewerReplacementFinalizerAction = {
   summary: string | null;
 };
 
-export interface ReviewerReplacementFinalizerRecovery {
+interface ReviewerReplacementFinalizerRecoveryCommon {
   kind: "reviewer_replacement_finalizer";
-  phase: "persist_replacement" | "run_finalizer" | "complete_replacement";
   job: ReviewerAbsenceActivationJobPayload;
-  finalizer: ReviewerReplacementFinalizerAction | null;
-  replacementId: string | null;
-  mutationIntentId: string | null;
-  providerEffectsApplied: boolean;
-  persistence: PersistReviewerReplacementInput | null;
   lastError: string;
 }
+
+type ReviewerReplacementRecoveryOutcome = ReviewerReplacementFinalizerOutcome | "permanent_failure";
+
+type ReviewerReplacementRecoveryFinalizer<Outcome extends ReviewerReplacementRecoveryOutcome> =
+  Outcome extends "replaced" | "skipped_policy_satisfied"
+    ? { finalizer: ReviewerReplacementFinalizerAction & { action: "reevaluate_policy" } }
+    : Outcome extends "no_replacement_available"
+      ? { finalizer: ReviewerReplacementFinalizerAction & { action: "fail_policy" } }
+      : { finalizer: null };
+
+type ReviewerReplacementRecoveryEffects<Outcome extends ReviewerReplacementRecoveryOutcome> =
+  Outcome extends "replaced"
+    ? { providerEffectsApplied: true }
+    : Outcome extends "permanent_failure"
+      ? { providerEffectsApplied: true; mutationIntentId: ReviewerMutationIntentId }
+      : { providerEffectsApplied: false };
+
+type ReviewerReplacementRecoveryPersistence<Outcome extends ReviewerReplacementRecoveryOutcome> =
+  Outcome extends "permanent_failure"
+    ? PersistReviewerReplacementFor<Outcome> & { mutationIntentId: ReviewerMutationIntentId }
+    : PersistReviewerReplacementFor<Outcome>;
+
+type ReviewerReplacementRecoveryPhase<Outcome extends ReviewerReplacementRecoveryOutcome> =
+  Outcome extends "permanent_failure"
+    ? {
+      phase: "persist_replacement";
+      replacementId: null;
+      persistence: ReviewerReplacementRecoveryPersistence<Outcome>;
+    }
+    :
+      | {
+        phase: "persist_replacement";
+        replacementId: null;
+        persistence: ReviewerReplacementRecoveryPersistence<Outcome>;
+      }
+      | {
+        phase: "run_finalizer" | "complete_replacement";
+        replacementId: string;
+        persistence: ReviewerReplacementRecoveryPersistence<Outcome> | null;
+      };
+
+type ReviewerReplacementFinalizerRecoveryFor<Outcome extends ReviewerReplacementRecoveryOutcome> =
+  Outcome extends ReviewerReplacementRecoveryOutcome
+    ? ReviewerReplacementFinalizerRecoveryCommon
+      & ReviewerReplacementProvenance<Outcome>
+      & ReviewerReplacementRecoveryFinalizer<Outcome>
+      & ReviewerReplacementRecoveryEffects<Outcome>
+      & ReviewerReplacementRecoveryPhase<Outcome>
+    : never;
+
+export type ReviewerReplacementFinalizerRecovery =
+  ReviewerReplacementFinalizerRecoveryFor<ReviewerReplacementRecoveryOutcome>;
 
 export interface ReviewerAvailabilityPorts {
   clock: Clock;
@@ -203,7 +310,7 @@ export interface ReviewerAbsenceActivationResult {
   decisionId: string;
   outcome: ReviewerReplacementOutcome;
   replacementActor: ExternalActorId | null;
-  mutationIntentId: string | null;
+  mutationIntentId: ReviewerMutationIntentId | null;
   finalized: boolean;
 }
 
@@ -227,13 +334,212 @@ type PlannedReplacement = {
   replaceCohort: boolean;
   finalizer: ReviewerReplacementFinalizerAction | null;
   providerIntent: "none" | "prepare" | "apply";
-  mutationIntentId: string | null;
+  mutationIntentId: ReviewerMutationIntentId | null;
 };
 
 type SelectionContext = {
   absences: ReviewerAbsenceWindow[];
   load: Record<string, number>;
 };
+
+export function assertReviewerReplacementProvenance(
+  value: unknown,
+): asserts value is ReviewerReplacementProvenance {
+  if (!isRecord(value)) {
+    throw new ReviewerReplacementContractError("Reviewer replacement provenance is malformed");
+  }
+  const outcome = value.outcome;
+  const replacementActorId = value.replacementActorId;
+  const mutationIntentId = value.mutationIntentId;
+  if (outcome === "replaced") {
+    if (!isNonEmptyString(replacementActorId) || !isNonEmptyString(mutationIntentId)) {
+      throw new ReviewerReplacementContractError(
+        "Replaced reviewer outcome requires durable mutation provenance",
+      );
+    }
+    return;
+  }
+  if (outcome === "simulated_replacement") {
+    if (!isNonEmptyString(replacementActorId) || mutationIntentId !== null) {
+      throw new ReviewerReplacementContractError(
+        "Simulated reviewer replacement requires an actor and null mutation provenance",
+      );
+    }
+    return;
+  }
+  if (!isReviewerReplacementNonMutationOutcome(outcome)) {
+    throw new ReviewerReplacementContractError("Reviewer replacement outcome is malformed");
+  }
+  if (replacementActorId !== null) {
+    throw new ReviewerReplacementContractError(
+      "Non-mutating reviewer outcome requires a null replacement actor",
+    );
+  }
+  if (mutationIntentId !== null) parseReviewerMutationIntentId(mutationIntentId);
+}
+
+export function assertReviewerReplacementFinalizerRecord(
+  value: unknown,
+): asserts value is ReviewerReplacementFinalizerRecord {
+  if (
+    !isRecord(value)
+    || !isNonEmptyString(value.id)
+    || !isNonEmptyString(value.decisionId)
+    || value.state !== "finalizer_pending"
+  ) {
+    throw new ReviewerReplacementContractError("Pending reviewer replacement finalizer is malformed");
+  }
+  if (
+    value.outcome !== "replaced"
+    && value.outcome !== "skipped_policy_satisfied"
+    && value.outcome !== "no_replacement_available"
+  ) {
+    throw new ReviewerReplacementContractError("Pending reviewer replacement has no mapped finalizer");
+  }
+  assertReviewerReplacementProvenance(value);
+}
+
+export function assertPersistReviewerReplacementInput(
+  value: unknown,
+): asserts value is PersistReviewerReplacementInput {
+  if (!isRecord(value)) {
+    throw new ReviewerReplacementContractError("Reviewer replacement persistence is malformed");
+  }
+  const record = value;
+  assertReviewerReplacementProvenance(value);
+  if (
+    !isProviderKind(record.provider)
+    || !isNonEmptyString(record.providerConnectionId)
+    || !isNonEmptyString(record.absenceId)
+    || !isPositiveInteger(record.absenceRevision)
+    || !isNonEmptyString(record.decisionId)
+    || !isNonEmptyString(record.expectedHeadRevision)
+    || !isNonEmptyString(record.unavailableActorId)
+    || !isNonEmptyString(record.reason)
+    || !isReviewerReplacementState(record.state)
+    || (record.lastError !== null && typeof record.lastError !== "string")
+    || !isFiniteDate(record.startedAt)
+    || !isFiniteDate(record.completedAt)
+    || record.completedAt < record.startedAt
+  ) {
+    throw new ReviewerReplacementContractError("Reviewer replacement persistence is malformed");
+  }
+  if (
+    (record.state === "completed" && record.lastError !== null)
+    || (record.state === "permanent_failure" && !isNonEmptyString(record.lastError))
+  ) {
+    throw new ReviewerReplacementContractError("Reviewer replacement persistence state is malformed");
+  }
+  const replacesCohort = value.outcome === "replaced" || value.outcome === "simulated_replacement";
+  if (record.replaceCohort !== replacesCohort || !isRecord(record.event)) {
+    throw new ReviewerReplacementContractError("Reviewer replacement persistence is malformed");
+  }
+  const event = record.event;
+  if (
+    event.schemaVersion !== 1
+    || event.eventType !== "reviewer_replacement"
+    || !isNonEmptyString(event.eventId)
+    || !isNonEmptyString(event.occurredAt)
+    || !isNonEmptyString(event.workspaceId)
+    || event.provider !== record.provider
+    || event.providerConnectionId !== record.providerConnectionId
+    || event.absenceId !== record.absenceId
+    || event.absenceRevision !== record.absenceRevision
+    || event.decisionId !== record.decisionId
+    || !isNonEmptyString(event.repositoryId)
+    || !isNonEmptyString(event.changeRequestId)
+    || event.unavailableActor !== record.unavailableActorId
+    || event.outcome !== value.outcome
+    || event.replacementActor !== value.replacementActorId
+    || new Date(event.occurredAt).getTime() !== record.completedAt.getTime()
+  ) {
+    throw new ReviewerReplacementContractError(
+      "Reviewer replacement event does not match persistence provenance",
+    );
+  }
+}
+
+export function assertReviewerReplacementFinalizerRecovery(
+  value: unknown,
+): asserts value is ReviewerReplacementFinalizerRecovery {
+  if (
+    !isRecord(value)
+    || value.kind !== "reviewer_replacement_finalizer"
+    || !isNonEmptyString(value.lastError)
+    || !isRecord(value.job)
+    || value.job.kind !== "activate_reviewer_absence"
+    || !isNonEmptyString(value.job.workspaceId)
+    || !isNonEmptyString(value.job.providerConnectionId)
+    || !isNonEmptyString(value.job.absenceId)
+    || !isPositiveInteger(value.job.absenceRevision)
+  ) {
+    throw new ReviewerReplacementContractError("Reviewer replacement recovery is malformed");
+  }
+  const record = value;
+  if (value.providerEffectsApplied === true) {
+    if (!isNonEmptyString(value.mutationIntentId)) {
+      throw new ReviewerReplacementContractError(
+        "Provider-effect recovery requires durable mutation provenance",
+      );
+    }
+    if (value.outcome !== "replaced" && value.outcome !== "permanent_failure") {
+      throw new ReviewerReplacementContractError(
+        "Provider-effect recovery has an invalid reviewer outcome",
+      );
+    }
+  } else if (
+    value.providerEffectsApplied !== false
+    || (value.outcome !== "skipped_policy_satisfied" && value.outcome !== "no_replacement_available")
+  ) {
+    throw new ReviewerReplacementContractError("Reviewer replacement recovery effects are malformed");
+  }
+  assertReviewerReplacementProvenance(value);
+
+  if (value.outcome === "permanent_failure") {
+    if (record.finalizer !== null || record.phase !== "persist_replacement") {
+      throw new ReviewerReplacementContractError("Permanent provider failure recovery is malformed");
+    }
+  } else {
+    if (!isRecord(record.finalizer)) {
+      throw new ReviewerReplacementContractError("Reviewer replacement recovery finalizer is malformed");
+    }
+    const expectedAction = value.outcome === "no_replacement_available"
+      ? "fail_policy"
+      : "reevaluate_policy";
+    if (
+      record.finalizer.action !== expectedAction
+      || !isNonEmptyString(record.finalizer.decisionId)
+      || (record.finalizer.summary !== null && typeof record.finalizer.summary !== "string")
+    ) {
+      throw new ReviewerReplacementContractError("Reviewer replacement recovery finalizer is malformed");
+    }
+  }
+
+  if (record.phase === "persist_replacement") {
+    if (record.replacementId !== null || record.persistence === null) {
+      throw new ReviewerReplacementContractError("Reviewer replacement persistence recovery is malformed");
+    }
+  } else if (record.phase === "run_finalizer" || record.phase === "complete_replacement") {
+    if (!isNonEmptyString(record.replacementId)) {
+      throw new ReviewerReplacementContractError("Reviewer replacement finalizer recovery is malformed");
+    }
+  } else {
+    throw new ReviewerReplacementContractError("Reviewer replacement recovery phase is malformed");
+  }
+
+  if (record.persistence !== null) {
+    assertPersistReviewerReplacementInput(record.persistence);
+    if (
+      record.persistence.outcome !== value.outcome
+      || record.persistence.replacementActorId !== value.replacementActorId
+      || record.persistence.mutationIntentId !== value.mutationIntentId
+    ) {
+      throw new ReviewerReplacementContractError(
+        "Reviewer replacement recovery does not match persistence provenance",
+      );
+    }
+  }
+}
 
 export async function activateReviewerAbsence(
   job: ReviewerAbsenceActivationJobPayload,
@@ -247,6 +553,7 @@ export async function activateReviewerAbsence(
     absenceRevision: job.absenceRevision,
   });
   for (const record of pending) {
+    assertReviewerReplacementFinalizerRecord(record);
     const replay = await replayPendingFinalizer(job, record, ports);
     if (replay.recovery !== null) {
       return { status: "finalizer_pending", results, recovery: replay.recovery };
@@ -525,7 +832,7 @@ async function finalizeCandidatePlan(
         true,
         persistence,
         errorMessage(error),
-        plan.mutationIntentId,
+        plan,
       ),
     };
   }
@@ -540,7 +847,7 @@ async function finalizeCandidatePlan(
           true,
           persistence,
           "Final replacement persistence rejected stale state.",
-          plan.mutationIntentId,
+          plan,
         ),
       };
     }
@@ -565,7 +872,7 @@ async function finalizeCandidatePlan(
         providerEffectsApplied,
         persistence,
         errorMessage(error),
-        plan.mutationIntentId,
+        plan,
       ),
     };
   }
@@ -587,7 +894,7 @@ async function finalizeCandidatePlan(
           providerEffectsApplied,
           persistence,
           "Finalizer completion state was not persisted.",
-          plan.mutationIntentId,
+          plan,
         ),
       };
     }
@@ -601,7 +908,7 @@ async function finalizeCandidatePlan(
         providerEffectsApplied,
         persistence,
         errorMessage(error),
-        plan.mutationIntentId,
+        plan,
       ),
     };
   }
@@ -627,7 +934,7 @@ async function replayPendingFinalizer(
         record.outcome === "replaced",
         null,
         errorMessage(error),
-        record.mutationIntentId,
+        record,
       ),
     };
   }
@@ -648,7 +955,7 @@ async function replayPendingFinalizer(
           record.outcome === "replaced",
           null,
           "Finalizer completion state was not persisted.",
-          record.mutationIntentId,
+          record,
         ),
       };
     }
@@ -662,7 +969,7 @@ async function replayPendingFinalizer(
         record.outcome === "replaced",
         null,
         errorMessage(error),
-        record.mutationIntentId,
+        record,
       ),
     };
   }
@@ -793,6 +1100,12 @@ async function durableIntentIneligibilityPlan(
   at: Date,
   ports: ReviewerAvailabilityPorts,
 ): Promise<PlannedReplacement | null> {
+  if (intent.replacementActorId === current.authorActor) {
+    return permanentFailurePlan(
+      `Durable replacement actor ${intent.replacementActorId} is the current change-request author.`,
+      intent.id,
+    );
+  }
   const absences = await ports.availability.findActive({
     workspaceId: job.workspaceId,
     providerConnectionId: job.providerConnectionId,
@@ -951,7 +1264,10 @@ function withMutationIntent(
   return intent === null ? plan : { ...plan, mutationIntentId: intent.id };
 }
 
-function permanentFailurePlan(reason: string, mutationIntentId: string | null = null): PlannedReplacement {
+function permanentFailurePlan(
+  reason: string,
+  mutationIntentId: ReviewerMutationIntentId | null = null,
+): PlannedReplacement {
   return { ...terminalPlan("permanent_failure", reason), mutationIntentId };
 }
 
@@ -979,7 +1295,7 @@ function persistenceInput(
   const state = plan.outcome === "permanent_failure"
     ? "permanent_failure"
     : plan.finalizer === null ? "completed" : "finalizer_pending";
-  return {
+  const value: unknown = {
     provider: candidate.provider,
     providerConnectionId: candidate.providerConnectionId,
     absenceId: activation.absenceId,
@@ -1014,6 +1330,8 @@ function persistenceInput(
       outcome: plan.outcome,
     },
   };
+  assertPersistReviewerReplacementInput(value);
+  return value;
 }
 
 function target(
@@ -1065,21 +1383,63 @@ function recovery(
   providerEffectsApplied: boolean,
   persistence: PersistReviewerReplacementInput | null,
   lastError: string,
-  mutationIntentId: string | null,
+  source: PlannedReplacement | ReviewerReplacementFinalizerRecord,
 ): ReviewerReplacementFinalizerRecovery {
-  return {
+  const replacementActorId = "replacementActor" in source
+    ? source.replacementActor
+    : source.replacementActorId;
+  const value: unknown = {
     kind: "reviewer_replacement_finalizer",
     phase,
     job,
     finalizer,
     replacementId,
-    mutationIntentId,
+    outcome: source.outcome,
+    replacementActorId,
+    mutationIntentId: source.mutationIntentId,
     providerEffectsApplied,
     persistence,
     lastError,
   };
+  assertReviewerReplacementFinalizerRecovery(value);
+  return value;
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+function isFiniteDate(value: unknown): value is Date {
+  return value instanceof Date && Number.isFinite(value.getTime());
+}
+
+function isProviderKind(value: unknown): value is ProviderKind {
+  return value === "github" || value === "gitlab" || value === "bitbucket";
+}
+
+function isReviewerReplacementState(value: unknown): value is ReviewerReplacementState {
+  return value === "finalizer_pending" || value === "completed" || value === "permanent_failure";
+}
+
+function isReviewerReplacementNonMutationOutcome(
+  value: unknown,
+): value is ReviewerReplacementNonMutationOutcome {
+  return value === "no_replacement_available"
+    || value === "skipped_approved"
+    || value === "skipped_closed"
+    || value === "skipped_changed_head"
+    || value === "skipped_policy_satisfied"
+    || value === "permanent_failure";
 }
