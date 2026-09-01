@@ -79,7 +79,7 @@ describe("GitHub webhook route", () => {
           headRevision: "abc123",
         },
         isDraft: false,
-        routingKey: "routing:00000000-0000-4000-8000-000000000001:github:101:7:trusted-base-123:abc123",
+        routingKey: "routing:00000000-0000-4000-8000-000000000001:github:101:7:trusted-base-123:abc123:ready",
       },
     });
   });
@@ -142,7 +142,7 @@ describe("GitHub webhook route", () => {
           headRevision: "normalized-head",
         },
         isDraft: true,
-        routingKey: "routing:00000000-0000-4000-8000-000000000001:github:repository-77:42:normalized-base:normalized-head",
+        routingKey: "routing:00000000-0000-4000-8000-000000000001:github:repository-77:42:normalized-base:normalized-head:draft",
       },
     }));
   });
@@ -163,6 +163,45 @@ describe("GitHub webhook route", () => {
         payload: expect.objectContaining({ isDraft: true }),
       }),
     );
+  });
+
+  it("creates a distinct ready routing delivery after a draft delivery with unchanged revisions", async () => {
+    const acceptRoutingDelivery = vi.fn(async () => ({ inserted: true, jobId: "job-1" }));
+    const app = createWebApp(buildServices({ githubOrganization: "acme", acceptRoutingDelivery }));
+
+    const draftResponse = await signedWebhook(
+      app,
+      pullRequestBody({ owner: { login: "acme", type: "Organization" }, draft: true }),
+      { deliveryId: "delivery-draft" },
+    );
+    const readyResponse = await signedWebhook(
+      app,
+      pullRequestBody({
+        owner: { login: "acme", type: "Organization" },
+        action: "ready_for_review",
+        draft: false,
+      }),
+      { deliveryId: "delivery-ready" },
+    );
+
+    expect(draftResponse.status).toBe(202);
+    expect(readyResponse.status).toBe(202);
+    expect(acceptRoutingDelivery).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      deliveryId: "delivery-draft",
+      eventAction: "opened",
+      payload: expect.objectContaining({
+        isDraft: true,
+        routingKey: "routing:00000000-0000-4000-8000-000000000001:github:101:7:trusted-base-123:abc123:draft",
+      }),
+    }));
+    expect(acceptRoutingDelivery).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      deliveryId: "delivery-ready",
+      eventAction: "ready_for_review",
+      payload: expect.objectContaining({
+        isDraft: false,
+        routingKey: "routing:00000000-0000-4000-8000-000000000001:github:101:7:trusted-base-123:abc123:ready",
+      }),
+    }));
   });
 
   it.each(["edited", "labeled", "review_requested", "converted_to_draft"])(

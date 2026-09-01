@@ -195,6 +195,7 @@ function routingJob(workspaceId: string, providerConnectionId: string) {
       changeRequestId: "7",
       trustedConfigRevision: "trusted-base-123",
       headRevision: "head-456",
+      isDraft: false,
     }),
   };
 }

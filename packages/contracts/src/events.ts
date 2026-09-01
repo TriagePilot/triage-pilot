@@ -80,8 +80,9 @@ export function buildRoutingKey(input: {
   changeRequestId: ChangeRequestId;
   trustedConfigRevision: string;
   headRevision: string;
+  isDraft: boolean;
 }): string {
-  return `routing:${input.workspaceId}:${input.provider}:${input.repositoryId}:${input.changeRequestId}:${input.trustedConfigRevision}:${input.headRevision}`;
+  return `routing:${input.workspaceId}:${input.provider}:${input.repositoryId}:${input.changeRequestId}:${input.trustedConfigRevision}:${input.headRevision}:${input.isDraft ? "draft" : "ready"}`;
 }
 
 export function legacyRoutingKey(deliveryId: string): string {

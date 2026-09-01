@@ -123,6 +123,7 @@ export function githubWebhookRoutes(services: WebhookServices) {
             changeRequestId: normalized.changeRequest.externalId,
             trustedConfigRevision: normalized.changeRequest.baseRevision,
             headRevision: normalized.changeRequest.headRevision,
+            isDraft: normalized.isDraft,
           }),
         };
         const accepted = await services.acceptRoutingDelivery({

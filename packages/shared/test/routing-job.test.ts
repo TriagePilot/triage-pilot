@@ -16,7 +16,7 @@ const payload: RoutingJobPayload = {
     headRevision: "unmerged-head-sha",
   },
   isDraft: false,
-  routingKey: "routing:ws_local:github:101:7:trusted-base-sha:unmerged-head-sha",
+  routingKey: "routing:ws_local:github:101:7:trusted-base-sha:unmerged-head-sha:ready",
 };
 
 describe("routing job trust boundary", () => {
