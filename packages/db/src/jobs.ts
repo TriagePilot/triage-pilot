@@ -4,6 +4,9 @@ import type { ProviderConnectionId, ProviderKind, WorkspaceId } from "@triagepil
 import type { Database, JobRow } from "./kysely.js";
 import {
   persistMutationIntentRecoveryTransaction,
+  prepareMutationIntentTransaction,
+  type PrepareReviewerMutationIntentInput,
+  type ReviewerMutationIntent,
 } from "./availability.js";
 
 export type JobKind = "process_pull_request" | "evaluate_human_review_policy" | "activate_reviewer_absence";
@@ -42,6 +45,7 @@ export interface JobLease {
   provider: ProviderKind;
   providerConnectionId: ProviderConnectionId;
   lockedBy: string;
+  lockedAt: Date;
   attemptCount: number;
   maxAttempts: number;
 }
@@ -78,6 +82,28 @@ export function buildNextRunAt(now: Date, attemptCount: number): Date {
   return new Date(now.getTime() + delaySeconds * 1000);
 }
 
+export async function prepareClaimedReviewerMutationIntent(
+  db: Kysely<Database>,
+  lease: JobLease,
+  input: PrepareReviewerMutationIntentInput,
+): Promise<ReviewerMutationIntent> {
+  return await db.transaction().execute(async (trx) => {
+    const job = await trx.selectFrom("jobs").selectAll()
+      .where("id", "=", lease.jobId).where("workspace_id", "=", lease.workspaceId)
+      .where("provider", "=", lease.provider).where("provider_connection_id", "=", lease.providerConnectionId)
+      .where("status", "=", "running").where("locked_by", "=", lease.lockedBy)
+      .where("locked_at", "=", lease.lockedAt).where("attempt_count", "=", lease.attemptCount)
+      .forUpdate().executeTakeFirst();
+    const scope = job === undefined ? null : parseActivationScope(job);
+    if (scope === null || scope.absenceId !== input.absenceId
+      || scope.absenceRevision !== input.absenceRevision || input.workspaceId !== lease.workspaceId
+      || input.provider !== lease.provider || input.providerConnectionId !== lease.providerConnectionId) {
+      throw new Error("reviewer mutation intent prepare rejected stale or invalid activation lease");
+    }
+    return await prepareMutationIntentTransaction(trx, lease.workspaceId, input);
+  });
+}
+
 export async function recoverStaleJobs(
   db: Kysely<Database>,
   workspaceId: WorkspaceId,
@@ -91,19 +117,31 @@ export async function recoverStaleJobs(
       .where("status", "=", "running")
       .where("locked_at", "<", staleBefore)
       .whereRef("attempt_count", ">=", "max_attempts")
+      .orderBy("created_at").orderBy("id")
       .execute();
   const failure = "job lease expired after maximum attempts";
   for (const job of exhausted) {
     if (job.locked_by === null) continue;
-    await exhaustReviewerAbsenceActivationTransaction(db, {
+    const lease = {
       jobId: job.id,
       workspaceId: job.workspace_id,
       provider: job.provider,
       providerConnectionId: job.provider_connection_id,
       lockedBy: job.locked_by,
+      lockedAt: job.locked_at!,
       attemptCount: job.attempt_count,
       maxAttempts: job.max_attempts,
-    }, failure, now);
+    };
+    try {
+      await exhaustReviewerAbsenceActivationTransaction(db, lease, failure, now);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "unknown database failure";
+      try {
+        await failIsolatedStaleJob(db, lease, `${failure}: recovery transaction failed: ${detail}`, now);
+      } catch {
+        // Isolation is the invariant: a broken job must not abort recovery of later stale jobs.
+      }
+    }
   }
   await db.updateTable("jobs")
       .set({
@@ -117,6 +155,18 @@ export async function recoverStaleJobs(
       .where("locked_at", "<", staleBefore)
       .whereRef("attempt_count", "<", "max_attempts")
       .execute();
+}
+
+async function failIsolatedStaleJob(
+  db: Kysely<Database>, lease: JobLease, error: string, now: Date,
+): Promise<void> {
+  await db.updateTable("jobs").set({
+    status: "failed", locked_at: null, locked_by: null, last_error: error, run_at: now, updated_at: now,
+  }).where("id", "=", lease.jobId).where("workspace_id", "=", lease.workspaceId)
+    .where("provider", "=", lease.provider).where("provider_connection_id", "=", lease.providerConnectionId)
+    .where("status", "=", "running").where("locked_by", "=", lease.lockedBy)
+    .where("locked_at", "=", lease.lockedAt).where("attempt_count", "=", lease.attemptCount)
+    .execute();
 }
 
 async function exhaustReviewerAbsenceActivationTransaction(
@@ -133,6 +183,7 @@ async function exhaustReviewerAbsenceActivationTransaction(
       .where("provider_connection_id", "=", lease.providerConnectionId)
       .where("status", "=", "running")
       .where("locked_by", "=", lease.lockedBy)
+      .where("locked_at", "=", lease.lockedAt)
       .where("attempt_count", "=", lease.attemptCount)
       .forUpdate().executeTakeFirst();
     if (job === undefined) return { updated: false, reason: "stale_lease" };
@@ -141,6 +192,21 @@ async function exhaustReviewerAbsenceActivationTransaction(
     let sourceValid = scope !== null || job.kind !== "activate_reviewer_absence";
     let sourceError: string | null = null;
     if (scope !== null && isRecord(job.payload) && job.payload.reviewerReplacementFinalizerRecovery !== undefined) {
+      sourceValid = isValidRecoveryShape(job.payload.reviewerReplacementFinalizerRecovery, job, scope);
+      if (!sourceValid) sourceError = "reviewer activation recovery source is invalid";
+    }
+    if (scope !== null && sourceValid) {
+      const absence = await trx.selectFrom("reviewer_absences").select("id")
+        .where("workspace_id", "=", job.workspace_id).where("provider", "=", job.provider)
+        .where("provider_connection_id", "=", job.provider_connection_id)
+        .where("id", "=", scope.absenceId).forUpdate().executeTakeFirst();
+      if (absence === undefined) {
+        sourceValid = false;
+        sourceError = "reviewer activation absence source is invalid";
+      }
+    }
+    if (scope !== null && sourceValid && isRecord(job.payload)
+      && job.payload.reviewerReplacementFinalizerRecovery !== undefined) {
       sourceValid = await recoverySourceMatches(trx, job, scope);
       if (!sourceValid) sourceError = "reviewer activation recovery source is invalid";
     }
@@ -151,7 +217,7 @@ async function exhaustReviewerAbsenceActivationTransaction(
         .where("provider_connection_id", "=", job.provider_connection_id)
         .where("absence_id", "=", scope.absenceId)
         .where("absence_revision", "=", scope.absenceRevision)
-        .orderBy("id").execute();
+        .orderBy("decision_id").orderBy("id").execute();
       const unresolved = [] as typeof intents;
       for (const intent of intents) {
         const history = await trx.selectFrom("reviewer_replacements").selectAll()
@@ -209,14 +275,19 @@ async function exhaustReviewerAbsenceActivationTransaction(
         });
       }
       if (sourceValid) {
-        await trx.updateTable("reviewer_replacements")
-          .set({ state: "permanent_failure", last_error: error })
+        const pending = await trx.selectFrom("reviewer_replacements").select("id")
           .where("workspace_id", "=", job.workspace_id)
           .where("provider", "=", job.provider)
           .where("provider_connection_id", "=", job.provider_connection_id)
           .where("absence_id", "=", scope.absenceId)
           .where("absence_revision", "=", scope.absenceRevision)
-          .where("state", "=", "finalizer_pending").execute();
+          .where("state", "=", "finalizer_pending")
+          .orderBy("decision_id").orderBy("id").forUpdate().execute();
+        for (const row of pending) {
+          await trx.updateTable("reviewer_replacements")
+            .set({ state: "permanent_failure", last_error: error })
+            .where("id", "=", row.id).where("state", "=", "finalizer_pending").execute();
+        }
       }
     }
     const finalError = sourceError === null ? error : `${error}: ${sourceError}`;
@@ -230,11 +301,91 @@ async function exhaustReviewerAbsenceActivationTransaction(
 
 function parseActivationScope(job: JobRow): { absenceId: string; absenceRevision: number } | null {
   if (job.kind !== "activate_reviewer_absence" || !isRecord(job.payload)) return null;
-  if (job.payload.workspaceId !== job.workspace_id
+  if (job.payload.kind !== "activate_reviewer_absence"
+    || !hasOnlyKeys(job.payload, ["kind", "workspaceId", "providerConnectionId", "absenceId", "absenceRevision",
+      "reviewerReplacementFinalizerRecovery"])
+    || job.payload.policyCheckFailureRecovery !== undefined
+    || job.payload.workspaceId !== job.workspace_id
     || job.payload.providerConnectionId !== job.provider_connection_id
     || !isUuid(job.payload.absenceId)
     || !isPositiveInteger(job.payload.absenceRevision)) return null;
   return { absenceId: job.payload.absenceId, absenceRevision: job.payload.absenceRevision };
+}
+
+function isValidRecoveryShape(
+  value: unknown,
+  job: JobRow,
+  scope: { absenceId: string; absenceRevision: number },
+): boolean {
+  if (!isRecord(value) || !isRecord(value.job)
+    || !hasOnlyKeys(value, ["kind", "phase", "job", "provider", "unavailableActorId", "lastError", "retryable",
+      "finalizer", "replacementId", "outcome", "replacementActorId", "mutationIntentId",
+      "providerEffectsApplied", "persistence"])
+    || !hasOnlyKeys(value.job, ["kind", "workspaceId", "providerConnectionId", "absenceId", "absenceRevision"])
+    || value.kind !== "reviewer_replacement_finalizer" || value.state !== undefined
+    || !["persist_replacement", "run_finalizer", "complete_replacement"].includes(String(value.phase))
+    || value.provider !== job.provider || !isNonBlank(value.unavailableActorId)
+    || !isNonBlank(value.lastError) || typeof value.retryable !== "boolean"
+    || value.job.kind !== "activate_reviewer_absence"
+    || value.job.workspaceId !== job.workspace_id
+    || value.job.providerConnectionId !== job.provider_connection_id
+    || value.job.absenceId !== scope.absenceId || value.job.absenceRevision !== scope.absenceRevision
+    || !["replaced", "skipped_policy_satisfied", "no_replacement_available", "permanent_failure"].includes(String(value.outcome))) {
+    return false;
+  }
+  const outcome = value.outcome;
+  const expectedEffect = outcome === "replaced" || outcome === "permanent_failure";
+  if (value.providerEffectsApplied !== expectedEffect) return false;
+  const expectedAction = outcome === "replaced" || outcome === "skipped_policy_satisfied"
+    ? "reevaluate_policy" : outcome === "no_replacement_available" ? "fail_policy" : null;
+  if (expectedAction === null) {
+    if (value.finalizer !== null) return false;
+  } else if (!isRecord(value.finalizer) || value.finalizer.action !== expectedAction
+    || !hasOnlyKeys(value.finalizer, ["action", "decisionId", "summary"])
+    || !isUuid(value.finalizer.decisionId)
+    || (expectedAction === "reevaluate_policy" && value.finalizer.summary !== null)
+    || (expectedAction === "fail_policy" && !isNonBlank(value.finalizer.summary))) return false;
+  if (value.phase === "persist_replacement") {
+    if (value.replacementId !== null || !isRecord(value.persistence)) return false;
+  } else if (!isUuid(value.replacementId) || (value.persistence !== null && !isRecord(value.persistence))) return false;
+  if (outcome === "permanent_failure") {
+    if (!isUuid(value.mutationIntentId) || value.replacementActorId !== null || !isRecord(value.persistence)) return false;
+    if (value.persistence.state !== "permanent_failure" || value.persistence.outcome !== outcome
+      || !isNonBlank(value.persistence.lastError) || value.persistence.mutationIntentId !== value.mutationIntentId) return false;
+  } else {
+    if (outcome === "replaced" && (!isNonBlank(value.replacementActorId) || !isUuid(value.mutationIntentId))) return false;
+    if (outcome !== "replaced" && (value.replacementActorId !== null || value.mutationIntentId !== null)) return false;
+    if (isRecord(value.persistence)
+      && (value.persistence.outcome !== outcome || value.persistence.state !== "finalizer_pending")) return false;
+  }
+  if (isRecord(value.persistence)) {
+    const persistence = value.persistence;
+    if (!hasOnlyKeys(persistence, ["provider", "providerConnectionId", "absenceId", "absenceRevision", "decisionId",
+      "expectedHeadRevision", "unavailableActorId", "replacementActorId", "mutationIntentId", "outcome", "reason",
+      "state", "lastError", "startedAt", "completedAt", "replaceCohort", "event"])
+      || !isRecord(persistence.event) || persistence.provider !== job.provider
+      || persistence.providerConnectionId !== job.provider_connection_id
+      || persistence.absenceId !== scope.absenceId || persistence.absenceRevision !== scope.absenceRevision
+      || persistence.unavailableActorId !== value.unavailableActorId
+      || persistence.replacementActorId !== value.replacementActorId
+      || persistence.mutationIntentId !== value.mutationIntentId || persistence.outcome !== outcome
+      || persistence.event.workspaceId !== job.workspace_id || persistence.event.provider !== job.provider
+      || persistence.event.providerConnectionId !== job.provider_connection_id
+      || persistence.event.absenceId !== scope.absenceId || persistence.event.absenceRevision !== scope.absenceRevision
+      || persistence.event.decisionId !== persistence.decisionId
+      || persistence.event.unavailableActor !== value.unavailableActorId
+      || persistence.event.replacementActor !== value.replacementActorId
+      || persistence.event.outcome !== outcome) return false;
+    if (persistence.replaceCohort !== (outcome === "replaced")
+      || persistence.event.schemaVersion !== 1 || persistence.event.eventType !== "reviewer_replacement") return false;
+    if (isRecord(value.finalizer) && persistence.decisionId !== value.finalizer.decisionId) return false;
+  }
+  return true;
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  const allowedKeys = new Set(allowed);
+  return Object.keys(value).every((key) => allowedKeys.has(key));
 }
 
 async function recoverySourceMatches(
@@ -397,6 +548,7 @@ export function createWorkspaceJobQueue(
         .where("provider_connection_id", "=", lease.providerConnectionId)
         .where("status", "=", "running")
         .where("locked_by", "=", lease.lockedBy)
+        .where("locked_at", "=", lease.lockedAt)
         .where("attempt_count", "=", lease.attemptCount)
         .returning("id")
         .executeTakeFirst();
@@ -427,6 +579,7 @@ export function createWorkspaceJobQueue(
         .where("provider_connection_id", "=", lease.providerConnectionId)
         .where("status", "=", "running")
         .where("locked_by", "=", lease.lockedBy)
+        .where("locked_at", "=", lease.lockedAt)
         .where("attempt_count", "=", lease.attemptCount)
         .returning("id")
         .executeTakeFirst();

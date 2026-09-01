@@ -77,7 +77,14 @@ const jobRecord: JobRecord = {
   lockedBy: "worker-1",
   lastError: null,
 };
-const jobLease = { ...jobScope, jobId: "job-1", lockedBy: "worker-1", attemptCount: 1, maxAttempts: 5 };
+const jobLease = {
+  ...jobScope,
+  jobId: "job-1",
+  lockedBy: "worker-1",
+  lockedAt: jobRecord.lockedAt!,
+  attemptCount: 1,
+  maxAttempts: 5,
+};
 const policyJobPayload = {
   kind: "evaluate_human_review_policy" as const,
   deliveryId: "review-delivery-1",
@@ -134,14 +141,17 @@ describe("runWorkerOnce", () => {
       buildReviewerAvailabilityServices,
     });
 
-    expect(buildReviewerAvailabilityServices).toHaveBeenCalledWith({
-      kind: "activate_reviewer_absence",
-      workspaceId: "ws_local",
-      provider: "github",
-      providerConnectionId: "123",
-      absenceId: "absence-1",
-      absenceRevision: 3,
-    });
+    expect(buildReviewerAvailabilityServices).toHaveBeenCalledWith(
+      {
+        kind: "activate_reviewer_absence",
+        workspaceId: "ws_local",
+        provider: "github",
+        providerConnectionId: "123",
+        absenceId: "absence-1",
+        absenceRevision: 3,
+      },
+      jobLease,
+    );
     expect(processReviewerAbsenceActivationJob).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceId: "ws_local", providerConnectionId: "123" }),
       services,
@@ -578,7 +588,7 @@ describe("runWorkerOnce", () => {
       {},
     );
     expect(queue.markSucceeded).toHaveBeenCalledWith(
-      { ...jobScope, jobId: "job-1", lockedBy: "worker-1", attemptCount: 1, maxAttempts: 5 },
+      { ...jobScope, jobId: "job-1", lockedBy: "worker-1", lockedAt: expect.any(Date), attemptCount: 1, maxAttempts: 5 },
       expect.any(Date),
     );
     expect(queue.markFailed).not.toHaveBeenCalled();
@@ -754,6 +764,7 @@ describe("runWorkerOnce", () => {
         ...jobScope,
         jobId: "job-1",
         lockedBy: "worker-1",
+        lockedAt: expect.any(Date),
         attemptCount: failure.attemptCount,
         maxAttempts: failure.maxAttempts,
       },
@@ -779,6 +790,7 @@ describe("runWorkerOnce", () => {
         ...jobScope,
         jobId: "job-1",
         lockedBy: "worker-1",
+        lockedAt: expect.any(Date),
         attemptCount: failure.attemptCount + 1,
         maxAttempts: failure.attemptCount + 3,
       },
@@ -971,7 +983,7 @@ describe("runWorkerOnce", () => {
     expect(failPolicyCheck).not.toHaveBeenCalled();
     expect(queue.markFailed).toHaveBeenNthCalledWith(
       1,
-      { ...jobScope, jobId: "job-1", lockedBy: "worker-1", attemptCount: 5, maxAttempts: 5 },
+      { ...jobScope, jobId: "job-1", lockedBy: "worker-1", lockedAt: expect.any(Date), attemptCount: 5, maxAttempts: 5 },
       "GitHub unavailable",
       expect.any(Date),
       {
@@ -989,7 +1001,7 @@ describe("runWorkerOnce", () => {
     expect(processRoutingJob).toHaveBeenCalledOnce();
     expect(queue.markFailed).toHaveBeenNthCalledWith(
       2,
-      { ...jobScope, jobId: "job-1", lockedBy: "worker-1", attemptCount: 6, maxAttempts: 8 },
+      { ...jobScope, jobId: "job-1", lockedBy: "worker-1", lockedAt: expect.any(Date), attemptCount: 6, maxAttempts: 8 },
       "GitHub still unavailable",
       expect.any(Date),
       { retryable: true },
@@ -1001,7 +1013,7 @@ describe("runWorkerOnce", () => {
     expect(processRoutingJob).toHaveBeenCalledOnce();
     expect(queue.markFailed).toHaveBeenNthCalledWith(
       3,
-      { ...jobScope, jobId: "job-1", lockedBy: "worker-1", attemptCount: 7, maxAttempts: 8 },
+      { ...jobScope, jobId: "job-1", lockedBy: "worker-1", lockedAt: expect.any(Date), attemptCount: 7, maxAttempts: 8 },
       "GitHub unavailable",
       expect.any(Date),
       { retryable: false },

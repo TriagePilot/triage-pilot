@@ -437,107 +437,8 @@ export function createWorkspaceReviewerAvailability(
 
     async prepareMutationIntent(input) {
       validateMutationIntentInput(input, workspaceId);
-      return await db.transaction().execute(async (trx) => {
-        await requireActiveConnection(trx, workspaceId, input.providerConnectionId, input.provider);
-        const source = await trx
-          .selectFrom("reviewer_absences")
-          .innerJoin("routing_decisions", (join) => join
-            .on("routing_decisions.workspace_id", "=", workspaceId)
-            .on("routing_decisions.id", "=", input.decisionId))
-          .innerJoin("repositories", (join) => join
-            .onRef("repositories.workspace_id", "=", "routing_decisions.workspace_id")
-            .onRef("repositories.id", "=", "routing_decisions.repository_id"))
-          .select([
-            "reviewer_absences.revision as absenceRevision",
-            "reviewer_absences.status as absenceStatus",
-            "reviewer_absences.external_actor_id as unavailableActorId",
-            "routing_decisions.change_request_id as changeRequestId",
-            "routing_decisions.head_sha as expectedHeadRevision",
-            "routing_decisions.selected_reviewers as selectedActors",
-            "routing_decisions.details as decisionDetails",
-            "repositories.provider",
-            "repositories.provider_connection_id as providerConnectionId",
-            "repositories.id as repositoryRecordId",
-            "repositories.external_repository_id as repositoryId",
-          ])
-          .where("reviewer_absences.workspace_id", "=", workspaceId)
-          .where("reviewer_absences.provider", "=", input.provider)
-          .where("reviewer_absences.provider_connection_id", "=", input.providerConnectionId)
-          .where("reviewer_absences.id", "=", input.absenceId)
-          .forUpdate(["reviewer_absences", "routing_decisions"])
-          .executeTakeFirst();
-        const selectedActors = parseStrictActorList(source?.selectedActors);
-        const original = parseOriginalReviewerPool(source?.decisionDetails);
-        if (
-          source === undefined
-          || source.absenceRevision !== input.absenceRevision
-          || source.absenceStatus !== "scheduled"
-          || source.unavailableActorId !== input.unavailableActorId
-          || source.provider !== input.provider
-          || source.providerConnectionId !== input.providerConnectionId
-          || source.repositoryId !== input.repositoryId
-          || source.changeRequestId !== input.changeRequestId
-          || source.expectedHeadRevision !== input.expectedHeadRevision
-          || selectedActors === null
-          || original === null
-          || !selectedActors.includes(input.unavailableActorId)
-          || selectedActors.includes(input.replacementActorId)
-          || !original.eligibleActors.includes(input.replacementActorId)
-          || input.replacementActorId === input.unavailableActorId
-        ) throw new ReviewerAvailabilityValidationError("Reviewer mutation intent source is not current");
-
-        const terminalHistory = await trx.selectFrom("reviewer_replacements")
-          .select(["id", "mutation_intent_id"])
-          .where("workspace_id", "=", workspaceId)
-          .where("provider", "=", input.provider)
-          .where("provider_connection_id", "=", input.providerConnectionId)
-          .where("absence_id", "=", input.absenceId)
-          .where("absence_revision", "=", input.absenceRevision)
-          .where("decision_id", "=", input.decisionId)
-          .forUpdate()
-          .executeTakeFirst();
-        if (terminalHistory !== undefined) {
-          if (terminalHistory.mutation_intent_id !== null) {
-            const durable = await mutationIntentQuery(trx, workspaceId, input).executeTakeFirst();
-            if (durable !== undefined && durable.id === terminalHistory.mutation_intent_id) {
-              assertMutationIntentMatches(durable, input);
-              return toMutationIntent(durable);
-            }
-          }
-          throw new ReviewerAvailabilityValidationError("Reviewer replacement history is already terminal for this source");
-        }
-
-        const inserted = await trx
-          .insertInto("reviewer_mutation_intents")
-          .values({
-            workspace_id: workspaceId,
-            provider: input.provider,
-            provider_connection_id: input.providerConnectionId,
-            absence_id: input.absenceId,
-            absence_revision: input.absenceRevision,
-            decision_id: input.decisionId,
-            repository_record_id: source.repositoryRecordId,
-            repository_id: input.repositoryId,
-            change_request_id: input.changeRequestId,
-            expected_head_revision: input.expectedHeadRevision,
-            unavailable_actor_id: input.unavailableActorId,
-            replacement_actor_id: input.replacementActorId,
-          })
-          .onConflict((conflict) => conflict.columns([
-            "workspace_id",
-            "provider_connection_id",
-            "absence_id",
-            "absence_revision",
-            "decision_id",
-          ]).doNothing())
-          .returningAll()
-          .executeTakeFirst();
-        const row = inserted ?? await mutationIntentQuery(trx, workspaceId, input)
-          .forUpdate()
-          .executeTakeFirstOrThrow();
-        assertMutationIntentMatches(row, input);
-        return toMutationIntent(row);
-      });
+      return await db.transaction().execute(async (trx) =>
+        prepareMutationIntentTransaction(trx, workspaceId, input));
     },
 
     async listPendingFinalizers(input) {
@@ -735,6 +636,15 @@ export function createWorkspaceReviewerAvailability(
       validateReplacementState(input.expectedState);
       validateStateError(input.state, input.lastError);
       return await db.transaction().execute(async (trx) => {
+        const scope = await trx.selectFrom("reviewer_replacements")
+          .select(["absence_id", "workspace_id", "provider", "provider_connection_id"])
+          .where("workspace_id", "=", workspaceId).where("id", "=", input.replacementId)
+          .executeTakeFirst();
+        if (scope === undefined) return null;
+        await trx.selectFrom("reviewer_absences").select("id")
+          .where("workspace_id", "=", workspaceId).where("provider", "=", scope.provider)
+          .where("provider_connection_id", "=", scope.provider_connection_id)
+          .where("id", "=", scope.absence_id).forUpdate().executeTakeFirstOrThrow();
         const current = await trx
           .selectFrom("reviewer_replacements")
           .selectAll()
@@ -1223,6 +1133,77 @@ function toReplacement(row: Selectable<ReviewerReplacementsTable>): ReviewerRepl
     startedAt: row.started_at,
     completedAt: row.completed_at,
   };
+}
+
+export async function prepareMutationIntentTransaction(
+  trx: Transaction<Database>,
+  workspaceId: WorkspaceId,
+  input: PrepareReviewerMutationIntentInput,
+): Promise<ReviewerMutationIntent> {
+  validateMutationIntentInput(input, workspaceId);
+  await requireActiveConnection(trx, workspaceId, input.providerConnectionId, input.provider);
+  const absence = await trx.selectFrom("reviewer_absences")
+    .select(["revision", "status", "external_actor_id"])
+    .where("workspace_id", "=", workspaceId).where("provider", "=", input.provider)
+    .where("provider_connection_id", "=", input.providerConnectionId).where("id", "=", input.absenceId)
+    .forUpdate().executeTakeFirst();
+  if (absence === undefined || absence.revision !== input.absenceRevision || absence.status !== "scheduled"
+    || absence.external_actor_id !== input.unavailableActorId) {
+    throw new ReviewerAvailabilityValidationError("Reviewer mutation intent source is not current");
+  }
+  const source = await trx.selectFrom("routing_decisions")
+    .innerJoin("repositories", (join) => join
+      .onRef("repositories.workspace_id", "=", "routing_decisions.workspace_id")
+      .onRef("repositories.id", "=", "routing_decisions.repository_id"))
+    .select([
+      "routing_decisions.change_request_id as changeRequestId",
+      "routing_decisions.head_sha as expectedHeadRevision", "routing_decisions.selected_reviewers as selectedActors",
+      "routing_decisions.details as decisionDetails", "repositories.provider",
+      "repositories.provider_connection_id as providerConnectionId", "repositories.id as repositoryRecordId",
+      "repositories.external_repository_id as repositoryId",
+    ])
+    .where("routing_decisions.workspace_id", "=", workspaceId)
+    .where("routing_decisions.id", "=", input.decisionId)
+    .forUpdate("routing_decisions")
+    .executeTakeFirst();
+  const selectedActors = parseStrictActorList(source?.selectedActors);
+  const original = parseOriginalReviewerPool(source?.decisionDetails);
+  if (source === undefined || source.provider !== input.provider || source.providerConnectionId !== input.providerConnectionId
+    || source.repositoryId !== input.repositoryId || source.changeRequestId !== input.changeRequestId
+    || source.expectedHeadRevision !== input.expectedHeadRevision || selectedActors === null || original === null
+    || !selectedActors.includes(input.unavailableActorId) || selectedActors.includes(input.replacementActorId)
+    || !original.eligibleActors.includes(input.replacementActorId)
+    || input.replacementActorId === input.unavailableActorId) {
+    throw new ReviewerAvailabilityValidationError("Reviewer mutation intent source is not current");
+  }
+  const terminalHistory = await trx.selectFrom("reviewer_replacements")
+    .select(["id", "mutation_intent_id"])
+    .where("workspace_id", "=", workspaceId).where("provider", "=", input.provider)
+    .where("provider_connection_id", "=", input.providerConnectionId).where("absence_id", "=", input.absenceId)
+    .where("absence_revision", "=", input.absenceRevision).where("decision_id", "=", input.decisionId)
+    .forUpdate().executeTakeFirst();
+  if (terminalHistory !== undefined) {
+    if (terminalHistory.mutation_intent_id !== null) {
+      const durable = await mutationIntentQuery(trx, workspaceId, input).executeTakeFirst();
+      if (durable !== undefined && durable.id === terminalHistory.mutation_intent_id) {
+        assertMutationIntentMatches(durable, input);
+        return toMutationIntent(durable);
+      }
+    }
+    throw new ReviewerAvailabilityValidationError("Reviewer replacement history is already terminal for this source");
+  }
+  const inserted = await trx.insertInto("reviewer_mutation_intents").values({
+    workspace_id: workspaceId, provider: input.provider, provider_connection_id: input.providerConnectionId,
+    absence_id: input.absenceId, absence_revision: input.absenceRevision, decision_id: input.decisionId,
+    repository_record_id: source.repositoryRecordId, repository_id: input.repositoryId,
+    change_request_id: input.changeRequestId, expected_head_revision: input.expectedHeadRevision,
+    unavailable_actor_id: input.unavailableActorId, replacement_actor_id: input.replacementActorId,
+  }).onConflict((conflict) => conflict.columns([
+    "workspace_id", "provider_connection_id", "absence_id", "absence_revision", "decision_id",
+  ]).doNothing()).returningAll().executeTakeFirst();
+  const row = inserted ?? await mutationIntentQuery(trx, workspaceId, input).forUpdate().executeTakeFirstOrThrow();
+  assertMutationIntentMatches(row, input);
+  return toMutationIntent(row);
 }
 
 function validateMutationIntentKey(input: ReviewerMutationIntentKey, workspaceId: WorkspaceId): void {

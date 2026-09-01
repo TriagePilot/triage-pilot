@@ -684,13 +684,14 @@ async function repositoryExternalIds(
 }
 
 function toLease(job: Awaited<ReturnType<ReturnType<typeof createJobClaimer>["claimNext"]>>) {
-  if (!job || job.lockedBy === null) throw new Error("expected a claimed job");
+  if (!job || job.lockedBy === null || job.lockedAt === null) throw new Error("expected a claimed job");
   return {
     jobId: job.id,
     workspaceId: job.workspaceId,
     provider: job.provider,
     providerConnectionId: job.providerConnectionId,
     lockedBy: job.lockedBy,
+    lockedAt: job.lockedAt,
     attemptCount: job.attemptCount,
     maxAttempts: job.maxAttempts,
   };

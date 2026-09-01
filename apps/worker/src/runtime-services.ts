@@ -19,6 +19,7 @@ import {
 import {
   createWorkspaceReviewerAvailability,
   createWorkspaceJobQueue,
+  prepareClaimedReviewerMutationIntent,
   findLatestHumanReviewPolicyDecision,
   markActionFailed as persistActionFailed,
   markActionSucceeded as persistActionSucceeded,
@@ -26,6 +27,7 @@ import {
   recordPolicyCheck,
   updatePolicyCheckState,
   type createDatabase,
+  type JobLease,
 } from "@triagepilot/db";
 import {
   activeApprovedReviewers,
@@ -476,7 +478,7 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
 export function createWorkerReviewerAvailabilityServiceFactory(input: WorkerServiceFactoryInput) {
   const credentialProvider = input.credentialProvider ?? staticCredentialProvider(input.github);
   const createAdapter = input.createAdapter ?? ((requester: Requester) => new GitHubAdapter(requester));
-  return (message: ReviewerAbsenceActivationJobMessage): ReviewerAvailabilityPorts => {
+  return (message: ReviewerAbsenceActivationJobMessage, lease?: JobLease): ReviewerAvailabilityPorts => {
     if (message.provider !== "github") {
       throw new PermanentJobError(`reviewer availability provider is not configured: ${message.provider}`);
     }
@@ -599,7 +601,10 @@ export function createWorkerReviewerAvailabilityServiceFactory(input: WorkerServ
           if (intentInput.provider !== message.provider) {
             throw new PermanentJobError("reviewer mutation intent provider does not match claimed job");
           }
-          return toApplicationMutationIntent(await availability.prepareMutationIntent(intentInput));
+          if (lease === undefined) {
+            throw new PermanentJobError("reviewer mutation intent prepare requires a claimed activation lease");
+          }
+          return toApplicationMutationIntent(await prepareClaimedReviewerMutationIntent(input.db, lease, intentInput));
         },
         async findActive(activeInput) {
           assertAvailabilityScope(message, activeInput.workspaceId, activeInput.providerConnectionId);

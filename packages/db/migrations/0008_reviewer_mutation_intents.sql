@@ -126,12 +126,21 @@ for each row execute function validate_reviewer_replacement_insert();
 create function validate_reviewer_replacement_update() returns trigger
 language plpgsql as $$
 begin
-  if new.state = 'finalizer_pending' then
-    if new.outcome not in ('replaced', 'skipped_policy_satisfied', 'no_replacement_available')
-      or new.last_error is not null then
-      raise exception 'pending reviewer replacement state is malformed';
-    end if;
-  elsif new.state = 'completed' then
+  if (new.id, new.workspace_id, new.provider, new.provider_connection_id,
+      new.absence_id, new.absence_revision, new.decision_id,
+      new.unavailable_actor_id, new.replacement_actor_id, new.mutation_intent_id,
+      new.outcome, new.reason, new.started_at, new.completed_at)
+    is distinct from
+     (old.id, old.workspace_id, old.provider, old.provider_connection_id,
+      old.absence_id, old.absence_revision, old.decision_id,
+      old.unavailable_actor_id, old.replacement_actor_id, old.mutation_intent_id,
+      old.outcome, old.reason, old.started_at, old.completed_at) then
+    raise exception 'reviewer replacement provenance is immutable';
+  end if;
+  if old.state <> 'finalizer_pending' then
+    raise exception 'terminal reviewer replacement is immutable';
+  end if;
+  if new.state = 'completed' then
     if new.outcome = 'permanent_failure' or new.last_error is not null then
       raise exception 'completed reviewer replacement state is malformed';
     end if;
@@ -140,7 +149,7 @@ begin
       raise exception 'permanent reviewer replacement state requires an error';
     end if;
   else
-    raise exception 'reviewer replacement state is malformed';
+    raise exception 'reviewer replacement may only leave finalizer_pending';
   end if;
   return new;
 end;

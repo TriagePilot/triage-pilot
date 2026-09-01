@@ -163,3 +163,45 @@ The storage cleanup concern is unchanged: mutation intents and linked history re
 The final mutation-sensitive evidence adds four controlled PostgreSQL cases (4/4): two concurrent exact audit callers serialize and return one history/event while a differing retry conflicts; terminal-history-first blocks preparation and leaves no hidden intent; intent-insert-first blocks revision then preserves the historical revision, while revision-first blocks and rejects the stale insert; and a mixed stale-maintenance batch commits the valid job's audit/failure while a well-shaped source-invalid UUID job fails without mutating unrelated history. These cases raise the availability database file to 39 tests and explicitly cover the concurrency and batch-isolation findings. The final disposable-PostgreSQL root rerun passed 71 files and 763 tests.
 
 Fix-round commit subject: `fix: atomically exhaust availability recovery`.
+
+## Fix round 3: claimed-lease preparation fence
+
+### RED/GREEN
+
+The first worker RED showed activation composition receiving only the parsed message, so provider mutation preparation had no exact lease fence. After requiring the lease in runner dispatch, the crash matrix intentionally went 0/15 because its direct runtime fixture did not own a claimed job; the fixture now claims the durable activation and all 15 crash/admin cases pass through the production fence. The first trigger-isolation RED also proved that independently seeded fixtures occupied different workspaces; the corrected test creates revisions 1 and 2 in one workspace and proves a revision-1 audit trigger failure cannot stop revision 2.
+
+Fresh focused evidence is: availability PostgreSQL 50/50, jobs PostgreSQL 10/10, worker runner/runtime 66/66, and crash/composition 25/25. The availability file includes six source-matching malformed recovery variants plus controlled lease/concurrency and direct-SQL lifecycle cases.
+
+### Lease fence and canonical lock order
+
+`JobLease` now carries `lockedAt`, which is the per-claim lease token alongside job ID, owner, and attempt. Every success, failure, exhaustion, and production mutation-intent preparation binds it. Worker composition captures the exact claimed lease and exposes no provider-writing prepare path without it.
+
+```text
+claimed prepare                       terminal exhaustion
+BEGIN                                 BEGIN
+lock exact running job                lock exact running job
+  id/workspace/provider/connection      id/workspace/provider/connection
+  owner/lockedAt/attempt                 owner/lockedAt/attempt
+validate activation payload           validate exact payload/recovery shape
+lock absence                          lock absence
+lock decision                         scan intents in decision/id order
+lock terminal history                 lock histories in the same order
+create-or-load immutable intent       lock pending finalizers in decision/id order
+COMMIT                                audit unresolved intents; fail job; COMMIT
+```
+
+Prepare-first blocks exhaustion, commits the intent, and exhaustion then records its linked permanent-failure audit. Exhaustion-first commits job failure, after which the stale prepare rejects before provider access and inserts no intent. Rotated owner and rotated `lockedAt` are also rejected. Finalizer completion now locks absence before replacement, so the pending-A/unresolved-B two-transaction case completes with A completed and B permanently audited without deadlock.
+
+### Strict authorization and database lifecycle
+
+Exhaustion authorizes bulk recovery mutation only for an exact `activate_reviewer_absence` payload with no policy recovery. Serialized reviewer recovery must satisfy its phase, finalizer mapping, provider-effects marker, retryability/error, state/outcome, persistence/event provenance, claimed workspace/provider/connection, absence/revision, decision, actors, replacement, and intent discriminants. Malformed phase, finalizer, effects, top-level state, persistence state, and outcome variants fail the job while leaving pending replacements and intents unchanged.
+
+Migration `0008` remains the highest migration. Its replacement UPDATE trigger makes outcome, actors, intent/source identity, reason, and timestamps immutable. Only `finalizer_pending` may transition to `completed` with null error or `permanent_failure` with a nonblank error; terminal rows cannot change. Direct SQL proves completed-to-permanent and outcome mutation reject, valid pending transitions succeed, and later terminal provenance mutation rejects.
+
+### Maintenance isolation and final verification
+
+Stale exhausted jobs are processed in stable creation/ID order and each atomic exhaustion transaction is isolated. If a real database write throws, an exact-lease fallback visibly fails only that job without replacement mutation, then maintenance continues. A trigger-induced revision-1 audit failure leaves no partial history while revision 2 commits its linked audit and job failure.
+
+Final verification used a disposable PostgreSQL container on a random port and no persistent volume: root unit 57 files/624 tests, root PostgreSQL integration 10 files/117 tests, crash/composition 25/25, full build/type check, package-boundary, Compose rendering, Docker build, `git diff --check`, and both Gitleaks scans pass. The standalone public-boundary command still reports only the two inherited Task 6 report terms documented above.
+
+Fix-round commit subject: `fix: fence reviewer intent preparation by lease`.

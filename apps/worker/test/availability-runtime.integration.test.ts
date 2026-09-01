@@ -342,6 +342,15 @@ async function seedActivation(
     absenceId: absence.id,
     absenceRevision: absence.revision,
   };
+  const claimed = await db.updateTable("jobs").set({
+    status: "running", locked_at: now, locked_by: "runtime-crash-worker", attempt_count: 1,
+  }).where("workspace_id", "=", workspaceId).where("kind", "=", "activate_reviewer_absence")
+    .where("status", "=", "queued").returningAll().executeTakeFirstOrThrow();
+  const lease = {
+    jobId: claimed.id, workspaceId, provider: claimed.provider,
+    providerConnectionId: claimed.provider_connection_id, lockedBy: claimed.locked_by!, lockedAt: claimed.locked_at!,
+    attemptCount: claimed.attempt_count, maxAttempts: claimed.max_attempts,
+  };
   return {
     message,
     absence,
@@ -358,7 +367,7 @@ async function seedActivation(
         github: { appId: "123", privateKey: "test" },
         createRequester: async () => ({ request: remote.request }) as never,
         clock: { now: () => now },
-      })(message);
+      })(message, lease);
     },
   };
 }

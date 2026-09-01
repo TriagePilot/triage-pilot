@@ -11,6 +11,8 @@ import {
   createJobClaimer,
   createWorkspaceJobQueue,
   persistDecision,
+  prepareClaimedReviewerMutationIntent,
+  prepareMutationIntentTransaction,
   recoverStaleJobs,
 } from "../src";
 import { withPostgresTestDatabase } from "./postgres";
@@ -22,6 +24,271 @@ const alternateReplacementActor = "Actor:Alternate/73";
 const changeRequestId = "change:Request/A17";
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer availability", () => {
+  it.each([
+    ["phase", { phase: "unknown_phase" }],
+    ["finalizer", { finalizer: { action: "fail_policy", decisionId: "will-be-replaced", summary: "bad" } }],
+    ["provider effects", { providerEffectsApplied: false }],
+    ["state", { state: "completed" }],
+    ["persistence state", { persistence: { state: "completed" } }],
+    ["outcome", { outcome: "skipped_closed" }],
+  ])("fails malformed source-matching recovery %s without replacement mutation", async (_name, mutation) => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, `availability-malformed-${_name.replaceAll(" ", "-")}`);
+      const persisted = await fixture.availability.persistReplacement(replacementInput(fixture));
+      const recovery = {
+        kind: "reviewer_replacement_finalizer", phase: "run_finalizer",
+        provider: fixture.scope.provider, unavailableActorId: unavailableActor,
+        job: { kind: "activate_reviewer_absence", workspaceId: fixture.scope.workspaceId,
+          providerConnectionId: fixture.scope.providerConnectionId, absenceId: fixture.absence.id,
+          absenceRevision: fixture.absence.revision },
+        finalizer: { action: "reevaluate_policy", decisionId: fixture.decisionId, summary: null },
+        replacementId: persisted.replacement!.id, outcome: "replaced", replacementActorId: replacementActor,
+        mutationIntentId: fixture.mutationIntentId, providerEffectsApplied: true, persistence: null,
+        retryable: true, lastError: "retryable finalizer",
+        ...mutation,
+      } as Record<string, unknown>;
+      if (_name === "finalizer") {
+        (recovery.finalizer as Record<string, unknown>).decisionId = fixture.decisionId;
+      }
+      const lockedAt = new Date("2026-09-01T10:00:00.000Z");
+      await db.updateTable("jobs").set({ status: "running", attempt_count: 4, max_attempts: 4,
+        locked_at: lockedAt, locked_by: "malformed-worker",
+        payload: { ...recovery.job as object, reviewerReplacementFinalizerRecovery: recovery },
+      }).where("workspace_id", "=", fixture.scope.workspaceId)
+        .where("kind", "=", "activate_reviewer_absence").execute();
+      await recoverStaleJobs(db, fixture.scope.workspaceId, new Date("2026-09-01T10:16:00.000Z"));
+      await expect(db.selectFrom("reviewer_replacements").select(["state", "last_error"])
+        .where("id", "=", persisted.replacement!.id).executeTakeFirstOrThrow()).resolves.toEqual({
+        state: "finalizer_pending", last_error: null,
+      });
+      await expect(db.selectFrom("jobs").select("status")
+        .where("workspace_id", "=", fixture.scope.workspaceId).where("kind", "=", "activate_reviewer_absence")
+        .executeTakeFirstOrThrow()).resolves.toEqual({ status: "failed" });
+    });
+  });
+
+  it("isolates a trigger-induced stale audit failure and exhausts the next valid job", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const broken = await seedReplacementFixture(db, "availability-trigger-broken");
+      const revised = await broken.availability.reviseAbsence({
+        provider: broken.scope.provider, providerConnectionId: broken.scope.providerConnectionId,
+        absenceId: broken.absence.id, expectedRevision: 1, externalActorId: unavailableActor,
+        startAt: broken.absence.startAt, endAt: new Date("2026-09-03T12:00:00.000Z"), now,
+      });
+      const validIntent = await broken.availability.prepareMutationIntent({
+        workspaceId: broken.scope.workspaceId, provider: broken.scope.provider,
+        providerConnectionId: broken.scope.providerConnectionId, absenceId: broken.absence.id,
+        absenceRevision: revised.revision, decisionId: broken.decisionId,
+        repositoryId: broken.externalRepositoryId, changeRequestId, expectedHeadRevision: "head-1",
+        unavailableActorId: unavailableActor, replacementActorId: replacementActor,
+      });
+      await sql`create function fail_selected_reviewer_audit() returns trigger language plpgsql as $$
+        begin
+          if new.absence_id = '${sql.raw(broken.absence.id)}'::uuid and new.absence_revision = 1 then
+            raise exception 'forced reviewer audit failure';
+          end if;
+          return new;
+        end $$`.execute(db);
+      await sql`create trigger fail_selected_reviewer_audit before insert on reviewer_replacements
+        for each row execute function fail_selected_reviewer_audit()`.execute(db);
+      const lockedAt = new Date("2026-09-01T10:00:00.000Z");
+      await db.updateTable("jobs").set({ status: "running", attempt_count: 4, max_attempts: 4,
+        locked_at: lockedAt, locked_by: "dead-trigger-worker" })
+        .where("workspace_id", "=", broken.scope.workspaceId)
+        .where("kind", "=", "activate_reviewer_absence").execute();
+      await recoverStaleJobs(db, broken.scope.workspaceId, new Date("2026-09-01T10:16:00.000Z"));
+      const jobs = await db.selectFrom("jobs").select(["status", "last_error", "payload"])
+        .where("workspace_id", "=", broken.scope.workspaceId)
+        .where("kind", "=", "activate_reviewer_absence").orderBy("created_at").execute();
+      expect(jobs).toHaveLength(2);
+      expect(jobs.map(({ status, last_error }) => ({ status, last_error }))).toEqual([
+        expect.objectContaining({ status: "failed" }), expect.objectContaining({ status: "failed" }),
+      ]);
+      await expect(db.selectFrom("reviewer_replacements").select("id")
+        .where("absence_id", "=", broken.absence.id).where("absence_revision", "=", 1).execute()).resolves.toEqual([]);
+      await expect(db.selectFrom("reviewer_replacements").select(["state", "mutation_intent_id"])
+        .where("absence_id", "=", broken.absence.id).where("absence_revision", "=", 2)
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+        state: "permanent_failure", mutation_intent_id: validIntent.id,
+      });
+      expect(jobs[0]).toMatchObject({ status: "failed", last_error: expect.stringContaining("forced reviewer audit failure") });
+      expect(jobs[1]).toMatchObject({ status: "failed" });
+    });
+  });
+
+  it("fences production intent preparation by the exact claimed activation lease", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "availability-claimed-prepare-fence");
+      const source = await db.selectFrom("reviewer_mutation_intents").selectAll()
+        .where("id", "=", fixture.mutationIntentId).executeTakeFirstOrThrow();
+      await db.deleteFrom("reviewer_mutation_intents").where("id", "=", source.id).execute();
+      const claimed = await createJobClaimer(db).claimNext("worker-fenced", now);
+      const lease = {
+        jobId: claimed!.id, workspaceId: claimed!.workspaceId, provider: claimed!.provider,
+        providerConnectionId: claimed!.providerConnectionId, lockedBy: claimed!.lockedBy!,
+        lockedAt: claimed!.lockedAt!, attemptCount: claimed!.attemptCount, maxAttempts: claimed!.maxAttempts,
+      };
+      const input = {
+        workspaceId: fixture.scope.workspaceId, provider: fixture.scope.provider,
+        providerConnectionId: fixture.scope.providerConnectionId, absenceId: fixture.absence.id,
+        absenceRevision: fixture.absence.revision, decisionId: fixture.decisionId,
+        repositoryId: fixture.externalRepositoryId, changeRequestId,
+        expectedHeadRevision: "head-1", unavailableActorId: unavailableActor,
+        replacementActorId: replacementActor,
+      };
+      await expect(prepareClaimedReviewerMutationIntent(db, { ...lease, lockedBy: "rotated-owner" }, input))
+        .rejects.toThrow(/stale or invalid activation lease/i);
+      await expect(prepareClaimedReviewerMutationIntent(
+        db, { ...lease, lockedAt: new Date(lease.lockedAt.getTime() - 1) }, input,
+      )).rejects.toThrow(/stale or invalid activation lease/i);
+      await expect(db.selectFrom("reviewer_mutation_intents").select("id").execute()).resolves.toEqual([]);
+      await expect(prepareClaimedReviewerMutationIntent(db, lease, input)).resolves.toMatchObject(input);
+    });
+  });
+
+  it("serializes prepare-first and exhaustion-first at the activation lease fence", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const prepareFirst = await seedReplacementFixture(db, "availability-prepare-before-exhaust");
+      const source = await db.selectFrom("reviewer_mutation_intents").selectAll()
+        .where("id", "=", prepareFirst.mutationIntentId).executeTakeFirstOrThrow();
+      await db.deleteFrom("reviewer_mutation_intents").where("id", "=", source.id).execute();
+      const claimed = await createJobClaimer(db).claimNext("worker-order", now);
+      const lease = {
+        jobId: claimed!.id, workspaceId: claimed!.workspaceId, provider: claimed!.provider,
+        providerConnectionId: claimed!.providerConnectionId, lockedBy: claimed!.lockedBy!, lockedAt: claimed!.lockedAt!,
+        attemptCount: claimed!.attemptCount, maxAttempts: claimed!.maxAttempts,
+      };
+      const input = {
+        workspaceId: prepareFirst.scope.workspaceId, provider: prepareFirst.scope.provider,
+        providerConnectionId: prepareFirst.scope.providerConnectionId, absenceId: prepareFirst.absence.id,
+        absenceRevision: prepareFirst.absence.revision, decisionId: prepareFirst.decisionId,
+        repositoryId: prepareFirst.externalRepositoryId, changeRequestId, expectedHeadRevision: "head-1",
+        unavailableActorId: unavailableActor, replacementActorId: replacementActor,
+      };
+      let releasePrepare!: () => void;
+      let preparedSignal!: (transactionId: string) => void;
+      const release = new Promise<void>((resolve) => { releasePrepare = resolve; });
+      const prepared = new Promise<string>((resolve) => { preparedSignal = resolve; });
+      const preparing = db.transaction().execute(async (trx) => {
+        const transaction = await sql<{ id: string }>`select txid_current()::text as id`.execute(trx);
+        await trx.selectFrom("jobs").select("id").where("id", "=", lease.jobId).forUpdate().executeTakeFirstOrThrow();
+        await prepareMutationIntentTransaction(trx, lease.workspaceId, input);
+        preparedSignal(transaction.rows[0]!.id);
+        await release;
+      });
+      const prepareTransactionId = await prepared;
+      const exhausting = createWorkspaceJobQueue(db, lease.workspaceId)
+        .exhaustReviewerAbsenceActivation(lease, "bounded claim exhausted", now);
+      expect(await waitForBlockedDatabaseLock(db, prepareTransactionId)).toBe(true);
+      releasePrepare();
+      await preparing;
+      await expect(exhausting).resolves.toEqual({ updated: true });
+      await expect(db.selectFrom("reviewer_replacements").select(["state", "mutation_intent_id"])
+        .where("decision_id", "=", input.decisionId).executeTakeFirstOrThrow()).resolves.toEqual({
+        state: "permanent_failure", mutation_intent_id: expect.any(String),
+      });
+
+      const exhaustFirst = await seedReplacementFixture(db, "availability-exhaust-before-prepare");
+      const staleSource = await db.selectFrom("reviewer_mutation_intents").selectAll()
+        .where("id", "=", exhaustFirst.mutationIntentId).executeTakeFirstOrThrow();
+      await db.deleteFrom("reviewer_mutation_intents").where("id", "=", staleSource.id).execute();
+      const second = await createJobClaimer(db).claimNext("worker-order-two", now);
+      const secondLease = {
+        jobId: second!.id, workspaceId: second!.workspaceId, provider: second!.provider,
+        providerConnectionId: second!.providerConnectionId, lockedBy: second!.lockedBy!, lockedAt: second!.lockedAt!,
+        attemptCount: second!.attemptCount, maxAttempts: second!.maxAttempts,
+      };
+      await expect(createWorkspaceJobQueue(db, secondLease.workspaceId)
+        .exhaustReviewerAbsenceActivation(secondLease, "exhaustion won", now)).resolves.toEqual({ updated: true });
+      await expect(prepareClaimedReviewerMutationIntent(db, secondLease, {
+        ...input, absenceId: exhaustFirst.absence.id, decisionId: exhaustFirst.decisionId,
+        providerConnectionId: exhaustFirst.scope.providerConnectionId,
+        repositoryId: exhaustFirst.externalRepositoryId,
+      })).rejects.toThrow(/stale or invalid activation lease/i);
+      await expect(db.selectFrom("reviewer_mutation_intents").select("id")
+        .where("absence_id", "=", exhaustFirst.absence.id).execute()).resolves.toEqual([]);
+    });
+  });
+
+  it("completes pending A beside unresolved B without deadlocking exhaustion", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "availability-pending-a-unresolved-b");
+      const pendingA = await fixture.availability.persistReplacement(replacementInput(fixture));
+      const repository = await db.selectFrom("repositories").select("id")
+        .where("workspace_id", "=", fixture.scope.workspaceId)
+        .where("external_repository_id", "=", fixture.externalRepositoryId).executeTakeFirstOrThrow();
+      const decisionB = await persistDecision(db, fixture.scope.workspaceId, {
+        repositoryId: repository.id, deliveryId: "pending-a-unresolved-b-delivery",
+        routingKey: "pending-a-unresolved-b-routing", changeRequestId: "change:Request/B18", pullNumber: 18,
+        headSha: "head-b", mode: "enforce", action: "request_human_review", actionStatus: "pending",
+        riskScore: 55, selectedReviewers: [unavailableActor],
+        details: { ownership: { preferredReviewers: [unavailableActor, replacementActor],
+          eligibleReviewers: [unavailableActor, replacementActor] }, routing: { requestedReviewerCount: 1 } },
+      });
+      const intentB = await fixture.availability.prepareMutationIntent({
+        workspaceId: fixture.scope.workspaceId, provider: fixture.scope.provider,
+        providerConnectionId: fixture.scope.providerConnectionId, absenceId: fixture.absence.id,
+        absenceRevision: fixture.absence.revision, decisionId: decisionB.decisionId,
+        repositoryId: fixture.externalRepositoryId, changeRequestId: "change:Request/B18",
+        expectedHeadRevision: "head-b", unavailableActorId: unavailableActor, replacementActorId: replacementActor,
+      });
+      const claimed = await createJobClaimer(db).claimNext("worker-no-deadlock", now);
+      const lease = { jobId: claimed!.id, workspaceId: claimed!.workspaceId, provider: claimed!.provider,
+        providerConnectionId: claimed!.providerConnectionId, lockedBy: claimed!.lockedBy!, lockedAt: claimed!.lockedAt!,
+        attemptCount: claimed!.attemptCount, maxAttempts: claimed!.maxAttempts };
+      await sql`create function delay_pending_a_completion() returns trigger language plpgsql as $$
+        begin
+          if new.id = '${sql.raw(pendingA.replacement!.id)}'::uuid then perform pg_sleep(0.15); end if;
+          return new;
+        end $$`.execute(db);
+      await sql`create trigger delay_pending_a_completion before update on reviewer_replacements
+        for each row execute function delay_pending_a_completion()`.execute(db);
+      const completing = fixture.availability.updateReplacementState({ replacementId: pendingA.replacement!.id,
+        expectedState: "finalizer_pending", state: "completed", lastError: null });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      const exhausting = createWorkspaceJobQueue(db, fixture.scope.workspaceId)
+        .exhaustReviewerAbsenceActivation(lease, "bounded exhaustion", now);
+      await expect(Promise.all([completing, exhausting])).resolves.toBeDefined();
+      await expect(db.selectFrom("reviewer_replacements").select(["decision_id", "state", "mutation_intent_id"])
+        .where("absence_id", "=", fixture.absence.id).orderBy("decision_id").execute()).resolves.toEqual(
+        expect.arrayContaining([
+          { decision_id: fixture.decisionId, state: "completed", mutation_intent_id: fixture.mutationIntentId },
+          { decision_id: decisionB.decisionId, state: "permanent_failure", mutation_intent_id: intentB.id },
+        ]),
+      );
+    });
+  });
+
+  it("enforces immutable replacement provenance and one-way finalizer SQL transitions", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const completedFixture = await seedReplacementFixture(db, "availability-sql-completed-terminal");
+      const completed = await completedFixture.availability.persistReplacement(
+        nonMutatingReplacementInput(completedFixture, "skipped_closed"),
+      );
+      await expect(db.updateTable("reviewer_replacements")
+        .set({ state: "permanent_failure", last_error: "late failure" })
+        .where("id", "=", completed.replacement!.id).execute()).rejects.toThrow(/terminal.*immutable/i);
+
+      const pendingFixture = await seedReplacementFixture(db, "availability-sql-pending-complete");
+      const pending = await pendingFixture.availability.persistReplacement(replacementInput(pendingFixture));
+      await expect(db.updateTable("reviewer_replacements")
+        .set({ outcome: "skipped_closed", state: "completed" })
+        .where("id", "=", pending.replacement!.id).execute()).rejects.toThrow(/provenance.*immutable/i);
+      await expect(db.updateTable("reviewer_replacements")
+        .set({ state: "completed", last_error: null })
+        .where("id", "=", pending.replacement!.id).execute()).resolves.toBeDefined();
+      await expect(db.updateTable("reviewer_replacements")
+        .set({ reason: "mutated terminal reason" })
+        .where("id", "=", pending.replacement!.id).execute()).rejects.toThrow(/provenance.*immutable/i);
+
+      const failedFixture = await seedReplacementFixture(db, "availability-sql-pending-failure");
+      const failed = await failedFixture.availability.persistReplacement(replacementInput(failedFixture));
+      await expect(db.updateTable("reviewer_replacements")
+        .set({ state: "permanent_failure", last_error: "finalizer exhausted" })
+        .where("id", "=", failed.replacement!.id).execute()).resolves.toBeDefined();
+    });
+  });
+
   it("atomically audits ordinary-scope intents and fails only the exact claimed lease", async () => {
     await withPostgresTestDatabase(async (db) => {
       const fixture = await seedReplacementFixture(db, "availability-ordinary-exhaustion");
@@ -35,6 +302,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer avail
         provider: claimed!.provider,
         providerConnectionId: claimed!.providerConnectionId,
         lockedBy: claimed!.lockedBy!,
+        lockedAt: claimed!.lockedAt!,
         attemptCount: claimed!.attemptCount,
         maxAttempts: claimed!.maxAttempts,
       };

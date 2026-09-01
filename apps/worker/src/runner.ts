@@ -53,7 +53,10 @@ export interface WorkerRunnerInput {
     services: ReviewerAvailabilityServices,
     error: string,
   ): Promise<void>;
-  buildReviewerAvailabilityServices?(message: ReviewerAbsenceActivationJobMessage): ReviewerAvailabilityServices;
+  buildReviewerAvailabilityServices?(
+    message: ReviewerAbsenceActivationJobMessage,
+    lease: JobLease,
+  ): ReviewerAvailabilityServices;
 }
 
 export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> {
@@ -98,7 +101,7 @@ export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> 
       if (!input.processReviewerAbsenceActivationJob || !input.buildReviewerAvailabilityServices) {
         throw new PermanentJobError("reviewer absence activation processor is not configured");
       }
-      reviewerAvailabilityServices = input.buildReviewerAvailabilityServices(message);
+      reviewerAvailabilityServices = input.buildReviewerAvailabilityServices(message, lease);
       let nextRecovery: ReviewerReplacementFinalizerRecovery | null;
       if (reviewerReplacementRecovery === null) {
         nextRecovery = await input.processReviewerAbsenceActivationJob(message, reviewerAvailabilityServices);
@@ -233,13 +236,16 @@ async function recoverPolicyCheckFailure(
 }
 
 function toJobLease(job: JobRecord): JobLease {
-  if (job.lockedBy === null) throw new StaleJobLeaseError(`claimed job ${job.id} has no lock owner`);
+  if (job.lockedBy === null || job.lockedAt === null) {
+    throw new StaleJobLeaseError(`claimed job ${job.id} has no complete lease`);
+  }
   return {
     jobId: job.id,
     workspaceId: job.workspaceId,
     provider: job.provider,
     providerConnectionId: job.providerConnectionId,
     lockedBy: job.lockedBy,
+    lockedAt: job.lockedAt,
     attemptCount: job.attemptCount,
     maxAttempts: job.maxAttempts,
   };
