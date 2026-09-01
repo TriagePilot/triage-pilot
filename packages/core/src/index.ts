@@ -1,4 +1,5 @@
 export * from "./branch.js";
+export * from "./availability.js";
 export * from "./ownership.js";
 export * from "./review-policy.js";
 export * from "./risk.js";

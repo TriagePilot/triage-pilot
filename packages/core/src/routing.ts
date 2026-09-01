@@ -89,16 +89,16 @@ export function decideRouting(input: RoutingInput): RoutingDecision {
   };
 }
 
-function uniqueReviewers(reviewers: string[]): string[] {
+export function uniqueReviewers(reviewers: string[]): string[] {
   return [...new Set(reviewers.map(normalizeReviewer).filter(Boolean))];
 }
 
-function normalizeReviewer(reviewer: string): string {
+export function normalizeReviewer(reviewer: string): string {
   const normalized = reviewer.trim().replace(/^@/, "").toLowerCase();
   return normalized ? `@${normalized}` : "";
 }
 
-function selectLowestLoadReviewers(
+export function selectLowestLoadReviewers(
   candidates: string[],
   load: Record<string, number>,
   selectionKey: string,
