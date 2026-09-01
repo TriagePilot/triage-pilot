@@ -8,6 +8,7 @@ export {
   type PullRequestRef,
   type PullRequestReview,
   type GitHubReviewerReplacementState,
+  type ReviewerReplacementErrorClassification,
   type RepositoryRef,
 } from "./adapter.js";
 export {

@@ -74,6 +74,10 @@ function buildPorts(overrides: Partial<ReviewerAvailabilityPorts> = {}): Reviewe
   const provider = {
     inspectChangeRequest: vi.fn(async () => providerState),
     reconcileReviewRequest: vi.fn(async () => ({ changed: true })),
+    classifyError: vi.fn((error: unknown) => ({
+      kind: "retryable" as const,
+      message: error instanceof Error ? error.message : String(error),
+    })),
   };
   const finalizers = { run: vi.fn(async () => {}) };
   return {
@@ -160,6 +164,26 @@ describe("activateReviewerAbsence", () => {
     expect(ports.availability.persistReplacement).toHaveBeenCalledWith(expect.objectContaining({
       outcome: "skipped_changed_head",
       replaceCohort: false,
+    }));
+  });
+
+  it("re-reads current state immediately before persistence and records a newly closed request", async () => {
+    const inspectChangeRequest = vi
+      .fn()
+      .mockResolvedValueOnce(providerState)
+      .mockResolvedValueOnce({ ...providerState, state: "closed" });
+    const ports = buildPorts({ provider: { inspectChangeRequest } as never });
+
+    await expect(activateReviewerAbsence(job, ports)).resolves.toMatchObject({
+      status: "completed",
+      results: [{ outcome: "skipped_closed", replacementActor: null }],
+    });
+
+    expect(inspectChangeRequest).toHaveBeenCalledTimes(2);
+    expect(ports.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+    expect(ports.availability.persistReplacement).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "skipped_closed",
+      state: "completed",
     }));
   });
 
@@ -377,6 +401,50 @@ describe("activateReviewerAbsence", () => {
       action: "fail_policy",
       summary: "No replacement is available for an absent required reviewer.",
     }));
+    expect(ports.provider.inspectChangeRequest).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-reads no-replacement state and honors an approval arriving before policy failure", async () => {
+    const noReplacementCandidate = {
+      ...candidate,
+      originalPreferredActors: [activation.externalActorId],
+      originalEligibleActors: [activation.externalActorId],
+    };
+    const inspectChangeRequest = vi
+      .fn()
+      .mockResolvedValueOnce(providerState)
+      .mockResolvedValueOnce({
+        ...providerState,
+        reviews: [{
+          actor: "@user-5c9f21",
+          actorType: "human",
+          state: "approved",
+          submittedAt: "2026-09-01T10:00:00.500Z",
+        }],
+      });
+    const ports = buildPorts({
+      availability: {
+        loadActivation: vi.fn(async () => ({ ...activation, candidates: [noReplacementCandidate] })),
+      } as never,
+      provider: { inspectChangeRequest } as never,
+    });
+
+    await expect(activateReviewerAbsence(job, ports)).resolves.toMatchObject({
+      status: "completed",
+      results: [{ outcome: "skipped_policy_satisfied", replacementActor: null }],
+    });
+
+    expect(inspectChangeRequest).toHaveBeenCalledTimes(2);
+    expect(ports.availability.persistReplacement).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "skipped_policy_satisfied",
+      state: "finalizer_pending",
+    }));
+    expect(ports.finalizers.run).toHaveBeenCalledWith(expect.objectContaining({
+      action: "reevaluate_policy",
+    }));
+    expect(ports.finalizers.run).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: "fail_policy",
+    }));
   });
 
   it("retries a partial provider mutation without repeating the successful removal", async () => {
@@ -417,6 +485,235 @@ describe("activateReviewerAbsence", () => {
     ]);
     expect(persistReplacement).toHaveBeenCalledTimes(1);
   });
+
+  it("recovers the already applied replacement after process death without selecting a second actor", async () => {
+    const crashCandidate = {
+      ...candidate,
+      selectedActors: [activation.externalActorId, "@user-7c1f9b"],
+      originalPreferredActors: ["@user-c91e46", "@user-f37a82"],
+      originalEligibleActors: [
+        activation.externalActorId,
+        "@user-7c1f9b",
+        "@user-c91e46",
+        "@user-f37a82",
+      ],
+      requestedReviewerCount: 2 as const,
+    };
+    const requestedActors = new Set([activation.externalActorId, "@user-7c1f9b"]);
+    const effects: string[] = [];
+    const provider = {
+      inspectChangeRequest: vi.fn(async () => ({ ...providerState, requestedActors: [...requestedActors] })),
+      reconcileReviewRequest: vi.fn(async (input: { unavailableActor: string; replacementActor: string }) => {
+        if (requestedActors.delete(input.unavailableActor)) effects.push(`remove:${input.unavailableActor}`);
+        if (!requestedActors.has(input.replacementActor)) {
+          requestedActors.add(input.replacementActor);
+          effects.push(`request:${input.replacementActor}`);
+        }
+        return { changed: true };
+      }),
+      classifyError: vi.fn(() => ({ kind: "retryable" as const, message: "process terminated" })),
+    };
+    const firstPorts = buildPorts({
+      clock: {
+        now: vi.fn()
+          .mockReturnValueOnce(activationAt)
+          .mockImplementationOnce(() => {
+            throw new Error("process terminated after provider response");
+          }),
+      },
+      availability: {
+        loadActivation: vi.fn(async () => ({ ...activation, candidates: [crashCandidate] })),
+        findActive: vi.fn(async () => []),
+      } as never,
+      provider,
+      reviewerLoad: vi.fn(async () => ({ "@user-c91e46": 0, "@user-f37a82": 9 })),
+    });
+
+    await expect(activateReviewerAbsence(job, firstPorts)).rejects.toThrow(
+      "process terminated after provider response",
+    );
+    expect(firstPorts.availability.persistReplacement).not.toHaveBeenCalled();
+    expect(effects).toEqual([
+      `remove:${activation.externalActorId}`,
+      "request:@user-c91e46",
+    ]);
+
+    const retryFindActive = vi.fn(async () => [{
+      externalActorId: "@user-f37a82",
+      startAt: activation.startAt,
+      endAt: activation.endAt,
+    }]);
+    const retryLoad = vi.fn(async () => ({ "@user-c91e46": 99, "@user-f37a82": 0 }));
+    const retryPorts = buildPorts({
+      availability: {
+        loadActivation: vi.fn(async () => ({ ...activation, candidates: [crashCandidate] })),
+        findActive: retryFindActive,
+      } as never,
+      provider,
+      reviewerLoad: retryLoad,
+    });
+
+    await expect(activateReviewerAbsence(job, retryPorts)).resolves.toMatchObject({
+      status: "completed",
+      results: [{ outcome: "replaced", replacementActor: "@user-c91e46" }],
+    });
+
+    expect(effects).toEqual([
+      `remove:${activation.externalActorId}`,
+      "request:@user-c91e46",
+    ]);
+    expect(retryPorts.provider.reconcileReviewRequest).toHaveBeenCalledTimes(1);
+    expect(retryFindActive).not.toHaveBeenCalled();
+    expect(retryLoad).not.toHaveBeenCalled();
+    expect(retryPorts.availability.persistReplacement).toHaveBeenCalledWith(expect.objectContaining({
+      replacementActorId: "@user-c91e46",
+      outcome: "replaced",
+      replaceCohort: true,
+    }));
+    expect(retryPorts.finalizers.run).toHaveBeenCalledWith(expect.objectContaining({
+      action: "reevaluate_policy",
+    }));
+  });
+
+  it("fails closed when current requests contain multiple possible provider-applied replacements", async () => {
+    const ports = buildPorts({
+      provider: {
+        inspectChangeRequest: vi.fn(async () => ({
+          ...providerState,
+          requestedActors: ["@user-c91e46", "@user-f37a82", "@outside-pool"],
+        })),
+      } as never,
+    });
+
+    await expect(activateReviewerAbsence(job, ports)).resolves.toMatchObject({
+      status: "completed",
+      results: [{ outcome: "permanent_failure", replacementActor: null }],
+    });
+
+    expect(ports.reviewerLoad).not.toHaveBeenCalled();
+    expect(ports.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+    expect(ports.availability.persistReplacement).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "permanent_failure",
+      state: "permanent_failure",
+      lastError: "Current provider requests contain multiple possible previously applied replacements.",
+    }));
+  });
+
+  it.each(["inspection", "mutation"] as const)(
+    "persists a permanent provider %s failure and continues later candidates",
+    async (failurePoint) => {
+      const laterCandidate = { ...candidate, decisionId: "decision-2", changeRequestNumber: 8 };
+      let firstInspections = 0;
+      const permanent = Object.assign(new Error(`${failurePoint} denied`), { status: 422 });
+      const inspectChangeRequest = vi.fn(async (input: { changeRequestNumber: number }) => {
+        if (input.changeRequestNumber === candidate.changeRequestNumber && failurePoint === "inspection") {
+          throw permanent;
+        }
+        if (input.changeRequestNumber === laterCandidate.changeRequestNumber) {
+          return { ...providerState, state: "closed" };
+        }
+        firstInspections += 1;
+        return providerState;
+      });
+      const reconcileReviewRequest = vi.fn(async (input: { changeRequestNumber: number }) => {
+        if (input.changeRequestNumber === candidate.changeRequestNumber && failurePoint === "mutation") {
+          throw permanent;
+        }
+        return { changed: true };
+      });
+      const persistReplacement = vi.fn(async (input) => ({
+        inserted: true,
+        activationCurrent: true,
+        replacement: { id: `replacement-${input.decisionId}`, state: input.state },
+      }));
+      const ports = buildPorts({
+        availability: {
+          loadActivation: vi.fn(async () => ({
+            ...activation,
+            candidates: [candidate, laterCandidate],
+          })),
+          persistReplacement,
+        } as never,
+        provider: {
+          inspectChangeRequest,
+          reconcileReviewRequest,
+          classifyError: vi.fn(() => ({ kind: "permanent", message: `${failurePoint} denied` })),
+        },
+      });
+
+      await expect(activateReviewerAbsence(job, ports)).resolves.toMatchObject({
+        status: "completed",
+        results: [
+          { decisionId: candidate.decisionId, outcome: "permanent_failure" },
+          { decisionId: laterCandidate.decisionId, outcome: "skipped_closed" },
+        ],
+      });
+
+      expect(firstInspections).toBe(failurePoint === "mutation" ? 2 : 0);
+      expect(persistReplacement).toHaveBeenNthCalledWith(1, expect.objectContaining({
+        decisionId: candidate.decisionId,
+        outcome: "permanent_failure",
+        state: "permanent_failure",
+        lastError: `${failurePoint} denied`,
+        event: expect.objectContaining({ outcome: "permanent_failure" }),
+      }));
+      expect(persistReplacement).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        decisionId: laterCandidate.decisionId,
+        outcome: "skipped_closed",
+      }));
+    },
+  );
+
+  it("maps permanent partial mutation plus persistence failure to recovery with no policy finalizer", async () => {
+    const permanent = Object.assign(new Error("mutation denied"), { status: 422 });
+    const ports = buildPorts({
+      availability: {
+        persistReplacement: vi.fn(async () => { throw new Error("database unavailable"); }),
+      } as never,
+      provider: {
+        reconcileReviewRequest: vi.fn(async () => { throw permanent; }),
+        classifyError: vi.fn(() => ({ kind: "permanent", message: "mutation denied" })),
+      },
+    });
+
+    await expect(activateReviewerAbsence(job, ports)).resolves.toMatchObject({
+      status: "finalizer_pending",
+      recovery: {
+        kind: "reviewer_replacement_finalizer",
+        phase: "persist_replacement",
+        finalizer: null,
+        providerEffectsApplied: true,
+        persistence: {
+          outcome: "permanent_failure",
+          state: "permanent_failure",
+          lastError: "mutation denied",
+        },
+        lastError: "database unavailable",
+      },
+    });
+  });
+
+  it.each(["inspection", "mutation"] as const)(
+    "surfaces a retryable provider %s failure without terminal history",
+    async (failurePoint) => {
+      const transient = Object.assign(new Error(`${failurePoint} unavailable`), { status: 503 });
+      const ports = buildPorts({
+        provider: {
+          inspectChangeRequest: failurePoint === "inspection"
+            ? vi.fn(async () => { throw transient; })
+            : vi.fn(async () => providerState),
+          reconcileReviewRequest: failurePoint === "mutation"
+            ? vi.fn(async () => { throw transient; })
+            : vi.fn(async () => ({ changed: true })),
+          classifyError: vi.fn(() => ({ kind: "retryable", message: `${failurePoint} unavailable` })),
+        },
+      });
+
+      await expect(activateReviewerAbsence(job, ports)).rejects.toThrow(`${failurePoint} unavailable`);
+
+      expect(ports.availability.persistReplacement).not.toHaveBeenCalled();
+    },
+  );
 
   it("keeps shadow mode free of reviewer and policy writes", async () => {
     const shadowCandidate = { ...candidate, mode: "shadow" as const, policyCheckState: "not_started" as const };

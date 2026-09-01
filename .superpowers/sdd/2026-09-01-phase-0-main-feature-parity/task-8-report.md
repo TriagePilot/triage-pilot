@@ -76,3 +76,41 @@ The final commit SHA is returned in the task handoff.
 ## Concerns
 
 Task 9 must validate and serialize the complete recovery contract, compose Task 6 candidate/record shapes into the public application types, and treat a persist-phase locked stale rejection as terminal recovery without invoking reviewer reconciliation again. No Task 8 blocker remains.
+
+## Fix round 1: crash-safe reconciliation
+
+### RED
+
+The review findings were reproduced test-first. The focused application/provider command initially failed 16 tests covering the missing second provider read for non-mutation outcomes, approval arrival before policy failure, fresh-job recovery after provider success, ambiguous recovery, permanent-error continuation, mutation-sensitive adapter re-listing, malformed payload handling, unsupported requested-reviewer pagination, and provider error classification. A final focused regression also failed because a malformed provider protocol response was initially classified as retryable.
+
+### GREEN
+
+After the fix, the focused replacement suites pass 59/59 tests. The full application/provider and Task 5 core selection passes 111/111. Task 6 availability/outbox PostgreSQL contracts pass 38/38, including locked final-race and event-atomicity cases, with zero disposable test databases remaining.
+
+Repository gates passed: `pnpm check`, `pnpm test` (554 passed, 101 expected integration skips), `pnpm build`, `docker build .`, `pnpm check:package-boundary`, `git diff --check`, and Gitleaks (110 commits, no leaks). `pnpm check:public-boundary` retains the pre-existing diagnostic against the internal Task 6 report's words `commercial` and `saas`; it reports no new source boundary violation from this change.
+
+### Crash and recovery semantics
+
+Every non-terminal fresh candidate now has two provider reads. The second read occurs immediately before any mutation, persistence, or policy finalizer path, including `no_replacement_available`. A newly closed request, changed head, or arriving approval replaces the earlier plan and fails closed without stale mutation; an arriving satisfying approval maps to `skipped_policy_satisfied` plus policy reevaluation rather than policy failure.
+
+After DELETE and POST succeed but the process dies before persistence, a fresh job does not rely on the lost in-memory recovery payload. It inspects `requestedActors` and recognizes exactly one requested actor that belongs to the immutable original eligible pool but not the immutable original cohort, unavailable actor, current author, or approved set. It persists/finalizes that actor as the recovered replacement without re-reading mutable absence/load inputs or repeating provider effects. An original-cohort/manual request is never inferred as a replacement. If more than one actor could be the applied replacement, the job records `permanent_failure`; preferred membership is not used to guess because the historical absence/load inputs that determined whether preferred or fallback was selected are unavailable after process death. A single pre-existing eligible actor outside the original cohort remains intrinsically indistinguishable from the successfully POSTed actor; the contract deliberately requires immutable cohort snapshots and fails closed when provider state exposes multiple candidates.
+
+Provider effects followed by failed or stale final persistence still produce the Task 9 recovery contract. A permanent mutation error is treated conservatively as possibly partially applied; if terminal persistence also fails, recovery has phase `persist_replacement`, the exact permanent-failure persistence/event input, `providerEffectsApplied: true`, and a null policy finalizer. Task 9 must resume that persistence input and must not repeat provider mutation.
+
+### Permanent provider errors
+
+The application owns only a provider-neutral `{ kind: "permanent" | "retryable", message }` classification boundary. Permanent inspection or mutation failures are persisted per candidate as `permanent_failure` with the useful provider message in reason, `lastError`, history, and event, after which later candidates continue. Retryable failures surface to the job runner and do not write terminal history.
+
+The GitHub adapter owns status and protocol mapping: HTTP 400, 401, 403, 404, 410, and 422 are permanent; malformed required replacement-inspection/requested-reviewer payloads are permanent protocol failures; other statuses and unknown/network errors are retryable.
+
+### Adapter freshness
+
+GitHub mutation now lists requested users, removes the unavailable reviewer only when present, then lists requested users again immediately before deciding whether to POST the replacement. This repairs a concurrently removed replacement and avoids an unnecessary POST for a concurrently added replacement while preserving DELETE-before-POST and partial-retry idempotency. The requested-reviewers endpoint is read once per inspection without unsupported `page`/`per_page` looping; malformed payloads and malformed user records fail closed, and an exact 100-user response remains a single request.
+
+### Fix commit
+
+This fix round is committed separately with subject:
+
+```text
+fix: make reviewer replacement crash safe
+```

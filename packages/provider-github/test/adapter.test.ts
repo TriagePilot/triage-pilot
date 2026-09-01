@@ -45,7 +45,7 @@ describe("GitHubAdapter", () => {
   });
 
   it("performs an idempotent replacement no-op when provider state is already reconciled", async () => {
-    const request = vi.fn().mockResolvedValueOnce({
+    const request = vi.fn().mockResolvedValue({
       data: { users: [{ login: "user-c91e46" }], teams: [] },
     });
     const adapter = new GitHubAdapter({ request } as never);
@@ -56,7 +56,7 @@ describe("GitHubAdapter", () => {
       replacementActor: "@user-c91e46",
     })).resolves.toEqual({ changed: false });
 
-    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledTimes(2);
   });
 
   it("normalizes actors at the boundary and removes before requesting the replacement", async () => {
@@ -64,6 +64,7 @@ describe("GitHubAdapter", () => {
       .fn()
       .mockResolvedValueOnce({ data: { users: [{ login: "USER-D82A5F" }], teams: [] } })
       .mockResolvedValueOnce({ data: {} })
+      .mockResolvedValueOnce({ data: { users: [], teams: [] } })
       .mockResolvedValueOnce({ data: {} });
     const adapter = new GitHubAdapter({ request } as never);
 
@@ -83,7 +84,7 @@ describe("GitHubAdapter", () => {
         team_reviewers: [],
       },
     );
-    expect(request).toHaveBeenNthCalledWith(3,
+    expect(request).toHaveBeenNthCalledWith(4,
       "POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
       {
         owner: "acme",
@@ -99,6 +100,7 @@ describe("GitHubAdapter", () => {
     const request = vi
       .fn()
       .mockResolvedValueOnce({ data: { users: [], teams: [] } })
+      .mockResolvedValueOnce({ data: { users: [], teams: [] } })
       .mockResolvedValueOnce({ data: {} });
     const adapter = new GitHubAdapter({ request } as never);
 
@@ -110,8 +112,125 @@ describe("GitHubAdapter", () => {
 
     expect(request.mock.calls.map(([route]) => route)).toEqual([
       "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
       "POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
     ]);
+  });
+
+  it("re-lists after removal and repairs a concurrently removed replacement request", async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: { users: [{ login: "user-d82a5f" }, { login: "user-c91e46" }], teams: [] },
+      })
+      .mockResolvedValueOnce({ data: {} })
+      .mockResolvedValueOnce({ data: { users: [], teams: [] } })
+      .mockResolvedValueOnce({ data: {} });
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await adapter.reconcileReviewerReplacement({
+      pullRequest: { owner: "acme", repo: "api", pullNumber: 7 },
+      unavailableActor: "@user-d82a5f",
+      replacementActor: "@user-c91e46",
+    });
+
+    expect(request.mock.calls.map(([route]) => route)).toEqual([
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
+      "DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
+      "POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
+    ]);
+  });
+
+  it("re-lists after removal and skips a concurrently added replacement request", async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({ data: { users: [{ login: "user-d82a5f" }], teams: [] } })
+      .mockResolvedValueOnce({ data: {} })
+      .mockResolvedValueOnce({ data: { users: [{ login: "user-c91e46" }], teams: [] } });
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await expect(adapter.reconcileReviewerReplacement({
+      pullRequest: { owner: "acme", repo: "api", pullNumber: 7 },
+      unavailableActor: "@user-d82a5f",
+      replacementActor: "@user-c91e46",
+    })).resolves.toEqual({ changed: true });
+
+    expect(request.mock.calls.map(([route]) => route)).toEqual([
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
+      "DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
+    ]);
+  });
+
+  it("fails closed on a malformed requested-reviewer payload", async () => {
+    const request = vi.fn().mockResolvedValueOnce({ data: { reviewers: [] } });
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await expect(adapter.listRequestedReviewers({
+      pullRequest: { owner: "acme", repo: "api", pullNumber: 7 },
+    })).rejects.toThrow("GitHub requested reviewers response is malformed");
+  });
+
+  it("classifies a malformed requested-reviewer payload as permanent", async () => {
+    const request = vi.fn().mockResolvedValueOnce({ data: { reviewers: [] } });
+    const adapter = new GitHubAdapter({ request } as never);
+    let caught: unknown;
+    try {
+      await adapter.listRequestedReviewers({
+        pullRequest: { owner: "acme", repo: "api", pullNumber: 7 },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(adapter.classifyReviewerReplacementError(caught)).toEqual({
+      kind: "permanent",
+      message: "GitHub requested reviewers response is malformed",
+    });
+  });
+
+  it("fails closed on a malformed requested-reviewer user record", async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: { users: [{ login: "user-c91e46" }, { id: 42 }], teams: [] },
+    });
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await expect(adapter.listRequestedReviewers({
+      pullRequest: { owner: "acme", repo: "api", pullNumber: 7 },
+    })).rejects.toThrow("GitHub requested reviewer user is malformed");
+  });
+
+  it("does not paginate the GitHub requested-reviewers endpoint for exactly 100 users", async () => {
+    const users = Array.from({ length: 100 }, (_, index) => ({ login: `user-${index}` }));
+    const request = vi.fn().mockResolvedValueOnce({ data: { users, teams: [] } });
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await expect(adapter.listRequestedReviewers({
+      pullRequest: { owner: "acme", repo: "api", pullNumber: 7 },
+    })).resolves.toHaveLength(100);
+
+    expect(request).toHaveBeenCalledOnce();
+    expect(request).toHaveBeenCalledWith(
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
+      { owner: "acme", repo: "api", pull_number: 7 },
+    );
+  });
+
+  it.each([
+    [422, "permanent"],
+    [503, "retryable"],
+    [undefined, "retryable"],
+  ] as const)("maps GitHub status %s to a %s provider error", (status, kind) => {
+    const adapter = new GitHubAdapter({ request: vi.fn() } as never);
+    const error = status === undefined
+      ? new Error("network unavailable")
+      : Object.assign(new Error("provider failed"), { status });
+
+    expect(adapter.classifyReviewerReplacementError(error)).toEqual({
+      kind,
+      message: error.message,
+    });
   });
 
   it.each([

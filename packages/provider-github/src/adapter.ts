@@ -89,6 +89,13 @@ export interface GitHubReviewerReplacementState {
   }>;
 }
 
+export interface ReviewerReplacementErrorClassification {
+  kind: "permanent" | "retryable";
+  message: string;
+}
+
+class GitHubReviewerReplacementProtocolError extends Error {}
+
 export async function createInstallationRequester(input: {
   appId: string;
   privateKey: string;
@@ -122,12 +129,16 @@ export class GitHubAdapter {
       ...toPullParams(input.pullRequest),
     });
     if (!isRecord(response.data) || !isRecord(response.data.head) || !isRecord(response.data.user)) {
-      throw new Error("GitHub pull request replacement state is unavailable");
+      throw new GitHubReviewerReplacementProtocolError("GitHub pull request replacement state is unavailable");
     }
-    const state = readRequiredString(response.data, "state", "GitHub pull request state");
-    const currentHeadRevision = readRequiredString(response.data.head, "sha", "GitHub pull request head revision");
+    const state = readReviewerReplacementString(response.data, "state", "GitHub pull request state");
+    const currentHeadRevision = readReviewerReplacementString(
+      response.data.head,
+      "sha",
+      "GitHub pull request head revision",
+    );
     const authorActor = normalizeGitHubActor(
-      readRequiredString(response.data.user, "login", "GitHub pull request author"),
+      readReviewerReplacementString(response.data.user, "login", "GitHub pull request author"),
     );
     const requestedActors = await this.listRequestedReviewers(input);
     const reviews = (await this.listPullRequestReviews(input)).map((review) => ({
@@ -141,18 +152,18 @@ export class GitHubAdapter {
 
   async listRequestedReviewers(input: { pullRequest: PullRequestRef }): Promise<string[]> {
     const reviewers = new Set<string>();
-    for (let page = 1; ; page += 1) {
-      const response = await this.octokit.request(
-        "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
-        { ...toPullParams(input.pullRequest), page, per_page: PAGE_SIZE },
-      );
-      const users = readRequestedReviewerUsers(response.data);
-      for (const user of users) {
-        if (!isRecord(user) || typeof user.login !== "string") continue;
-        reviewers.add(normalizeGitHubActor(user.login));
+    const response = await this.octokit.request(
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
+      toPullParams(input.pullRequest),
+    );
+    const users = readRequestedReviewerUsers(response.data);
+    for (const user of users) {
+      if (!isRecord(user) || typeof user.login !== "string" || user.login.trim().length === 0) {
+        throw new GitHubReviewerReplacementProtocolError("GitHub requested reviewer user is malformed");
       }
-      if (users.length < PAGE_SIZE) return [...reviewers];
+      reviewers.add(normalizeGitHubActor(user.login));
     }
+    return [...reviewers];
   }
 
   async reconcileReviewerReplacement(input: {
@@ -165,9 +176,9 @@ export class GitHubAdapter {
     if (unavailableActor === replacementActor) {
       throw new Error("GitHub unavailable and replacement actors must differ");
     }
-    const requested = await this.listRequestedReviewers({ pullRequest: input.pullRequest });
+    const requestedBeforeRemoval = await this.listRequestedReviewers({ pullRequest: input.pullRequest });
     let changed = false;
-    if (requested.includes(unavailableActor)) {
+    if (requestedBeforeRemoval.includes(unavailableActor)) {
       await this.octokit.request("DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", {
         ...toPullParams(input.pullRequest),
         reviewers: [unavailableActor.slice(1)],
@@ -175,7 +186,8 @@ export class GitHubAdapter {
       });
       changed = true;
     }
-    if (!requested.includes(replacementActor)) {
+    const requestedBeforeAddition = await this.listRequestedReviewers({ pullRequest: input.pullRequest });
+    if (!requestedBeforeAddition.includes(replacementActor)) {
       await this.octokit.request("POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", {
         ...toPullParams(input.pullRequest),
         reviewers: [replacementActor.slice(1)],
@@ -184,6 +196,18 @@ export class GitHubAdapter {
       changed = true;
     }
     return { changed };
+  }
+
+  classifyReviewerReplacementError(error: unknown): ReviewerReplacementErrorClassification {
+    const message = error instanceof Error ? error.message : readOptionalString(error, "message") ?? "provider failed";
+    const status = readOptionalNumber(error, "status");
+    return {
+      kind: error instanceof GitHubReviewerReplacementProtocolError ||
+        (status !== null && [400, 401, 403, 404, 410, 422].includes(status))
+        ? "permanent"
+        : "retryable",
+      message,
+    };
   }
 
   async upsertRoutingComment(input: { pullRequest: PullRequestRef; decisionId: string; body: string }) {
@@ -571,7 +595,17 @@ function readPullRequestReview(value: unknown): PullRequestReview | undefined {
 }
 
 function readRequestedReviewerUsers(value: unknown): unknown[] {
-  return isRecord(value) && Array.isArray(value.users) ? value.users : [];
+  if (!isRecord(value) || !Array.isArray(value.users)) {
+    throw new GitHubReviewerReplacementProtocolError("GitHub requested reviewers response is malformed");
+  }
+  return value.users;
+}
+
+function readReviewerReplacementString(value: unknown, key: string, label: string): string {
+  if (!isRecord(value) || typeof value[key] !== "string" || value[key].trim().length === 0) {
+    throw new GitHubReviewerReplacementProtocolError(`${label} is unavailable`);
+  }
+  return value[key].trim();
 }
 
 function normalizeGitHubActor(value: string): string {
@@ -588,6 +622,14 @@ function normalizeGitHubIndividualActor(value: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function readOptionalString(value: unknown, key: string): string | null {
+  return isRecord(value) && typeof value[key] === "string" ? value[key] : null;
+}
+
+function readOptionalNumber(value: unknown, key: string): number | null {
+  return isRecord(value) && typeof value[key] === "number" ? value[key] : null;
 }
 
 function hasBodyMarker(value: unknown, marker: string): boolean {
