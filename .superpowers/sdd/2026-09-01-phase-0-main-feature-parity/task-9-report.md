@@ -248,3 +248,56 @@ Non-mutating outcomes still require a null replacement actor but may retain a UU
 - No migration changed; `0008` remains highest. Tests used a disposable PostgreSQL container on a random port with no persistent volume, and no persistent database was touched.
 
 Round-4 commit: `f8e8576963c10f3c6e767440c3324ededea52849` (`fix: fence reviewer provider writes by lease`). No push or pull request was created.
+
+## Fix round 5: bounded live provider authority
+
+### RED evidence
+
+The first disposable-PostgreSQL RED run failed 10 of 91 tests. An old claim behind a newer claim returned success and inserted false terminal history, each of revise/cancel/suspend allowed the production provider path to continue, a hung provider call exceeded the five-second test deadline, and five fully shaped persistence variants authorized intent-wide exhaustion with a mismatched decision, head, repository, change request, or replacement actor. The already-enforced unavailable-actor check remained green.
+
+A stronger timeout RED then made the fake provider ignore cancellation until explicitly released. Returning a deadline error to the caller still left the transaction callback awaiting that promise, retained the PostgreSQL lock, and caused the release assertion to time out. The in-transaction race was added only after that failure. A final compatibility RED proved that exact intent-backed `permanent_failure` persistence was rejected by an over-strict replacement-actor comparison.
+
+### Obsolete claim and live activation authority
+
+Exact-lease rejection is now the provider-neutral `obsolete_claim` classification. The application rethrows it as claim-control flow, so it cannot become a permanent provider outcome, cannot set `providerEffectsApplied`, and cannot persist replacement history or an event. A controlled old-claim/new-claim application-path test proves zero DELETE/POST, no replacement row, and no mutation of the newer running claim.
+
+The actual provider boundary now locks and validates in this order:
+
+```text
+exact running job lease
+  -> current reviewer absence ID and revision with scheduled status
+  -> matching provider connection with active status
+  -> bounded provider reconciliation
+```
+
+All rows are scoped by workspace, provider, and provider connection. The three administrative interleavings pause after durable intent preparation but before the provider boundary, then revise, cancel, or suspend. In every case the boundary rejects the now-invalid live authority, performs zero DELETE/POST, writes no false terminal history, and retains the immutable intent for the valid recovery path.
+
+### Bounded transaction and external-system boundary
+
+Provider reconciliation has a configurable positive deadline and uses 60 seconds by default. PostgreSQL lock timeout is bounded by the same deadline, with a one-second-later idle-transaction safety limit. The provider promise is raced both inside the transaction and at the caller boundary. When the deadline expires, the transaction callback rejects and releases its row locks and pooled connection even if the original provider promise does not settle.
+
+The authority carries an `AbortSignal` plus a transaction-backed `assertActive`. The GitHub adapter checks both immediately before every reconciliation GET, DELETE, and POST, passes the signal into the requester, and the transaction revalidates after reconciliation. Once authority ends, a detached non-cooperative promise retains only a revoked signal and cannot start a later provider request. The controlled hung-request test releases that detached promise after PostgreSQL exhaustion has already acquired the former lock and proves zero late writes.
+
+No local protocol can recall an HTTP mutation already accepted by an external provider. Cancellation therefore leaves a narrow, explicit unknown-result boundary for an already in-flight DELETE or POST. The immutable mutation intent, provider-state inspection, and idempotent remove/re-request reconciliation are the replay mechanism for that case. A database-session failure before a later request is detected by `assertActive`; a failure while one request is already in flight has the same external ambiguity and is recovered from the durable intent rather than recorded as false terminal history.
+
+### Exact persistence-to-intent authorization
+
+Persist-phase exhaustion loads the named intent under the exact workspace/provider/connection/absence/revision scope and now also binds decision, expected head revision, external repository identity, change-request identity, unavailable actor, and the selected replacement actor for a `replaced` outcome. Fully shaped mismatches for all source and scope fields fail only the job and leave the entire activation scope unchanged.
+
+Canonical non-mutating and permanent-failure persistence still carries a null output replacement actor. Those outcomes are bound by the exact named immutable intent plus all other source fields; the parser continues to require null output actor fields. A dedicated exact permanent-failure case proves legitimate intent-backed exhaustion remains accepted and visibly audited.
+
+### Final verification
+
+All database work used one disposable PostgreSQL 16 container with tmpfs storage and a random host port. No persistent database or credential was used.
+
+- Focused runtime and availability PostgreSQL: 2 files, 97/97 tests.
+- Full Task 9 application/processor/runner/runtime/jobs/composition slice: 10 files, 251/251 tests.
+- Provider adapter plus focused non-database application/worker slice: 5 files, 181/181 tests.
+- Bounded root run with disposable PostgreSQL: 71 files, 807/807 tests.
+- `pnpm check`, `pnpm build`, `pnpm check:package-boundary`, Docker Compose rendering, `docker build -q .`, and `git diff --check` passed.
+- Tracked public-boundary tests passed 15/15. The standalone diagnostic still reports only the two inherited Task 6 report terms and this round adds no finding.
+- Git-history and working-tree Gitleaks scans passed with no leaks.
+
+Migration `0008_reviewer_mutation_intents.sql` remains the highest migration and no migration file changed. Canonical lock order, SQL lifecycle/provenance immutability, per-job maintenance isolation, exact recovery shape, multi-intent atomicity, idempotency, workspace/provider isolation, and shadow-mode write-free behavior remain covered by the green root suite.
+
+Round-5 implementation commit: `a750f9c` (`fix: bound reviewer mutation authority`). No push, pull request, tag, publication, or persistent-database operation was performed.
