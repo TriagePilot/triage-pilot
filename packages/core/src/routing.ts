@@ -1,5 +1,7 @@
 import type { RiskTier, RoutingAction } from "@triagepilot/contracts";
 
+import { normalizeReviewer, selectTieredReviewers, uniqueReviewers } from "./reviewer-selection.js";
+
 export interface RoutingInput {
   risk: { score: number; tier: RiskTier };
   author: string;
@@ -29,10 +31,6 @@ export function decideRouting(input: RoutingInput): RoutingDecision {
   const candidates = uniqueReviewers(input.eligibleReviewers)
     .filter((reviewer) => reviewer !== normalizeReviewer(input.author) && !existingApprovedReviewers.includes(reviewer))
     .sort();
-  const candidateSet = new Set(candidates);
-  const preferredCandidates = uniqueReviewers(input.preferredReviewers ?? []).filter((reviewer) => candidateSet.has(reviewer));
-  const preferredCandidateSet = new Set(preferredCandidates);
-  const fallbackCandidates = candidates.filter((reviewer) => !preferredCandidateSet.has(reviewer));
   const loadSnapshot = Object.fromEntries(candidates.map((candidate) => [candidate, input.load[candidate] ?? 0]));
 
   if (input.risk.tier === "low") {
@@ -49,19 +47,13 @@ export function decideRouting(input: RoutingInput): RoutingDecision {
   }
 
   const requestedReviewerCount = input.risk.tier === "high" ? input.highRiskReviewers : 1;
-  const preferredReviewersToRequest = selectLowestLoadReviewers(
-    preferredCandidates,
-    input.load,
-    input.selectionKey,
-    requestedReviewerCount,
-  );
-  const fallbackReviewersToRequest = selectLowestLoadReviewers(
-    fallbackCandidates,
-    input.load,
-    input.selectionKey,
-    requestedReviewerCount - preferredReviewersToRequest.length,
-  );
-  const reviewersToRequest = [...preferredReviewersToRequest, ...fallbackReviewersToRequest];
+  const reviewersToRequest = selectTieredReviewers({
+    candidates,
+    preferredReviewers: input.preferredReviewers ?? [],
+    load: input.load,
+    selectionKey: input.selectionKey,
+    count: requestedReviewerCount,
+  });
   const selectedReviewers = reviewersToRequest;
   const reviewerShortfall = requestedReviewerCount - selectedReviewers.length;
 
@@ -87,37 +79,4 @@ export function decideRouting(input: RoutingInput): RoutingDecision {
     reviewerShortfall,
     loadSnapshot,
   };
-}
-
-export function uniqueReviewers(reviewers: string[]): string[] {
-  return [...new Set(reviewers.map(normalizeReviewer).filter(Boolean))];
-}
-
-export function normalizeReviewer(reviewer: string): string {
-  const normalized = reviewer.trim().replace(/^@/, "").toLowerCase();
-  return normalized ? `@${normalized}` : "";
-}
-
-export function selectLowestLoadReviewers(
-  candidates: string[],
-  load: Record<string, number>,
-  selectionKey: string,
-  count: number,
-): string[] {
-  return [...candidates].sort((a, b) => {
-    const loadDifference = (load[a] ?? 0) - (load[b] ?? 0);
-    if (loadDifference !== 0) return loadDifference;
-
-    const rankDifference = stableRank(`${selectionKey}:${a}`) - stableRank(`${selectionKey}:${b}`);
-    return rankDifference === 0 ? a.localeCompare(b) : rankDifference;
-  }).slice(0, count);
-}
-
-function stableRank(value: string): number {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return hash;
 }

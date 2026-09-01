@@ -1,4 +1,4 @@
-import { normalizeReviewer, selectLowestLoadReviewers, uniqueReviewers } from "./routing.js";
+import { normalizeReviewer, selectTieredReviewers, uniqueReviewers } from "./reviewer-selection.js";
 
 export interface ReviewerAbsenceWindow {
   externalActorId: string;
@@ -46,13 +46,13 @@ export function selectReplacement(input: {
   })
     .filter((actor) => !excludedActors.has(actor))
     .sort();
-  const preferredActorSet = new Set(uniqueReviewers(input.originalPreferredActors));
-  const preferredCandidates = candidates.filter((actor) => preferredActorSet.has(actor));
-  const fallbackCandidates = candidates.filter((actor) => !preferredActorSet.has(actor));
-  const replacementActor =
-    selectLowestLoadReviewers(preferredCandidates, input.load, input.selectionKey, 1)[0] ??
-    selectLowestLoadReviewers(fallbackCandidates, input.load, input.selectionKey, 1)[0] ??
-    null;
+  const replacementActor = selectTieredReviewers({
+    candidates,
+    preferredReviewers: input.originalPreferredActors,
+    load: input.load,
+    selectionKey: input.selectionKey,
+    count: 1,
+  })[0] ?? null;
 
   return { replacementActor, candidates };
 }

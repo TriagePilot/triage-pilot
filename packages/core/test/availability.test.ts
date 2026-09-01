@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
+import * as core from "../src/index";
 import { availableActorsAt, selectReplacement } from "../src/availability";
+
+describe("core availability exports", () => {
+  it("does not publish reviewer-selection implementation helpers", () => {
+    expect(core).not.toHaveProperty("normalizeReviewer");
+    expect(core).not.toHaveProperty("uniqueReviewers");
+    expect(core).not.toHaveProperty("selectLowestLoadReviewers");
+  });
+});
 
 describe("availableActorsAt", () => {
   it("treats absence intervals as start-inclusive and end-exclusive", () => {
@@ -93,6 +102,26 @@ describe("selectReplacement", () => {
     ).toEqual({
       replacementActor: "@user-b4e82d",
       candidates: ["@user-5c9f21", "@user-b4e82d"],
+    });
+  });
+
+  it("never admits a preferred actor outside the immutable original eligible pool", () => {
+    expect(
+      selectReplacement({
+        author: "@user-c91e46",
+        unavailableActor: "@user-4d8a2e",
+        activeCohort: ["@user-4d8a2e"],
+        approvedActors: [],
+        originalEligibleActors: ["@user-b4e82d"],
+        originalPreferredActors: ["@user-5c9f21"],
+        absences: [],
+        load: { "@user-b4e82d": 9, "@user-5c9f21": 0 },
+        selectionKey: "acme/api#25",
+        now: new Date("2026-09-01T10:00:00.000Z"),
+      }),
+    ).toEqual({
+      replacementActor: "@user-b4e82d",
+      candidates: ["@user-b4e82d"],
     });
   });
 
