@@ -205,3 +205,46 @@ Stale exhausted jobs are processed in stable creation/ID order and each atomic e
 Final verification used a disposable PostgreSQL container on a random port and no persistent volume: root unit 57 files/624 tests, root PostgreSQL integration 10 files/117 tests, crash/composition 25/25, full build/type check, package-boundary, Compose rendering, Docker build, `git diff --check`, and both Gitleaks scans pass. The standalone public-boundary command still reports only the two inherited Task 6 report terms documented above.
 
 Fix-round commit subject: `fix: fence reviewer intent preparation by lease`.
+
+## Fix round 4: provider mutation lease fence and exact exhaustion recovery
+
+### RED/GREEN evidence
+
+The RED run added two production-path provider interleavings, two fully shaped phase-invalid recoveries, nine malformed persistence/event variants, and two policy-success-after-intent recoveries. It failed 15 tests and passed 65: both provider races reached the unfenced write path, non-null persistence was accepted for both finalizer-only phases, all nine malformed persistence payloads authorized exhaustion, and both legitimate intent-retaining recoveries were rejected.
+
+The same focused command is now 80/80:
+
+```text
+TEST_DATABASE_URL=<disposable> pnpm exec vitest run apps/worker/test/availability-runtime.integration.test.ts packages/db/test/availability.integration.test.ts
+```
+
+The wider availability application, processor, runner, runtime, composition, and jobs slice is 153/153:
+
+```text
+TEST_DATABASE_URL=<disposable> pnpm exec vitest run packages/application/test/reviewer-availability.test.ts apps/worker/test/availability-processor.test.ts apps/worker/test/runner.test.ts apps/worker/test/runtime-services.test.ts apps/worker/test/runtime-services.integration.test.ts apps/worker/test/self-hosted-composition.test.ts packages/db/test/jobs.test.ts packages/db/test/jobs.integration.test.ts --reporter=dot
+```
+
+### Provider-write serialization boundary
+
+The provider mutation boundary now starts a transaction, locks the exact running job row by job ID, workspace, provider, connection, owner, `lockedAt`, and attempt, revalidates the activation absence/revision, performs the provider reconciliation while retaining that row lock, and commits only after the provider call returns. Every provider-writing path, including durable-intent resume, passes through this boundary.
+
+If exhaustion commits first, the stale worker cannot acquire a valid row and performs zero DELETE/POST calls. If mutation acquires the row first, exhaustion remains blocked until the provider call finishes; only then may it fail the job. The provider-count tests pause immediately before the production boundary and inside the real fake-provider DELETE handler, respectively, proving both controlled orderings against actual provider mutations rather than stopping at intent preparation.
+
+This deliberately holds the exact job-row lock across provider I/O. It is the serialization point that prevents a job from becoming failed or lease-invalid while its provider write is in progress. Existing durable intent preparation, provider reconciliation idempotency, crash resumption, multi-intent exhaustion atomicity, exact scope validation, and shadow-mode write-free behavior remain unchanged.
+
+### Exact exhaustion payload authorization
+
+Database exhaustion now requires every canonical top-level, job, persistence, and event key. Persistence is permitted only for `persist_replacement`; `run_finalizer` and `complete_replacement` require null persistence. Persist payloads require the exact provider/source/provenance mapping, nonblank decision/head/actor/reason and event identity strings, canonical ordered ISO dates, event time equality, mapped state/error/null conditions, correct cohort marker, and exact event scope.
+
+Non-mutating outcomes still require a null replacement actor but may retain a UUID durable intent. Both `run_finalizer` and `complete_replacement` policy-success-after-intent payloads are accepted, allowing exact pending rows to become visibly terminal when the stale job exhausts. Malformed persistence and fully shaped phase-invalid persistence fail only the job and leave intents and pending rows unchanged.
+
+### Final verification
+
+- Correctly bounded root PostgreSQL run: `TEST_DATABASE_URL=<disposable> pnpm test --maxWorkers=2 --minWorkers=2 --reporter=dot` — 71 files, 789/789 tests.
+- An initial default-parallel root run passed 782/789 and timed out seven database tests at the five-second limit. Running those seven files serially with `--maxWorkers=1 --minWorkers=1` passed 135/135; the bounded full rerun above then passed, confirming load contention rather than a functional failure.
+- `pnpm check`, `pnpm build`, `pnpm check:package-boundary`, and `git diff --check` passed.
+- `docker build .` passed.
+- The tracked public-boundary unit gates passed 15/15. The standalone diagnostic continues to report only the two inherited Task 6 report findings and this round adds none.
+- No migration changed; `0008` remains highest. Tests used a disposable PostgreSQL container on a random port with no persistent volume, and no persistent database was touched.
+
+Round-4 commit: `f8e8576963c10f3c6e767440c3324ededea52849` (`fix: fence reviewer provider writes by lease`). No push or pull request was created.
