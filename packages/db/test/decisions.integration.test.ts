@@ -13,6 +13,35 @@ import {
 import { withPostgresTestDatabase } from "./postgres";
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () => {
+  it("persists non-empty configuration diagnostics as a JSON array", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const repositoryId = await seedRepository(db);
+      const decision = await persistDecision(db, await ensureLocalWorkspace(db), {
+        repositoryId,
+        deliveryId: "delivery-invalid-config",
+        changeRequestId: "change:invalid/7",
+        pullNumber: 7,
+        headSha: "head-invalid",
+        mode: "shadow",
+        action: "configuration_failure",
+        actionStatus: "not_applied",
+        riskScore: 0,
+        details: { diagnostics: [{ path: "$.mode", message: "invalid mode" }] },
+        effectiveConfigHash: "invalid",
+        configDiagnostics: [{ path: "$.mode", message: "invalid mode" }],
+        configSources: {},
+      });
+
+      await expect(db.selectFrom("routing_decisions")
+        .select(["effective_config_hash", "config_diagnostics"])
+        .where("id", "=", decision.decisionId)
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+        effective_config_hash: "invalid",
+        config_diagnostics: [{ path: "$.mode", message: "invalid mode" }],
+      });
+    });
+  });
+
   it("uses the delivery ID as a stable retry key while refreshing the decision", async () => {
     await withPostgresTestDatabase(async (db) => {
       const repositoryId = await seedRepository(db);

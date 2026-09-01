@@ -2,7 +2,7 @@
 
 ## Final status
 
-Task 6 and both review-fix rounds are implemented in the local `commercial-saas-phase-0` worktree. The implementation is provider-neutral, workspace-bound, transactionally stages current events, and keeps historical replay fail-closed. Historical migrations `0001` through `0006` are unchanged. Migration `0007_workspace_reviewer_availability.sql` is intentionally extended by Task 6 to add durable provider change-request identity to routing decisions.
+Task 6 and its three review-fix rounds are implemented in the local `commercial-saas-phase-0` worktree. The implementation is provider-neutral, workspace-bound, transactionally stages current events, and keeps historical replay fail-closed. Historical migrations `0001` through `0006` are unchanged. Migration `0007_workspace_reviewer_availability.sql` is intentionally extended by Task 6 to add durable provider change-request identity to routing decisions.
 
 No push, pull request, tag, publication, dependency change, commercial/tenant API, or persistent database migration was performed.
 
@@ -29,6 +29,12 @@ Migration `0007_workspace_reviewer_availability.sql` adds nullable `routing_deci
 - A legacy null decision cannot produce a new versioned routing or reviewer-replacement event. A later current reroute can create a fully identified decision.
 
 The worker routing composition passes the application contract’s exact `changeRequestId`. DB integration fixtures also supply it explicitly so runtime omission cannot be hidden by TypeScript-only construction.
+
+## Invalid-configuration identity
+
+The canonical effective-configuration identity for a current invalid configuration is the provider-neutral sentinel `invalid`. The application already emits that exact value in `DecisionEventV1.effectiveConfigurationHash` when configuration provenance has no effective hash. The worker now always maps the corresponding null application persistence value to `DecisionInput.effectiveConfigHash: "invalid"`, so the routing decision row and event carry the same identity and pass the locked effective-row check.
+
+This current-worker mapping is distinct from the DB compatibility boundary: a truly omitted `effectiveConfigHash` from an old caller still uses `legacyConfigHash(details)`. Current application writes never omit the value. Non-empty configuration diagnostics are serialized explicitly as JSON before writing the JSONB column, preserving the application diagnostic array instead of allowing the PostgreSQL driver to interpret it as a PostgreSQL array literal.
 
 ## Transaction, locking, and event model
 
@@ -90,15 +96,30 @@ After the minimal fixes:
 - historical migrations `0001` through `0006` remain unchanged;
 - post-run inspection found zero `triagepilot_test_%` databases.
 
+### Fix round 3
+
+The application-through-real-DB worker regression was written first and processes an invalid repository configuration twice through `processRoutingJob` and the real runtime persistence composition. Its first RED exposed invalid PostgreSQL JSON encoding for the non-empty diagnostic array. A focused DB regression reproduced that boundary independently; after explicit JSON serialization it passed, and the rebuilt worker regression reached the reviewed RED: `routing decision event does not match persisted decision` because the row used the legacy details hash while the event used `invalid`.
+
+The minimal worker change now passes `decision.effectiveConfigHash ?? "invalid"` explicitly. The real-path test proves one `configuration_failure` decision and one source-bound routing event commit with matching `invalid` hashes, no provider reads or writes after configuration loading, and an exact second processing attempt remains idempotent.
+
+Final round-3 verification:
+
+- application routing + worker runtime integration + DB decisions/outbox: 4 files, 42 tests passed;
+- root `pnpm test:integration`: 10 files, 80 tests passed;
+- application, DB, rebuilt DB, and worker checks: passed;
+- `git diff --check`: passed;
+- historical migrations `0001` through `0006` remain unchanged;
+- post-run inspection found zero `triagepilot_test_%` databases.
+
 All PostgreSQL integration runs used the UUID-named disposable database helper. The persistent `triagepilot` database was not migrated or mutated.
 
 ## Files
 
 - `packages/db/src/availability.ts`: workspace repository, revision/lock validation, replay-safe history, and replacement event staging.
-- `packages/db/src/decisions.ts`: runtime decision validation, effective-row event binding, candidate discovery, and immutable actor-pool parsing.
+- `packages/db/src/decisions.ts`: runtime decision validation, effective-row event binding, explicit diagnostic JSON serialization, candidate discovery, and immutable actor-pool parsing.
 - `packages/db/src/kysely.ts`: nullable upgrade-safe `change_request_id` table typing.
 - `packages/db/migrations/0007_workspace_reviewer_availability.sql`: durable change-request column and trustworthy Phase-event backfill.
-- `apps/worker/src/runtime-services.ts`: exact application change-request identity composition.
+- `apps/worker/src/runtime-services.ts`: exact application change-request identity and canonical invalid-configuration hash composition.
 - `package.json`: availability suite included in root integration.
 - DB availability, decisions, outbox, schema, upgrade, and isolation tests: persistence, migration, replay, rollback, identity, concurrency, and scope coverage.
 

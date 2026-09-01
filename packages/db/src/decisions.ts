@@ -139,6 +139,7 @@ async function persistDecisionRecord(
   validateChangeRequestId(input.changeRequestId);
   const selectedReviewers = [...new Set(input.selectedReviewers ?? [])].slice(0, 2);
   const selectedReviewersJson = JSON.stringify(selectedReviewers);
+  const configDiagnosticsJson = JSON.stringify(input.configDiagnostics ?? []);
   const routingKey = input.routingKey ?? legacyRoutingKey(input.deliveryId);
   const decision = await db
     .insertInto("routing_decisions")
@@ -166,7 +167,7 @@ async function persistDecisionRecord(
       repository_config_revision: input.repositoryConfigRevision ?? null,
       effective_config_hash: input.effectiveConfigHash ?? legacyConfigHash(input.details),
       inheritance_mode: input.inheritanceMode ?? "legacy",
-      config_diagnostics: input.configDiagnostics ?? [],
+      config_diagnostics: configDiagnosticsJson,
       config_sources: input.configSources ?? {},
     })
     .onConflict((conflict) =>
@@ -192,7 +193,7 @@ async function persistDecisionRecord(
         repository_config_revision: preserveAfterSuccess<string | null>("repository_config_revision", input.repositoryConfigRevision ?? null),
         effective_config_hash: preserveAfterSuccess<string>("effective_config_hash", input.effectiveConfigHash ?? legacyConfigHash(input.details)),
         inheritance_mode: preserveAfterSuccess<"legacy" | "defaults" | "organization" | "replace" | "inherit">("inheritance_mode", input.inheritanceMode ?? "legacy"),
-        config_diagnostics: preserveAfterSuccess<unknown>("config_diagnostics", input.configDiagnostics ?? []),
+        config_diagnostics: preserveAfterSuccess<unknown>("config_diagnostics", configDiagnosticsJson),
         config_sources: preserveAfterSuccess<unknown>("config_sources", input.configSources ?? {}),
         action_status: eb
           .case()

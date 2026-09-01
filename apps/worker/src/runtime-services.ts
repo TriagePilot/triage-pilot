@@ -301,7 +301,7 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
               organizationConfigVersion: decision.organizationConfigVersion,
               repositoryConfigPath: decision.repositoryConfigPath,
               repositoryConfigRevision: decision.repositoryConfigRevision,
-              ...(decision.effectiveConfigHash === null ? {} : { effectiveConfigHash: decision.effectiveConfigHash }),
+              effectiveConfigHash: decision.effectiveConfigHash ?? "invalid",
               inheritanceMode: decision.inheritanceMode,
               configDiagnostics: decision.configDiagnostics,
               configSources: decision.configSources,

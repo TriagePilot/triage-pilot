@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { withPostgresTestDatabase } from "../../../packages/db/test/postgres";
 import { ensureLocalWorkspace } from "@triagepilot/db";
@@ -6,7 +6,7 @@ import {
   createWorkerHumanReviewPolicyServiceFactory,
   createWorkerRoutingServiceFactory,
 } from "../src/runtime-services";
-import type { RoutingJobMessage } from "../src/processor";
+import { processRoutingJob, type RoutingJobMessage } from "../src/processor";
 
 const message: RoutingJobMessage = {
   kind: "process_change_request",
@@ -26,6 +26,82 @@ const message: RoutingJobMessage = {
 };
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime services", () => {
+  it("atomically persists invalid configuration identity through application processing and exact retry", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const connection = await db.insertInto("provider_connections").values({
+        workspace_id: workspaceId,
+        provider: "github",
+        external_connection_id: "99",
+        workspace_login: "acme",
+        account_type: "Organization",
+        status: "active",
+        permissions: {},
+      }).returning("id").executeTakeFirstOrThrow();
+      const repository = await db.insertInto("repositories").values({
+        workspace_id: workspaceId,
+        provider: "github",
+        provider_connection_id: connection.id,
+        external_repository_id: "101",
+        owner: "acme",
+        name: "api",
+        default_branch: "main",
+        config_state: "unknown",
+      }).returning("id").executeTakeFirstOrThrow();
+      const scopedMessage = { ...message, workspaceId, providerConnectionId: connection.id };
+      const providerRequest = vi.fn(async () => {
+        throw new Error("invalid configuration must not perform provider reads or writes after loading configuration");
+      });
+      const services = createWorkerRoutingServiceFactory({
+        db,
+        github: {
+          appId: "123",
+          privateKey: "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----",
+        },
+        createRequester: async () => ({ request: providerRequest }) as never,
+        createConfigurationSource: () => ({
+          async loadOrganization() { return null; },
+          async loadRepository() {
+            return {
+              content: "version: 1\nmode: invalid\n",
+              revision: "base-123",
+              path: ".triagepilot.yml",
+            };
+          },
+        }),
+        clock: { now: () => new Date("2026-08-18T12:02:00.000Z") },
+      })(scopedMessage);
+
+      await expect(processRoutingJob(scopedMessage, services)).resolves.toBeUndefined();
+      await expect(processRoutingJob(scopedMessage, services)).resolves.toBeUndefined();
+
+      await expect(db.selectFrom("routing_decisions")
+        .select(["repository_id", "action", "action_status", "effective_config_hash"])
+        .execute()).resolves.toEqual([{
+        repository_id: repository.id,
+        action: "configuration_failure",
+        action_status: "not_applied",
+        effective_config_hash: "invalid",
+      }]);
+      await expect(db.selectFrom("decision_outbox")
+        .select(["event_type", "payload"])
+        .execute()).resolves.toEqual([{
+        event_type: "routing_decision",
+        payload: expect.objectContaining({
+          repositoryId: "101",
+          changeRequestId: "7",
+          action: "configuration_failure",
+          effectiveConfigurationHash: "invalid",
+        }),
+      }]);
+      await expect(db.selectFrom("repositories")
+        .select(["config_state", "last_config_mode"])
+        .where("id", "=", repository.id)
+        .executeTakeFirstOrThrow()).resolves.toEqual({ config_state: "invalid", last_config_mode: "shadow" });
+      expect(providerRequest).not.toHaveBeenCalled();
+    });
+  });
+
   it("rejects decisions for repositories absent from the configured projection", async () => {
     await withPostgresTestDatabase(async (db) => {
       const workspaceId = await ensureLocalWorkspace(db);
