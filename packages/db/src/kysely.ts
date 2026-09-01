@@ -93,6 +93,7 @@ export interface RoutingDecisionsTable {
   selected_reviewers: ColumnType<unknown, unknown | undefined, unknown>;
   no_human_reason: string | null;
   pull_number: number | null;
+  change_request_id: string | null;
   head_sha: string | null;
   policy_check_run_id: NullableBigInt;
   policy_check_state: Generated<HumanReviewPolicyCheckState>;

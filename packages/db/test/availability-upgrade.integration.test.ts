@@ -114,6 +114,10 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability mi
             external_connection_id: "501",
           }],
         });
+        await expect(verification.query(
+          "select change_request_id from routing_decisions where id = $1",
+          [decisionId],
+        )).resolves.toMatchObject({ rows: [{ change_request_id: null }] });
         await expect(verification.query(`
           select replacements.id, replacements.workspace_id, replacements.provider,
                  replacements.provider_connection_id, replacements.absence_id,
@@ -252,6 +256,10 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability mi
           attempt_count: 2,
           last_error: "sink unavailable",
         }]);
+        await expect(verification.query(
+          "select change_request_id from routing_decisions where id = $1",
+          [decisionId],
+        )).resolves.toMatchObject({ rows: [{ change_request_id: "phase-change-request" }] });
       } finally {
         await verification.end();
       }

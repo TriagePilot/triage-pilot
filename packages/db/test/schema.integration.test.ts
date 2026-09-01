@@ -62,6 +62,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
           "pull_number",
           "head_sha",
           "routing_key",
+          "change_request_id",
           "policy_check_run_id",
           "policy_check_state",
           "workspace_id",

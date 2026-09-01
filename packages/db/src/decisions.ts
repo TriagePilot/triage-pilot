@@ -17,6 +17,7 @@ import { stagePlatformEvent } from "./outbox.js";
 export interface DecisionInput {
   repositoryId: string;
   deliveryId: string;
+  changeRequestId: string;
   routingKey?: string;
   pullNumber: number;
   headSha: string;
@@ -65,6 +66,7 @@ export interface ReviewerReplacementCandidateDecision {
   repositoryId: string;
   owner: string;
   repositoryName: string;
+  changeRequestId: string;
   changeRequestNumber: number;
   routedHeadRevision: string;
   mode: RepositoryMode;
@@ -117,6 +119,7 @@ async function persistDecisionRecord(
       repository_id: input.repositoryId,
       delivery_id: input.deliveryId,
       routing_key: routingKey,
+      change_request_id: input.changeRequestId,
       pull_number: input.pullNumber,
       head_sha: input.headSha,
       mode: input.mode,
@@ -144,6 +147,7 @@ async function persistDecisionRecord(
         action: preserveAfterSuccess<string>("action", input.action),
         risk_score: preserveAfterSuccess<number>("risk_score", input.riskScore),
         pull_number: preserveAfterSuccess<number>("pull_number", input.pullNumber),
+        change_request_id: preserveAfterSuccess<string>("change_request_id", input.changeRequestId),
         head_sha: preserveAfterSuccess<string>("head_sha", input.headSha),
         selected_reviewer: preserveAfterSuccess<string | null>(
           "selected_reviewer",
@@ -257,9 +261,10 @@ export async function findReviewerReplacementCandidates(
     provider: ProviderKind;
     providerConnectionId: ProviderConnectionId;
     unavailableActorId: string;
+    recordedFor: { absenceId: string; absenceRevision: number };
   },
 ): Promise<ReviewerReplacementCandidateDecision[]> {
-  const unavailableActorId = normalizeExternalActorId(input.unavailableActorId);
+  const unavailableActorId = parseExternalActorId(input.unavailableActorId);
   if (unavailableActorId === null) return [];
 
   const latestDecisions = db
@@ -272,7 +277,7 @@ export async function findReviewerReplacementCandidates(
     .orderBy("pull_number")
     .orderBy("created_at", "desc")
     .orderBy("id", "desc");
-  const rows = await db
+  let query = db
     .with("latest_decisions", () => latestDecisions)
     .selectFrom("latest_decisions")
     .innerJoin("repositories", (join) => join
@@ -290,6 +295,7 @@ export async function findReviewerReplacementCandidates(
       "repositories.external_repository_id as repositoryId",
       "repositories.owner",
       "repositories.name as repositoryName",
+      "latest_decisions.change_request_id as changeRequestId",
       "latest_decisions.pull_number as changeRequestNumber",
       "latest_decisions.head_sha as routedHeadRevision",
       "latest_decisions.mode",
@@ -303,7 +309,18 @@ export async function findReviewerReplacementCandidates(
     .where("repositories.provider_connection_id", "=", input.providerConnectionId)
     .where("provider_connections.status", "=", "active")
     .where("latest_decisions.action", "=", "request_human_review")
-    .where("latest_decisions.head_sha", "is not", null)
+    .where("latest_decisions.head_sha", "is not", null);
+  query = query.where(({ exists, not, selectFrom }) => not(exists(
+    selectFrom("reviewer_replacements")
+      .select("reviewer_replacements.id")
+      .whereRef("reviewer_replacements.workspace_id", "=", "latest_decisions.workspace_id")
+      .where("reviewer_replacements.provider", "=", input.provider)
+      .where("reviewer_replacements.provider_connection_id", "=", input.providerConnectionId)
+      .where("reviewer_replacements.absence_id", "=", input.recordedFor.absenceId)
+      .where("reviewer_replacements.absence_revision", "=", input.recordedFor.absenceRevision)
+      .whereRef("reviewer_replacements.decision_id", "=", "latest_decisions.id"),
+  )));
+  const rows = await query
     .orderBy("repositories.external_repository_id", "asc")
     .orderBy("latest_decisions.pull_number", "asc")
     .orderBy("latest_decisions.id", "asc")
@@ -314,6 +331,7 @@ export async function findReviewerReplacementCandidates(
     const original = parseOriginalReviewerPool(row.details);
     if (
       row.changeRequestNumber === null
+      || row.changeRequestId === null
       || row.routedHeadRevision === null
       || selectedActors === null
       || !selectedActors.includes(unavailableActorId)
@@ -328,6 +346,7 @@ export async function findReviewerReplacementCandidates(
       repositoryId: row.repositoryId,
       owner: row.owner,
       repositoryName: row.repositoryName,
+      changeRequestId: row.changeRequestId,
       changeRequestNumber: row.changeRequestNumber,
       routedHeadRevision: row.routedHeadRevision,
       mode: row.mode,
@@ -379,9 +398,9 @@ function parseSelectedReviewers(value: unknown): string[] {
 export function parseStrictActorList(value: unknown): string[] | null {
   const actors = typeof value === "string" ? parseJsonArray(value) : value;
   if (!Array.isArray(actors) || !actors.every((actor) => typeof actor === "string")) return null;
-  const normalized = actors.map(normalizeExternalActorId);
-  if (normalized.some((actor) => actor === null)) return null;
-  return [...new Set(normalized as string[])];
+  const parsed = actors.map(parseExternalActorId);
+  if (parsed.some((actor) => actor === null)) return null;
+  return [...new Set(parsed as string[])];
 }
 
 export function parseOriginalReviewerPool(details: unknown): {
@@ -415,9 +434,8 @@ export function parseOriginalReviewerPool(details: unknown): {
   return { eligibleActors, preferredActors, requestedReviewerCount };
 }
 
-export function normalizeExternalActorId(value: string): string | null {
-  const normalized = `@${value.trim().toLowerCase().replace(/^@/, "")}`;
-  return /^@[a-z0-9_.-]+$/.test(normalized) ? normalized : null;
+export function parseExternalActorId(value: string): string | null {
+  return value.trim() === "" ? null : value;
 }
 
 function parseJsonArray(value: string): unknown {

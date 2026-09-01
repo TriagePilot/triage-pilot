@@ -131,6 +131,17 @@ create index reviewer_replacements_absence_history
     workspace_id, provider, provider_connection_id, absence_id, completed_at desc, id desc
   );
 
+alter table routing_decisions add column change_request_id text;
+
+update routing_decisions decisions
+set change_request_id = outbox.payload ->> 'changeRequestId'
+from decision_outbox outbox
+where outbox.workspace_id = decisions.workspace_id
+  and outbox.decision_id = decisions.id
+  and outbox.schema_version = 1
+  and jsonb_typeof(outbox.payload -> 'changeRequestId') = 'string'
+  and length(outbox.payload ->> 'changeRequestId') > 0;
+
 alter table decision_outbox
   add column event_id text,
   add column event_type text,

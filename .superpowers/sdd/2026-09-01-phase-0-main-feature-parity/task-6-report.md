@@ -93,3 +93,43 @@ The final transaction deliberately accepts an exact persisted retry before check
 The routing-decision schema does not persist a provider change-request external ID, so fresh event validation can bind repository identity, decision ID, change-request number through the decision, provider scope, actors, outcome, absence, revision, and occurrence time, but cannot independently derive `event.changeRequestId`. Task 8 must construct that field from its provider-qualified job/current-state contract. Exact retries still compare the complete event payload, including that ID.
 
 No blocker remains.
+
+## Fix round 1: make availability persistence replay safe
+
+Implemented for commit `fix: make availability persistence replay safe` (the commit containing this section). This round addresses every independent review finding without editing historical migrations `0001` through `0006`.
+
+### Finding-to-fix mapping
+
+1. **Finalizer recovery independent of activation eligibility.** `ReviewerAbsenceActivation` now contains only the exact current revision and its unprocessed candidates. The workspace repository adds `listPendingFinalizers({ absenceId, absenceRevision })`, which reads pending recovery rows by immutable source scope without joining the current absence status/revision or active connection. Integration cases prove pending work remains available after revise, cancel, and provider-connection suspension; each case transitions the row to `permanent_failure`, removes it from the pending view, and retains it in history. A new revision activation returns no old-revision recovery field or candidates.
+2. **Locked absence actor binding.** Fresh `persistReplacement` compares the locked `reviewer_absences.external_actor_id` byte-for-byte with `unavailableActorId` before decision or history mutation. A negative fixture deliberately makes the decision cohort refer to a different actor than the absence and proves history, event, and cohort all remain unchanged.
+3. **Opaque provider actor IDs.** Generic DB parsing now rejects only empty/whitespace-only identifiers and otherwise preserves the exact provider-owned string. It does not add `@`, lowercase, regex-restrict, or trim persisted/comparison values. Tests cover case-distinct overlapping actors, a punctuation-bearing mixed-case identity, and a numeric GitLab identity without mutation or collision. Candidate pools and cohorts use the same exact, case-sensitive semantics.
+4. **At-least-once candidate discovery.** Exact activation discovery supplies its absence ID/revision to `findReviewerReplacementCandidates`. A correlated `NOT EXISTS` excludes any decision already represented in replacement history for that source, regardless of outcome or finalizer state. Separate cases prove `no_replacement_available`, `skipped_closed`, and `permanent_failure` are not rediscovered on a second activation; exact persistence retry remains idempotent and history remains visible. Pending rows are returned only through the finalizer recovery boundary.
+5. **Durable change-request identity.** Migration `0007_workspace_reviewer_availability.sql` adds nullable provider-neutral `routing_decisions.change_request_id`. Existing Phase decisions backfill it from their schema-v1 decision outbox payload; current-main decisions without a durable source remain null rather than deriving an identity from the numeric request number. The DB `DecisionInput` requires the value for new writes, retry upserts preserve it after terminal success, the worker routing composition passes the application contract's existing `changeRequestId`, candidate discovery excludes unknown historical identities, and final replacement persistence requires the locked decision value to equal `ReviewerReplacementEventV1.changeRequestId`. Fresh/schema, current-main, and current-Phase migration tests cover the column, intentional null, and exact outbox backfill respectively. Positive and mismatch replacement tests prove event binding and rollback.
+6. **Release-suite and concurrency coverage.** Root `test:integration` now includes `packages/db/test/availability.integration.test.ts`. The concurrency regression starts a real transaction that updates and holds an absence revision, captures its PostgreSQL transaction ID, starts final persistence concurrently, and observes the final transaction waiting on that exact transaction-ID lock before release. After the revision commits, final persistence returns the stale no-op with no history. Removing the final `FOR UPDATE` would eliminate the observed wait and fail the test.
+
+### TDD evidence
+
+Tests were changed before production or migration code. The initial combined RED command covered availability, decisions, workspace isolation, schema, and upgrade histories. It exited 1 with 4 failed files, 1 passed file, 21 failed tests, and 18 passed tests. Failures were the absent `change_request_id` column, opaque IDs being rewritten/rejected, missing independent pending-finalizer API, processed decisions being rediscovered, and missing actor/event bindings. Workspace isolation remained green.
+
+After the first implementation, the expanded availability behavior was correct, while two test-harness assumptions failed: equal-start rows were asserted in UUID order, and the lock probe filtered out transaction-ID locks because those locks have no database OID. The assertions were corrected without production changes: actor rows use literal unordered membership, and the concurrency barrier observes the captured blocking transaction ID directly. Availability then passed all 18 tests.
+
+Final verification evidence:
+
+- Required Task 6 plus schema, upgrade, and outbox suites: 6 files and 50 tests passed.
+- Root `pnpm test:integration`, now including availability: 10 files and 73 tests passed.
+- `pnpm --filter @triagepilot/db check`: passed.
+- Rebuilt `@triagepilot/db`, then `pnpm --filter @triagepilot/worker check`: passed. The rebuild refreshed the ignored local package output so the worker checked against the new source contract.
+- `pnpm check`: all workspace builds and checks passed.
+- `git diff --check` and production boundary searches: passed.
+- Historical migrations `0001` through `0006` are unchanged.
+- Post-run inspection found zero `triagepilot_test_%` databases; the persistent `triagepilot` database was not migrated or mutated.
+
+One attempted parallel verification paired `pnpm check` with the focused Vitest command. The check succeeded, but Vitest collected zero tests while package builds temporarily removed and recreated dependency `dist` entrypoints. That orchestration artifact was not counted as feature evidence; after the build completed, the focused suites and full integration script were rerun sequentially and passed with the counts above.
+
+### API, migration, and residual concerns
+
+The split between `loadActivation` and `listPendingFinalizers` is intentional: activation is allowed to become stale, while mapped finalizer work describes already-completed provider effects and must survive later administrative state changes. Exact source scope prevents old recovery from leaking into a revised activation.
+
+The new decision column is nullable only for upgrade safety. A current-main historical decision has no provider external request ID in its row or event outbox, and the generic migration must not guess that identity from `pull_number`; such a row is therefore ineligible for a newly versioned replacement event. Current routing and current-Phase events persist/backfill the exact ID. A later operator recovery/reroute can create a fully identified current decision.
+
+No blocker remains. No push, pull request, tag, publish, dependency change, commercial code, or persistent database operation was performed.

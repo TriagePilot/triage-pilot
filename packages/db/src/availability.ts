@@ -12,7 +12,7 @@ import {
 
 import {
   findReviewerReplacementCandidates,
-  normalizeExternalActorId,
+  parseExternalActorId,
   parseOriginalReviewerPool,
   parseStrictActorList,
   type ReviewerReplacementCandidateDecision,
@@ -82,7 +82,6 @@ export interface ReviewerAbsenceActivation {
   startAt: Date;
   endAt: Date;
   candidates: ReviewerReplacementCandidateDecision[];
-  pendingFinalizers: ReviewerReplacement[];
 }
 
 export interface ScheduleAbsenceInput {
@@ -145,6 +144,7 @@ export interface WorkspaceReviewerAvailability {
     at: Date;
   }): Promise<ReviewerAbsenceWindow[]>;
   loadActivation(absenceId: string, revision: number): Promise<ReviewerAbsenceActivation | null>;
+  listPendingFinalizers(input: { absenceId: string; absenceRevision: number }): Promise<ReviewerReplacement[]>;
   listReplacementHistory(absenceId?: string): Promise<ReviewerReplacement[]>;
   persistReplacement(input: PersistReviewerReplacementInput): Promise<PersistReviewerReplacementResult>;
   updateReplacementState(input: {
@@ -293,7 +293,7 @@ export function createWorkspaceReviewerAvailability(
 
     async findActiveAbsences(input) {
       validateDate(input.at, "at");
-      const actors = normalizeActorList(input.actors);
+      const actors = validActorList(input.actors);
       if (actors.length === 0) return [];
       const connection = await findActiveConnection(db, workspaceId, input.providerConnectionId);
       if (connection === null) return [];
@@ -343,14 +343,12 @@ export function createWorkspaceReviewerAvailability(
         .executeTakeFirst();
       if (absence === undefined) return null;
 
-      const [candidates, pendingFinalizers] = await Promise.all([
-        findReviewerReplacementCandidates(db, workspaceId, {
-          provider: absence.provider,
-          providerConnectionId: absence.provider_connection_id,
-          unavailableActorId: absence.external_actor_id,
-        }),
-        listReplacementHistory(db, workspaceId, absenceId, absence.revision, "finalizer_pending"),
-      ]);
+      const candidates = await findReviewerReplacementCandidates(db, workspaceId, {
+        provider: absence.provider,
+        providerConnectionId: absence.provider_connection_id,
+        unavailableActorId: absence.external_actor_id,
+        recordedFor: { absenceId, absenceRevision: absence.revision },
+      });
       return {
         absenceId: absence.id,
         revision: absence.revision,
@@ -360,8 +358,18 @@ export function createWorkspaceReviewerAvailability(
         startAt: absence.start_at,
         endAt: absence.end_at,
         candidates,
-        pendingFinalizers,
       };
+    },
+
+    async listPendingFinalizers(input) {
+      validateExpectedRevision(input.absenceRevision);
+      return await listReplacementHistory(
+        db,
+        workspaceId,
+        input.absenceId,
+        input.absenceRevision,
+        "finalizer_pending",
+      );
     },
 
     async listReplacementHistory(absenceId) {
@@ -403,6 +411,7 @@ export function createWorkspaceReviewerAvailability(
         await requireActiveConnection(trx, workspaceId, input.providerConnectionId, input.provider);
         if (
           absence.revision !== input.absenceRevision
+          || absence.external_actor_id !== input.unavailableActorId
           || absence.status !== "scheduled"
           || absence.start_at > input.completedAt
           || absence.end_at <= input.completedAt
@@ -415,6 +424,7 @@ export function createWorkspaceReviewerAvailability(
             .onRef("repositories.id", "=", "routing_decisions.repository_id"))
           .select([
             "routing_decisions.id",
+            "routing_decisions.change_request_id",
             "routing_decisions.head_sha",
             "routing_decisions.selected_reviewers",
             "routing_decisions.details",
@@ -440,6 +450,7 @@ export function createWorkspaceReviewerAvailability(
           || original === null
           || !selectedActors.includes(input.unavailableActorId)
           || decision.external_repository_id !== input.event.repositoryId
+          || decision.change_request_id !== input.event.changeRequestId
         ) return staleReplacementResult();
 
         if (replacesCohort(input.outcome)) {
@@ -694,9 +705,9 @@ function validateAbsenceMutation<T extends {
   endAt: Date;
   now: Date;
 }>(input: T): T & { externalActorId: string } {
-  const externalActorId = normalizeExternalActorId(input.externalActorId);
+  const externalActorId = parseExternalActorId(input.externalActorId);
   if (externalActorId === null) {
-    throw new ReviewerAvailabilityValidationError("External actor must be an individual normalized actor identifier");
+    throw new ReviewerAvailabilityValidationError("External actor identifier must not be empty");
   }
   validateDate(input.startAt, "startAt");
   validateDate(input.endAt, "endAt");
@@ -716,15 +727,15 @@ function validateReplacementInput(input: PersistReviewerReplacementInput, worksp
   if (input.completedAt < input.startedAt) {
     throw new ReviewerAvailabilityValidationError("Replacement completion cannot precede its start");
   }
-  const unavailableActorId = normalizeExternalActorId(input.unavailableActorId);
+  const unavailableActorId = parseExternalActorId(input.unavailableActorId);
   const replacementActorId = input.replacementActorId === null
     ? null
-    : normalizeExternalActorId(input.replacementActorId);
+    : parseExternalActorId(input.replacementActorId);
   if (
     unavailableActorId === null
     || unavailableActorId !== input.unavailableActorId
     || replacementActorId !== input.replacementActorId
-  ) throw new ReviewerAvailabilityValidationError("Replacement actors must use normalized identifiers");
+  ) throw new ReviewerAvailabilityValidationError("Replacement actor identifiers must not be empty");
   if (
     input.event.workspaceId !== workspaceId
     || input.event.provider !== input.provider
@@ -776,8 +787,8 @@ function validateStateError(state: ReviewerReplacementState, lastError: string |
   }
 }
 
-function normalizeActorList(actors: string[]): string[] {
-  return [...new Set(actors.map(normalizeExternalActorId).filter((actor): actor is string => actor !== null))];
+function validActorList(actors: string[]): string[] {
+  return [...new Set(actors.map(parseExternalActorId).filter((actor): actor is string => actor !== null))];
 }
 
 function replacesCohort(outcome: ReviewerReplacementOutcome): boolean {

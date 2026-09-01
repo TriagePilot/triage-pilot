@@ -288,6 +288,7 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
               repositoryId: await repositoryId(),
               deliveryId: decision.deliveryId,
               routingKey: decision.routingKey,
+              changeRequestId: decision.changeRequestId,
               pullNumber: decision.changeRequestNumber,
               headSha: decision.headRevision,
               mode: decision.mode,
