@@ -1,10 +1,17 @@
 import type { ColumnType, Generated, Insertable, Selectable, Updateable } from "kysely";
-import type { ActionStatus, ProviderKind, RepositoryMode } from "@triagepilot/contracts";
+import type {
+  ActionStatus,
+  PlatformEventV1,
+  ProviderKind,
+  RepositoryMode,
+  ReviewerReplacementOutcome,
+} from "@triagepilot/contracts";
 
 type Timestamp = ColumnType<Date, Date | string | undefined, Date | string>;
 type NullableTimestamp = ColumnType<Date | null, Date | string | null | undefined, Date | string | null>;
 type Json = ColumnType<unknown, unknown, unknown>;
 type NullableBigInt = ColumnType<string | null, string | null, string | null>;
+type NullableString = ColumnType<string | null, string | null | undefined, string | null>;
 type HumanReviewPolicyCheckState = "not_started" | "in_progress" | "success" | "failure";
 type InheritanceMode = "legacy" | "defaults" | "organization" | "replace" | "inherit";
 
@@ -105,10 +112,52 @@ export interface RoutingDecisionsTable {
   created_at: Timestamp;
 }
 
+export interface WorkspaceOperationalSettingsTable {
+  workspace_id: string;
+  timezone: Generated<string>;
+  updated_at: Timestamp;
+}
+
+export interface ReviewerAbsencesTable {
+  id: Generated<string>;
+  workspace_id: string;
+  provider: ProviderKind;
+  provider_connection_id: string;
+  external_actor_id: string;
+  start_at: Timestamp;
+  end_at: Timestamp;
+  status: Generated<"scheduled" | "cancelled">;
+  revision: Generated<number>;
+  cancelled_at: NullableTimestamp;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface ReviewerReplacementsTable {
+  id: Generated<string>;
+  workspace_id: string;
+  provider: ProviderKind;
+  provider_connection_id: string;
+  absence_id: string;
+  absence_revision: number;
+  decision_id: string;
+  unavailable_actor_id: string;
+  replacement_actor_id: NullableString;
+  outcome: ReviewerReplacementOutcome;
+  reason: string;
+  state: Generated<string>;
+  last_error: NullableString;
+  started_at: Timestamp;
+  completed_at: Timestamp;
+}
+
 export interface DecisionOutboxTable {
   id: Generated<string>;
   workspace_id: string;
-  decision_id: string;
+  decision_id: NullableString;
+  reviewer_replacement_id: NullableString;
+  event_id: string;
+  event_type: PlatformEventV1["eventType"];
   schema_version: number;
   payload: Json;
   occurred_at: Timestamp;
@@ -131,6 +180,9 @@ export interface Database {
   webhook_receipts: WebhookReceiptsTable;
   jobs: JobsTable;
   routing_decisions: RoutingDecisionsTable;
+  workspace_operational_settings: WorkspaceOperationalSettingsTable;
+  reviewer_absences: ReviewerAbsencesTable;
+  reviewer_replacements: ReviewerReplacementsTable;
   decision_outbox: DecisionOutboxTable;
   worker_heartbeat: WorkerHeartbeatTable;
 }

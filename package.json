@@ -15,7 +15,7 @@
     "release:manifest": "node scripts/create-release-manifest.mjs",
     "smoke:compose": "bash scripts/compose-smoke.sh",
     "test": "vitest run",
-    "test:integration": "vitest run packages/db/test/schema.integration.test.ts packages/db/test/deliveries.integration.test.ts packages/db/test/decisions.integration.test.ts packages/db/test/jobs.integration.test.ts packages/db/test/operations.integration.test.ts apps/worker/test/runtime-services.integration.test.ts",
+    "test:integration": "vitest run packages/db/test/schema.integration.test.ts packages/db/test/availability-upgrade.integration.test.ts packages/db/test/workspace-isolation.integration.test.ts packages/db/test/outbox.integration.test.ts packages/db/test/deliveries.integration.test.ts packages/db/test/decisions.integration.test.ts packages/db/test/jobs.integration.test.ts packages/db/test/operations.integration.test.ts apps/worker/test/runtime-services.integration.test.ts",
     "test:watch": "vitest",
     "db:migrate": "pnpm --filter @triagepilot/db migrate"
   },

@@ -50,6 +50,114 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace persistence is
     });
   });
 
+  it("scopes reviewer availability overlap, uniqueness, and references by workspace and provider connection", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceA = await ensureLocalWorkspace(db);
+      const workspaceB = await createWorkspace(db, "workspace-b");
+      const connectionA = await seedConnectionAndRepository(db, workspaceA, "github", "91", "201", "api-a");
+      const connectionASecondary = await seedConnectionAndRepository(
+        db,
+        workspaceA,
+        "github",
+        "92",
+        "202",
+        "api-a-secondary",
+        "suspended",
+      );
+      const connectionB = await seedConnectionAndRepository(db, workspaceB, "github", "91", "201", "api-b");
+      const repositoryA = await repositoryId(db, workspaceA, "github", "201");
+      const repositoryB = await repositoryId(db, workspaceB, "github", "201");
+      const repositoriesA = createWorkspaceRepositories(db, workspaceA);
+      const repositoriesB = createWorkspaceRepositories(db, workspaceB);
+      const decisionA = await repositoriesA.persistDecision(decision(repositoryA, "availability-a", "availability-a"));
+      const decisionB = await repositoriesB.persistDecision(decision(repositoryB, "availability-b", "availability-b"));
+      const window = {
+        start_at: new Date("2026-10-01T08:00:00.000Z"),
+        end_at: new Date("2026-10-01T12:00:00.000Z"),
+      };
+
+      const absenceA = await db.insertInto("reviewer_absences").values({
+        workspace_id: workspaceA,
+        provider: "github",
+        provider_connection_id: connectionA,
+        external_actor_id: "@user-4e5c21",
+        ...window,
+      }).returning("id").executeTakeFirstOrThrow();
+
+      await expect(db.insertInto("reviewer_absences").values({
+        workspace_id: workspaceA,
+        provider: "github",
+        provider_connection_id: connectionA,
+        external_actor_id: "@user-4e5c21",
+        start_at: new Date("2026-10-01T10:00:00.000Z"),
+        end_at: new Date("2026-10-01T14:00:00.000Z"),
+      }).execute()).rejects.toMatchObject({ constraint: "reviewer_absences_no_overlap" });
+
+      const absenceASecondary = await db.insertInto("reviewer_absences").values({
+        workspace_id: workspaceA,
+        provider: "github",
+        provider_connection_id: connectionASecondary,
+        external_actor_id: "@user-4e5c21",
+        ...window,
+      }).returning("id").executeTakeFirstOrThrow();
+      const absenceB = await db.insertInto("reviewer_absences").values({
+        workspace_id: workspaceB,
+        provider: "github",
+        provider_connection_id: connectionB,
+        external_actor_id: "@user-4e5c21",
+        ...window,
+      }).returning("id").executeTakeFirstOrThrow();
+
+      await expect(db.insertInto("reviewer_absences").values({
+        workspace_id: workspaceB,
+        provider: "github",
+        provider_connection_id: connectionA,
+        external_actor_id: "@user-a907d2",
+        ...window,
+      }).execute()).rejects.toMatchObject({
+        constraint: "reviewer_absences_workspace_provider_connection_fkey",
+      });
+
+      const replacement = {
+        workspace_id: workspaceA,
+        provider: "github" as const,
+        provider_connection_id: connectionA,
+        absence_id: absenceA.id,
+        absence_revision: 1,
+        decision_id: decisionA.decisionId,
+        unavailable_actor_id: "@user-4e5c21",
+        replacement_actor_id: "@user-2f83b9",
+        outcome: "replaced",
+        reason: "scheduled absence",
+        started_at: new Date("2026-10-01T08:00:00.000Z"),
+        completed_at: new Date("2026-10-01T08:00:01.000Z"),
+      };
+      await db.insertInto("reviewer_replacements").values(replacement).execute();
+      await expect(db.insertInto("reviewer_replacements").values(replacement).execute()).rejects.toMatchObject({
+        constraint: "reviewer_replacements_scoped_source_key",
+      });
+
+      await expect(db.insertInto("reviewer_replacements").values({
+        ...replacement,
+        absence_id: absenceB.id,
+      }).execute()).rejects.toMatchObject({
+        constraint: "reviewer_replacements_scoped_absence_fkey",
+      });
+      await expect(db.insertInto("reviewer_replacements").values({
+        ...replacement,
+        absence_id: absenceASecondary.id,
+      }).execute()).rejects.toMatchObject({
+        constraint: "reviewer_replacements_scoped_absence_fkey",
+      });
+      await expect(db.insertInto("reviewer_replacements").values({
+        ...replacement,
+        decision_id: decisionB.decisionId,
+      }).execute()).rejects.toMatchObject({
+        constraint: "reviewer_replacements_workspace_decision_fkey",
+      });
+    });
+  });
+
   it("reads, updates, transitions, and deletes only the bound workspace", async () => {
     await withPostgresTestDatabase(async (db) => {
       const workspaceA = await ensureLocalWorkspace(db);

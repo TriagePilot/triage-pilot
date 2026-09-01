@@ -10,7 +10,10 @@ const PLATFORM_OUTBOX_LEASE_MS = 15 * 60 * 1000;
 export interface PlatformOutboxRecord {
   id: string;
   workspaceId: WorkspaceId;
-  decisionId: string;
+  decisionId: string | null;
+  reviewerReplacementId: string | null;
+  eventId: string;
+  eventType: PlatformEventV1["eventType"];
   schemaVersion: number;
   payload: PlatformEventV1;
   occurredAt: Date;
@@ -30,27 +33,32 @@ export interface PlatformOutboxRepository {
 export async function stagePlatformEvent(
   db: DatabaseExecutor,
   workspaceId: WorkspaceId,
-  decisionId: string,
+  sourceId: string,
   event: PlatformEventV1,
 ): Promise<void> {
-  if (event.eventType !== "routing_decision") {
-    throw new Error("only routing decision events can be staged by the current outbox schema");
-  }
   if (event.workspaceId !== workspaceId) throw new Error("platform event workspace does not match persistence scope");
-  if (event.decisionId !== decisionId) throw new Error("platform event decision id does not match persisted decision");
+  if (event.eventType === "routing_decision" && event.decisionId !== sourceId) {
+    throw new Error("platform event decision id does not match persisted decision");
+  }
+
+  const source = event.eventType === "routing_decision"
+    ? { decision_id: sourceId, reviewer_replacement_id: null }
+    : { decision_id: null, reviewer_replacement_id: sourceId };
 
   await db
     .insertInto("decision_outbox")
     .values({
       workspace_id: workspaceId,
-      decision_id: decisionId,
+      ...source,
+      event_id: event.eventId,
+      event_type: event.eventType,
       schema_version: event.schemaVersion,
       payload: event,
       occurred_at: event.occurredAt,
       available_at: event.occurredAt,
     })
     .onConflict((conflict) =>
-      conflict.columns(["workspace_id", "decision_id", "schema_version"]).doNothing(),
+      conflict.columns(["workspace_id", "event_id"]).doNothing(),
     )
     .execute();
 }
@@ -202,6 +210,9 @@ function toPlatformOutboxRecord(row: Selectable<DecisionOutboxTable>): PlatformO
     id: row.id,
     workspaceId: row.workspace_id,
     decisionId: row.decision_id,
+    reviewerReplacementId: row.reviewer_replacement_id,
+    eventId: row.event_id,
+    eventType: row.event_type,
     schemaVersion: row.schema_version,
     payload: row.payload as PlatformEventV1,
     occurredAt: row.occurred_at,

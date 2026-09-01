@@ -28,11 +28,22 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
       });
 
       await expect(
-        db.selectFrom("decision_outbox").select(["workspace_id", "decision_id", "schema_version", "payload"]).execute(),
+        db.selectFrom("decision_outbox").select([
+          "workspace_id",
+          "decision_id",
+          "reviewer_replacement_id",
+          "event_id",
+          "event_type",
+          "schema_version",
+          "payload",
+        ]).execute(),
       ).resolves.toEqual([
         expect.objectContaining({
           workspace_id: workspaceId,
           decision_id: persisted.decisionId,
+          reviewer_replacement_id: null,
+          event_id: `decision:${persisted.decisionId}:v1`,
+          event_type: "routing_decision",
           schema_version: 1,
           payload: expect.objectContaining({
             eventType: "routing_decision",
@@ -45,7 +56,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
     });
   });
 
-  it("does not stage reviewer replacement events before replacement persistence is available", async () => {
+  it("stages reviewer replacement events through their replacement source", async () => {
     await withPostgresTestDatabase(async (db) => {
       const workspaceId = await ensureLocalWorkspace(db);
       const repositoryId = await seedRepository(db, workspaceId, "101");
@@ -53,14 +64,73 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
         decision: decisionInput(repositoryId, "delivery-1"),
         event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
       });
+      const source = await seedReviewerReplacement(db, workspaceId, persisted.decisionId);
+      const event = replacementEvent({
+        workspaceId,
+        decisionId: persisted.decisionId,
+        providerConnectionId: source.providerConnectionId,
+      });
 
       await expect(stagePlatformEvent(
         db,
         workspaceId,
-        persisted.decisionId,
-        replacementEvent({ workspaceId, decisionId: persisted.decisionId }),
-      )).rejects.toThrow("only routing decision events can be staged by the current outbox schema");
-      await expect(db.selectFrom("decision_outbox").select("id").execute()).resolves.toHaveLength(1);
+        source.replacementId,
+        event,
+      )).resolves.toBeUndefined();
+      await expect(stagePlatformEvent(db, workspaceId, source.replacementId, event)).resolves.toBeUndefined();
+      await expect(db.selectFrom("decision_outbox")
+        .select(["decision_id", "reviewer_replacement_id", "event_id", "event_type"])
+        .where("event_type", "=", "reviewer_replacement")
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+        decision_id: null,
+        reviewer_replacement_id: source.replacementId,
+        event_id: event.eventId,
+        event_type: "reviewer_replacement",
+      });
+      await expect(db.selectFrom("decision_outbox").select("id").execute()).resolves.toHaveLength(2);
+    });
+  });
+
+  it("requires exactly one event source and workspace-unique event ids", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const repositoryId = await seedRepository(db, workspaceId, "101");
+      const persisted = await persistDecisionWithEvent(db, workspaceId, {
+        decision: decisionInput(repositoryId, "delivery-1"),
+        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+      });
+      const source = await seedReviewerReplacement(db, workspaceId, persisted.decisionId);
+      const common = {
+        workspace_id: workspaceId,
+        event_type: "reviewer_replacement",
+        schema_version: 1,
+        payload: replacementEvent({
+          workspaceId,
+          decisionId: persisted.decisionId,
+          providerConnectionId: source.providerConnectionId,
+        }),
+        occurred_at: new Date("2026-08-26T10:00:00.000Z"),
+        available_at: new Date("2026-08-26T10:00:00.000Z"),
+      };
+
+      await expect(db.insertInto("decision_outbox").values({
+        ...common,
+        event_id: "invalid:no-source",
+        decision_id: null,
+        reviewer_replacement_id: null,
+      }).execute()).rejects.toMatchObject({ constraint: "decision_outbox_exactly_one_source" });
+      await expect(db.insertInto("decision_outbox").values({
+        ...common,
+        event_id: "invalid:two-sources",
+        decision_id: persisted.decisionId,
+        reviewer_replacement_id: source.replacementId,
+      }).execute()).rejects.toMatchObject({ constraint: "decision_outbox_exactly_one_source" });
+      await expect(db.insertInto("decision_outbox").values({
+        ...common,
+        event_id: `decision:${persisted.decisionId}:v1`,
+        decision_id: null,
+        reviewer_replacement_id: source.replacementId,
+      }).execute()).rejects.toMatchObject({ constraint: "decision_outbox_workspace_event_key" });
     });
   });
 
@@ -309,6 +379,7 @@ function decisionEvent(input: {
 function replacementEvent(input: {
   workspaceId: WorkspaceId;
   decisionId: string;
+  providerConnectionId: string;
 }): ReviewerReplacementEventV1 {
   return {
     schemaVersion: 1,
@@ -317,7 +388,7 @@ function replacementEvent(input: {
     occurredAt: "2026-08-26T10:00:00.000Z",
     workspaceId: input.workspaceId,
     provider: "github",
-    providerConnectionId: "connection-17",
+    providerConnectionId: input.providerConnectionId,
     absenceId: "absence-42",
     absenceRevision: 3,
     decisionId: input.decisionId,
@@ -327,6 +398,40 @@ function replacementEvent(input: {
     replacementActor: "@user-4c8d31",
     outcome: "replaced",
   };
+}
+
+async function seedReviewerReplacement(
+  db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0],
+  workspaceId: WorkspaceId,
+  decisionId: string,
+): Promise<{ providerConnectionId: string; replacementId: string }> {
+  const connection = await db.selectFrom("provider_connections")
+    .select("id")
+    .where("workspace_id", "=", workspaceId)
+    .executeTakeFirstOrThrow();
+  const absence = await db.insertInto("reviewer_absences").values({
+    workspace_id: workspaceId,
+    provider: "github",
+    provider_connection_id: connection.id,
+    external_actor_id: "@user-f2a19c",
+    start_at: new Date("2026-08-26T09:00:00.000Z"),
+    end_at: new Date("2026-08-26T11:00:00.000Z"),
+  }).returning("id").executeTakeFirstOrThrow();
+  const replacement = await db.insertInto("reviewer_replacements").values({
+    workspace_id: workspaceId,
+    provider: "github",
+    provider_connection_id: connection.id,
+    absence_id: absence.id,
+    absence_revision: 1,
+    decision_id: decisionId,
+    unavailable_actor_id: "@user-f2a19c",
+    replacement_actor_id: "@user-4c8d31",
+    outcome: "replaced",
+    reason: "scheduled absence",
+    started_at: new Date("2026-08-26T10:00:00.000Z"),
+    completed_at: new Date("2026-08-26T10:00:01.000Z"),
+  }).returning("id").executeTakeFirstOrThrow();
+  return { providerConnectionId: connection.id, replacementId: replacement.id };
 }
 
 async function seedWorkspace(

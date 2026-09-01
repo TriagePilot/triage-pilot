@@ -19,10 +19,13 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         "jobs",
         "provider_connections",
         "repositories",
+        "reviewer_absences",
+        "reviewer_replacements",
         "routing_decisions",
         "schema_migrations",
         "webhook_receipts",
         "worker_heartbeat",
+        "workspace_operational_settings",
         "workspaces",
       ]);
       const repositories = await sql<{ column_name: string }>`
@@ -68,14 +71,57 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
           "config_sources",
         ]),
       );
+      const absences = await sql<{ column_name: string }>`
+        select column_name from information_schema.columns
+        where table_name = 'reviewer_absences'
+        order by ordinal_position
+      `.execute(db);
+      expect(absences.rows.map((row) => row.column_name)).toEqual([
+        "id",
+        "external_actor_id",
+        "start_at",
+        "end_at",
+        "status",
+        "revision",
+        "cancelled_at",
+        "created_at",
+        "updated_at",
+        "workspace_id",
+        "provider",
+        "provider_connection_id",
+      ]);
+      const replacements = await sql<{ column_name: string }>`
+        select column_name from information_schema.columns
+        where table_name = 'reviewer_replacements'
+        order by ordinal_position
+      `.execute(db);
+      expect(replacements.rows.map((row) => row.column_name)).toEqual([
+        "id",
+        "absence_id",
+        "absence_revision",
+        "decision_id",
+        "unavailable_actor_id",
+        "replacement_actor_id",
+        "outcome",
+        "reason",
+        "started_at",
+        "completed_at",
+        "workspace_id",
+        "provider",
+        "provider_connection_id",
+        "state",
+        "last_error",
+      ]);
       const migrations = await sql<{ name: string }>`select name from schema_migrations order by name`.execute(db);
       expect(migrations.rows).toEqual([
         { name: "0001_initial.sql" },
         { name: "0002_selected_reviewers.sql" },
         { name: "0003_human_review_policy.sql" },
         { name: "0004_semantic_routing_deduplication.sql" },
+        { name: "0005_reviewer_availability.sql" },
         { name: "0005_workspace_scope.sql" },
         { name: "0006_decision_outbox.sql" },
+        { name: "0007_workspace_reviewer_availability.sql" },
       ]);
     });
   });
