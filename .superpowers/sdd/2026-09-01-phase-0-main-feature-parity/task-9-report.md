@@ -114,3 +114,52 @@ No push, pull request, tag, publication, dependency change, credential output, o
 - Intent and protected terminal-history cleanup is intentionally deferred. Any later cleanup must prove no activation, recovery job, or finalizer can still reference the rows.
 - The standalone public-boundary command still exits nonzero for the two inherited Task 6 report findings; the boundary unit gate passes and Task 9 adds none.
 - Task 14 only updates release evidence for highest migration `0008`; it does not create or begin another migration.
+
+## Fix round 2: atomic activation exhaustion
+
+### RED/GREEN mapping
+
+The runner RED slice demonstrated both final-bound continuation failures: after A recovery, a retryable B throw retained A as the in-memory recovery, and terminal handling audited separately from the job lease transition. A second RED case covered B returning a recovery on the last bounded claim. Both now route through one workspace-job repository operation; the focused runner/application/processor suite is 96/96 and the real runtime/composition matrix is 25/25.
+
+The PostgreSQL RED slice exercised an original `activate_reviewer_absence` payload with no serialized recovery. An obsolete lease produced neither history nor job mutation. The exact lease now discovers the durable intent, inserts the linked permanent-failure audit/event, and fails the job in one commit. Availability/jobs/schema integration is 47/47.
+
+### Transaction and state flow
+
+```text
+runner terminal activation
+  -> exhaustReviewerAbsenceActivation(exact lease, error, now)
+    -> BEGIN
+    -> lock exact running job by workspace/provider/connection/owner/attempt
+    -> validate durable activation scope and any serialized recovery source
+    -> lock/read every intent and same-source history for absence+revision
+    -> require history.mutation_intent_id = intent.id when history exists
+    -> audit every unresolved intent; fail every scoped pending finalizer
+    -> transition the same locked job to failed
+    -> COMMIT
+```
+
+A stale lease returns `stale_lease` before any audit or replacement write. Stale maintenance enumerates candidates, then runs this transaction independently for each job, so one invalid source cannot roll back a valid job in the same maintenance batch. Ordinary non-availability stale jobs retain their previous failure behavior.
+
+After A recovery succeeds, the runner clears A before resuming activation. A B throw on the last bounded claim therefore exhausts the durable activation scope, not A's old serialized object. A returned B recovery uses the same terminal transaction. The recovery ceiling remains the original bounded ceiling.
+
+### Scope and lock hardening
+
+Finalizer and replacement recovery records now carry and validate workspace, provider, provider connection, absence ID/revision, decision, unavailable actor, outcome, replacement actor, replacement ID, and mutation-intent ID. Runtime parsing additionally binds the claimed provider and job scope. Database exhaustion binds serialized replacement recovery to the exact durable row before any finalizer-state mutation; persistence-phase recovery binds the exact intent.
+
+`prepareMutationIntent` and terminal persistence share the absence-first lock order. Preparation locks absence and decision, rechecks same-source terminal history under the lock, and returns only an exact already-linked intent; otherwise terminal history prevents a new intent. The insert trigger locks the absence row with `FOR UPDATE`, serializing insert-first and revise-first orderings. Recovery audit persistence also locks absence before checking history, making concurrent exact audit calls idempotent while differing payloads fail closed.
+
+Unfinalized discovery no longer treats arbitrary same-source history as resolution: only history linked to the exact intent is resolved; incompatible history raises a visible integrity error. Atomic exhaustion prevalidates all history links before writing any audit.
+
+### Database state enforcement
+
+Migration `0008` remains the highest migration. Its revision validator now locks the absence row. Replacement checks use explicit `IS NULL`/`IS NOT NULL` predicates, exclude `permanent_failure` from completed state, and require a nonblank error for permanent state. INSERT and UPDATE triggers enforce the discriminated state/outcome rules while allowing repository-controlled pending-to-completed/permanent transitions. No `0009` is introduced; Task 14 still updates evidence only through `0008`.
+
+### Verification and concerns
+
+Fresh evidence for this round includes 96/96 focused worker/application tests, 47/47 availability/jobs/schema PostgreSQL tests, 25/25 runtime crash/continuation and composition tests, a clean full build/type check, and `git diff --check`. The full PostgreSQL root run initially exposed four mapping/regression failures; those were corrected by preserving full scope in runtime record adapters, clearing persistence from finalizer-only recovery phases, and retaining the original malformed-payload error. The final full root rerun is recorded with the commit evidence below.
+
+The storage cleanup concern is unchanged: mutation intents and linked history remain conservatively retained until a later design proves no activation, exhaustion, or finalizer path can reference them.
+
+The final mutation-sensitive evidence adds four controlled PostgreSQL cases (4/4): two concurrent exact audit callers serialize and return one history/event while a differing retry conflicts; terminal-history-first blocks preparation and leaves no hidden intent; intent-insert-first blocks revision then preserves the historical revision, while revision-first blocks and rejects the stale insert; and a mixed stale-maintenance batch commits the valid job's audit/failure while a well-shaped source-invalid UUID job fails without mutating unrelated history. These cases raise the availability database file to 39 tests and explicitly cover the concurrency and batch-isolation findings. The final disposable-PostgreSQL root rerun passed 71 files and 763 tests.
+
+Fix-round commit subject: `fix: atomically exhaust availability recovery`.

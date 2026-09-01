@@ -138,7 +138,13 @@ async function assertReplacementMatchesRecovery(
   const record = await services.availability.loadReplacement(recovery.replacementId);
   if (
     record === null
+    || record.workspaceId !== recovery.job.workspaceId
+    || record.provider !== recovery.provider
+    || record.providerConnectionId !== recovery.job.providerConnectionId
+    || record.absenceId !== recovery.job.absenceId
+    || record.absenceRevision !== recovery.job.absenceRevision
     || record.decisionId !== recovery.finalizer?.decisionId
+    || record.unavailableActorId !== recovery.unavailableActorId
     || record.outcome !== recovery.outcome
     || record.replacementActorId !== recovery.replacementActorId
     || record.mutationIntentId !== recovery.mutationIntentId

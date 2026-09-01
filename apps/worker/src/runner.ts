@@ -94,6 +94,7 @@ export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> 
     } else if (job.kind === "activate_reviewer_absence") {
       const message = parseReviewerAbsenceActivationJobPayload(job);
       reviewerReplacementRecovery = parseReviewerReplacementFinalizerRecovery(job.payload, message);
+      const boundedRecoveryClaim = reviewerReplacementRecovery !== null;
       if (!input.processReviewerAbsenceActivationJob || !input.buildReviewerAvailabilityServices) {
         throw new PermanentJobError("reviewer absence activation processor is not configured");
       }
@@ -110,29 +111,23 @@ export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> 
           reviewerAvailabilityServices,
         );
         if (nextRecovery === null) {
+          reviewerReplacementRecovery = null;
           nextRecovery = await input.processReviewerAbsenceActivationJob(message, reviewerAvailabilityServices);
         }
       }
       if (nextRecovery !== null) {
         const exhausted = !nextRecovery.retryable
-          || (reviewerReplacementRecovery !== null && lease.attemptCount >= lease.maxAttempts);
+          || (boundedRecoveryClaim && lease.attemptCount >= lease.maxAttempts);
         if (exhausted) {
-          if (input.markReviewerReplacementRecoveryExhausted) {
-            await input.markReviewerReplacementRecoveryExhausted(
-              nextRecovery,
-              reviewerAvailabilityServices,
-              nextRecovery.lastError,
-            );
-          }
           assertLeaseUpdated(
-            await claimedQueue().markFailed(lease, nextRecovery.lastError, new Date(), { retryable: false }),
+            await claimedQueue().exhaustReviewerAbsenceActivation(lease, nextRecovery.lastError, new Date()),
             lease,
           );
           return true;
         }
-        const maxAttempts = reviewerReplacementRecovery === null
-          ? lease.attemptCount + REVIEWER_REPLACEMENT_RECOVERY_ATTEMPTS
-          : lease.maxAttempts;
+        const maxAttempts = boundedRecoveryClaim
+          ? lease.maxAttempts
+          : lease.attemptCount + REVIEWER_REPLACEMENT_RECOVERY_ATTEMPTS;
         assertLeaseUpdated(
           await claimedQueue().markFailed(lease, nextRecovery.lastError, new Date(), {
             retryable: true,
@@ -178,17 +173,12 @@ export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> 
       );
       return true;
     }
-    if (
-      reviewerReplacementRecovery !== null
-      && reviewerAvailabilityServices !== null
-      && (!retryable || lease.attemptCount >= lease.maxAttempts)
-      && input.markReviewerReplacementRecoveryExhausted
-    ) {
-      await input.markReviewerReplacementRecoveryExhausted(
-        reviewerReplacementRecovery,
-        reviewerAvailabilityServices,
-        classified.message,
+    if (job.kind === "activate_reviewer_absence" && (!retryable || lease.attemptCount >= lease.maxAttempts)) {
+      assertLeaseUpdated(
+        await claimedQueue().exhaustReviewerAbsenceActivation(lease, classified.message, new Date()),
+        lease,
       );
+      return true;
     }
     assertLeaseUpdated(
       await claimedQueue().markFailed(lease, classified.message, new Date(), {
@@ -325,6 +315,7 @@ function parseReviewerReplacementFinalizerRecovery(
     assertReviewerReplacementFinalizerRecovery(value);
     if (
       value.job.workspaceId !== message.workspaceId
+      || value.provider !== message.provider
       || value.job.providerConnectionId !== message.providerConnectionId
       || value.job.absenceId !== message.absenceId
       || value.job.absenceRevision !== message.absenceRevision

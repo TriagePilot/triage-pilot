@@ -11,6 +11,7 @@ import {
   type ConfigurationSource,
   type CredentialProvider,
   type PlatformEventSink,
+  type ProviderKind,
   type HumanReviewPolicyJobPayload,
   type RepositoryRef,
   type ScoreComponent,
@@ -1077,7 +1078,13 @@ function toApplicationMutationIntent(intent: {
 
 function toApplicationFinalizerRecord(record: {
   id: string;
+  workspaceId: string;
+  provider: ProviderKind;
+  providerConnectionId: string;
+  absenceId: string;
+  absenceRevision: number;
   decisionId: string;
+  unavailableActorId: string;
   state: string;
   outcome: string;
   replacementActorId: string | null;
@@ -1085,7 +1092,13 @@ function toApplicationFinalizerRecord(record: {
 }): ReviewerReplacementFinalizerRecord {
   const value: unknown = {
     id: record.id,
+    workspaceId: record.workspaceId,
+    provider: record.provider,
+    providerConnectionId: record.providerConnectionId,
+    absenceId: record.absenceId,
+    absenceRevision: record.absenceRevision,
     decisionId: record.decisionId,
+    unavailableActorId: record.unavailableActorId,
     state: record.state,
     outcome: record.outcome,
     replacementActorId: record.replacementActorId,
@@ -1099,7 +1112,13 @@ function toApplicationFinalizerRecord(record: {
 
 function toApplicationRecoveryRecord(record: {
   id: string;
+  workspaceId: string;
+  provider: ProviderKind;
+  providerConnectionId: string;
+  absenceId: string;
+  absenceRevision: number;
   decisionId: string;
+  unavailableActorId: string;
   state: string;
   outcome: string;
   replacementActorId: string | null;
@@ -1108,7 +1127,13 @@ function toApplicationRecoveryRecord(record: {
 }): ReviewerReplacementRecoveryRecord {
   const value: unknown = {
     id: record.id,
+    workspaceId: record.workspaceId,
+    provider: record.provider,
+    providerConnectionId: record.providerConnectionId,
+    absenceId: record.absenceId,
+    absenceRevision: record.absenceRevision,
     decisionId: record.decisionId,
+    unavailableActorId: record.unavailableActorId,
     state: record.state,
     outcome: record.outcome,
     replacementActorId: record.replacementActorId,

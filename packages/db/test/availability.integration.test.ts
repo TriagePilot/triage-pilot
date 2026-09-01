@@ -8,6 +8,8 @@ import {
   ReviewerAbsenceRevisionError,
   ReviewerAvailabilityValidationError,
   createWorkspaceReviewerAvailability,
+  createJobClaimer,
+  createWorkspaceJobQueue,
   persistDecision,
   recoverStaleJobs,
 } from "../src";
@@ -20,6 +22,46 @@ const alternateReplacementActor = "Actor:Alternate/73";
 const changeRequestId = "change:Request/A17";
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer availability", () => {
+  it("atomically audits ordinary-scope intents and fails only the exact claimed lease", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "availability-ordinary-exhaustion");
+      const claimer = createJobClaimer(db);
+      const queue = createWorkspaceJobQueue(db, fixture.scope.workspaceId);
+      const claimed = await claimer.claimNext("worker-exact", now);
+      expect(claimed).not.toBeNull();
+      const lease = {
+        jobId: claimed!.id,
+        workspaceId: claimed!.workspaceId,
+        provider: claimed!.provider,
+        providerConnectionId: claimed!.providerConnectionId,
+        lockedBy: claimed!.lockedBy!,
+        attemptCount: claimed!.attemptCount,
+        maxAttempts: claimed!.maxAttempts,
+      };
+
+      await expect(queue.exhaustReviewerAbsenceActivation(
+        { ...lease, lockedBy: "stale-worker" }, "provider state unknown", now,
+      )).resolves.toEqual({ updated: false, reason: "stale_lease" });
+      await expect(db.selectFrom("reviewer_replacements").select("id").execute()).resolves.toEqual([]);
+
+      await expect(queue.exhaustReviewerAbsenceActivation(lease, "provider state unknown", now))
+        .resolves.toEqual({ updated: true });
+      await expect(db.selectFrom("reviewer_replacements")
+        .select(["outcome", "state", "last_error", "mutation_intent_id"])
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+          outcome: "permanent_failure",
+          state: "permanent_failure",
+          last_error: "provider state unknown",
+          mutation_intent_id: fixture.mutationIntentId,
+        });
+      await expect(db.selectFrom("jobs").select(["status", "last_error"])
+        .where("id", "=", claimed!.id).executeTakeFirstOrThrow()).resolves.toEqual({
+          status: "failed",
+          last_error: "provider state unknown",
+        });
+    });
+  });
+
   it("atomically creates or loads one immutable reviewer mutation intent", async () => {
     await withPostgresTestDatabase(async (db) => {
       const fixture = await seedReplacementFixture(db, "availability-mutation-intent");
@@ -227,6 +269,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer avail
       const recovery = {
         kind: "reviewer_replacement_finalizer",
         phase: "run_finalizer",
+        provider: fixture.scope.provider,
+        unavailableActorId: unavailableActor,
         job: {
           kind: "activate_reviewer_absence",
           workspaceId: fixture.scope.workspaceId,
@@ -298,6 +342,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer avail
           reviewerReplacementFinalizerRecovery: {
             kind: "reviewer_replacement_finalizer",
             phase: "persist_replacement",
+            provider: fixture.scope.provider,
+            unavailableActorId: unavailableActor,
             job: {
               kind: "activate_reviewer_absence",
               workspaceId: fixture.scope.workspaceId,
@@ -357,6 +403,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer avail
           reviewerReplacementFinalizerRecovery: {
             kind: "reviewer_replacement_finalizer",
             phase: "run_finalizer",
+            provider: fixture.scope.provider,
+            unavailableActorId: unavailableActor,
             job: {
               kind: "activate_reviewer_absence",
               workspaceId: fixture.scope.workspaceId,
@@ -388,6 +436,58 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer avail
       await expect(db.selectFrom("jobs").select("status")
         .where("workspace_id", "=", fixture.scope.workspaceId).where("kind", "=", "activate_reviewer_absence")
         .executeTakeFirstOrThrow()).resolves.toEqual({ status: "failed" });
+    });
+  });
+
+  it("isolates a source-invalid stale recovery while a valid exhausted job still commits", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "availability-stale-batch-isolation");
+      const replacement = (await fixture.availability.persistReplacement(replacementInput(fixture))).replacement!;
+      const recovery = {
+        kind: "reviewer_replacement_finalizer", phase: "run_finalizer",
+        provider: fixture.scope.provider, unavailableActorId: unavailableActor,
+        job: { kind: "activate_reviewer_absence", workspaceId: fixture.scope.workspaceId,
+          providerConnectionId: fixture.scope.providerConnectionId, absenceId: fixture.absence.id,
+          absenceRevision: fixture.absence.revision },
+        finalizer: { action: "reevaluate_policy", decisionId: fixture.decisionId, summary: null },
+        replacementId: replacement.id, outcome: "replaced", replacementActorId: replacementActor,
+        mutationIntentId: fixture.mutationIntentId, providerEffectsApplied: true,
+        persistence: null, retryable: true, lastError: "finalizer unavailable",
+      };
+      const queue = createWorkspaceJobQueue(db, fixture.scope.workspaceId);
+      const bad = await queue.enqueue({
+        provider: fixture.scope.provider, providerConnectionId: fixture.scope.providerConnectionId,
+        kind: "activate_reviewer_absence", idempotencyKey: "availability:bad-stale-source",
+        payload: {
+          ...recovery.job,
+          reviewerReplacementFinalizerRecovery: {
+            ...recovery,
+            replacementId: "00000000-0000-4000-8000-00000000dead",
+          },
+        },
+      });
+      const lockedAt = new Date("2026-09-01T10:00:00.000Z");
+      await db.updateTable("jobs").set({ status: "running", attempt_count: 4, max_attempts: 4,
+        locked_at: lockedAt, locked_by: "dead-worker" })
+        .where("workspace_id", "=", fixture.scope.workspaceId).execute();
+      await db.updateTable("jobs").set({ payload: {
+        ...recovery.job, reviewerReplacementFinalizerRecovery: recovery,
+      }}).where("workspace_id", "=", fixture.scope.workspaceId)
+        .where("id", "!=", bad.jobId).execute();
+
+      await recoverStaleJobs(db, fixture.scope.workspaceId, new Date("2026-09-01T10:16:00.000Z"));
+
+      await expect(db.selectFrom("jobs").select("status")
+        .where("workspace_id", "=", fixture.scope.workspaceId).execute()).resolves.toEqual([
+          { status: "failed" }, { status: "failed" },
+        ]);
+      await expect(db.selectFrom("jobs").select("last_error").where("id", "=", bad.jobId)
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+          last_error: "job lease expired after maximum attempts: reviewer activation recovery source is invalid",
+        });
+      await expect(db.selectFrom("reviewer_replacements").select(["id", "state", "last_error"]).execute())
+        .resolves.toEqual([{ id: replacement.id, state: "permanent_failure",
+          last_error: "job lease expired after maximum attempts" }]);
     });
   });
 
@@ -822,6 +922,125 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer avail
       });
     },
   );
+
+  it("serializes concurrent permanent audits and fails closed on a differing retry", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "availability-concurrent-audit");
+      const audit = mutationIntentRecoveryInput(fixture, now, "provider state is unknown");
+      const [first, second] = await Promise.all([
+        fixture.availability.persistMutationIntentRecovery(audit),
+        fixture.availability.persistMutationIntentRecovery(audit),
+      ]);
+      expect([first.inserted, second.inserted].sort()).toEqual([false, true]);
+      expect(first.replacement!.id).toBe(second.replacement!.id);
+      await expect(db.selectFrom("reviewer_replacements").select("id").execute()).resolves.toHaveLength(1);
+      await expect(db.selectFrom("decision_outbox").select("id").execute()).resolves.toHaveLength(1);
+
+      await expect(fixture.availability.persistMutationIntentRecovery({
+        ...audit,
+        reason: "different terminal reason",
+        lastError: "different terminal reason",
+      })).rejects.toThrow(/conflicts/i);
+      await expect(db.selectFrom("reviewer_replacements").select("id").execute()).resolves.toHaveLength(1);
+    });
+  });
+
+  it("serializes prepare behind terminal history and never creates a hidden intent", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "availability-terminal-before-prepare");
+      const intent = await db.selectFrom("reviewer_mutation_intents").selectAll().executeTakeFirstOrThrow();
+      await db.deleteFrom("reviewer_mutation_intents").where("id", "=", intent.id).execute();
+      let signalLocked!: (id: string) => void;
+      let releaseLock!: () => void;
+      const locked = new Promise<string>((resolve) => { signalLocked = resolve; });
+      const release = new Promise<void>((resolve) => { releaseLock = resolve; });
+      const terminal = db.transaction().execute(async (trx) => {
+        const transaction = await sql<{ id: string }>`select txid_current()::text as id`.execute(trx);
+        await trx.selectFrom("reviewer_absences").select("id")
+          .where("id", "=", fixture.absence.id).forUpdate().executeTakeFirstOrThrow();
+        const input = nonMutatingReplacementInput(fixture, "skipped_closed");
+        await trx.insertInto("reviewer_replacements").values({
+          workspace_id: fixture.scope.workspaceId, provider: input.provider,
+          provider_connection_id: input.providerConnectionId, absence_id: input.absenceId,
+          absence_revision: input.absenceRevision, decision_id: input.decisionId,
+          unavailable_actor_id: input.unavailableActorId, replacement_actor_id: null,
+          mutation_intent_id: null, outcome: "skipped_closed", reason: input.reason,
+          state: "completed", last_error: null, started_at: now, completed_at: now,
+        }).execute();
+        signalLocked(transaction.rows[0]!.id);
+        await release;
+      });
+      const transactionId = await locked;
+      const prepare = fixture.availability.prepareMutationIntent({
+        workspaceId: fixture.scope.workspaceId, provider: fixture.scope.provider,
+        providerConnectionId: fixture.scope.providerConnectionId, absenceId: fixture.absence.id,
+        absenceRevision: fixture.absence.revision, decisionId: fixture.decisionId,
+        repositoryId: fixture.externalRepositoryId, changeRequestId,
+        expectedHeadRevision: "head-1", unavailableActorId: unavailableActor,
+        replacementActorId: replacementActor,
+      });
+      expect(await waitForBlockedDatabaseLock(db, transactionId)).toBe(true);
+      releaseLock();
+      await terminal;
+      await expect(prepare).rejects.toThrow(/already terminal/i);
+      await expect(db.selectFrom("reviewer_mutation_intents").select("id").execute()).resolves.toEqual([]);
+    });
+  });
+
+  it("serializes both mutation-intent insert and absence-revision orderings", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const insertFirst = await seedReplacementFixture(db, "availability-insert-before-revise");
+      const row = await db.selectFrom("reviewer_mutation_intents").selectAll()
+        .where("id", "=", insertFirst.mutationIntentId).executeTakeFirstOrThrow();
+      await db.deleteFrom("reviewer_mutation_intents").where("id", "=", row.id).execute();
+      let signalInserted!: (id: string) => void;
+      let releaseInsert!: () => void;
+      const inserted = new Promise<string>((resolve) => { signalInserted = resolve; });
+      const release = new Promise<void>((resolve) => { releaseInsert = resolve; });
+      const insertion = db.transaction().execute(async (trx) => {
+        const transaction = await sql<{ id: string }>`select txid_current()::text as id`.execute(trx);
+        await trx.insertInto("reviewer_mutation_intents").values(row).execute();
+        signalInserted(transaction.rows[0]!.id);
+        await release;
+      });
+      const insertTx = await inserted;
+      const revise = insertFirst.availability.reviseAbsence({
+        provider: insertFirst.scope.provider, providerConnectionId: insertFirst.scope.providerConnectionId,
+        absenceId: insertFirst.absence.id, expectedRevision: 1, externalActorId: unavailableActor,
+        startAt: insertFirst.absence.startAt, endAt: new Date("2026-09-03T12:00:00.000Z"), now,
+      });
+      expect(await waitForBlockedDatabaseLock(db, insertTx)).toBe(true);
+      releaseInsert();
+      await insertion;
+      await expect(revise).resolves.toMatchObject({ revision: 2 });
+      await expect(db.selectFrom("reviewer_mutation_intents").select("absence_revision")
+        .where("id", "=", row.id).executeTakeFirstOrThrow()).resolves.toEqual({ absence_revision: 1 });
+
+      const reviseFirst = await seedReplacementFixture(db, "availability-revise-before-insert");
+      const stale = await db.selectFrom("reviewer_mutation_intents").selectAll()
+        .where("id", "=", reviseFirst.mutationIntentId).executeTakeFirstOrThrow();
+      await db.deleteFrom("reviewer_mutation_intents").where("id", "=", stale.id).execute();
+      let signalRevised!: (id: string) => void;
+      let releaseRevision!: () => void;
+      const revised = new Promise<string>((resolve) => { signalRevised = resolve; });
+      const releaseRevise = new Promise<void>((resolve) => { releaseRevision = resolve; });
+      const revision = db.transaction().execute(async (trx) => {
+        const transaction = await sql<{ id: string }>`select txid_current()::text as id`.execute(trx);
+        await trx.updateTable("reviewer_absences").set({ revision: 2, updated_at: now })
+          .where("id", "=", reviseFirst.absence.id).executeTakeFirstOrThrow();
+        signalRevised(transaction.rows[0]!.id);
+        await releaseRevise;
+      });
+      const revisionTx = await revised;
+      const staleInsert = db.insertInto("reviewer_mutation_intents").values(stale).execute();
+      expect(await waitForBlockedDatabaseLock(db, revisionTx)).toBe(true);
+      releaseRevision();
+      await revision;
+      await expect(staleInsert).rejects.toThrow(/revision/i);
+      await expect(db.selectFrom("reviewer_mutation_intents").select("id")
+        .where("id", "=", stale.id).execute()).resolves.toEqual([]);
+    });
+  });
 
   it.each(["revise", "cancel", "suspend"] as const)(
     "keeps revision-specific pending finalizers recoverable after absence %s",

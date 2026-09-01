@@ -413,20 +413,26 @@ export function createWorkspaceReviewerAvailability(
         .where("workspace_id", "=", workspaceId)
         .where("absence_id", "=", input.absenceId)
         .where("absence_revision", "=", input.absenceRevision)
-        .where(({ not, exists, selectFrom }) => not(exists(
-          selectFrom("reviewer_replacements")
-            .select("reviewer_replacements.id")
-            .whereRef("reviewer_replacements.workspace_id", "=", "reviewer_mutation_intents.workspace_id")
-            .whereRef("reviewer_replacements.provider", "=", "reviewer_mutation_intents.provider")
-            .whereRef("reviewer_replacements.provider_connection_id", "=", "reviewer_mutation_intents.provider_connection_id")
-            .whereRef("reviewer_replacements.absence_id", "=", "reviewer_mutation_intents.absence_id")
-            .whereRef("reviewer_replacements.absence_revision", "=", "reviewer_mutation_intents.absence_revision")
-            .whereRef("reviewer_replacements.decision_id", "=", "reviewer_mutation_intents.decision_id"),
-        )))
         .orderBy("created_at", "asc")
         .orderBy("id", "asc")
         .execute();
-      return rows.map(toMutationIntent);
+      const unfinalized: ReviewerMutationIntent[] = [];
+      for (const row of rows) {
+        const history = await db.selectFrom("reviewer_replacements")
+          .select("mutation_intent_id")
+          .where("workspace_id", "=", workspaceId)
+          .where("provider", "=", row.provider)
+          .where("provider_connection_id", "=", row.provider_connection_id)
+          .where("absence_id", "=", row.absence_id)
+          .where("absence_revision", "=", row.absence_revision)
+          .where("decision_id", "=", row.decision_id)
+          .executeTakeFirst();
+        if (history === undefined) unfinalized.push(toMutationIntent(row));
+        else if (history.mutation_intent_id !== row.id) {
+          throw new ReviewerAvailabilityValidationError("Replacement history conflicts with reviewer mutation intent provenance");
+        }
+      }
+      return unfinalized;
     },
 
     async prepareMutationIntent(input) {
@@ -479,6 +485,27 @@ export function createWorkspaceReviewerAvailability(
           || !original.eligibleActors.includes(input.replacementActorId)
           || input.replacementActorId === input.unavailableActorId
         ) throw new ReviewerAvailabilityValidationError("Reviewer mutation intent source is not current");
+
+        const terminalHistory = await trx.selectFrom("reviewer_replacements")
+          .select(["id", "mutation_intent_id"])
+          .where("workspace_id", "=", workspaceId)
+          .where("provider", "=", input.provider)
+          .where("provider_connection_id", "=", input.providerConnectionId)
+          .where("absence_id", "=", input.absenceId)
+          .where("absence_revision", "=", input.absenceRevision)
+          .where("decision_id", "=", input.decisionId)
+          .forUpdate()
+          .executeTakeFirst();
+        if (terminalHistory !== undefined) {
+          if (terminalHistory.mutation_intent_id !== null) {
+            const durable = await mutationIntentQuery(trx, workspaceId, input).executeTakeFirst();
+            if (durable !== undefined && durable.id === terminalHistory.mutation_intent_id) {
+              assertMutationIntentMatches(durable, input);
+              return toMutationIntent(durable);
+            }
+          }
+          throw new ReviewerAvailabilityValidationError("Reviewer replacement history is already terminal for this source");
+        }
 
         const inserted = await trx
           .insertInto("reviewer_mutation_intents")
@@ -782,6 +809,17 @@ export async function persistMutationIntentRecoveryTransaction(
     || input.replacementActorId !== null
     || input.replaceCohort
   ) throw new ReviewerAvailabilityValidationError("Mutation intent recovery audit is malformed");
+  const absence = await trx.selectFrom("reviewer_absences")
+    .select(["id"])
+    .where("workspace_id", "=", workspaceId)
+    .where("provider", "=", input.provider)
+    .where("provider_connection_id", "=", input.providerConnectionId)
+    .where("id", "=", input.absenceId)
+    .forUpdate()
+    .executeTakeFirst();
+  if (absence === undefined) {
+    throw new ReviewerAvailabilityValidationError("Mutation intent recovery absence source is unavailable");
+  }
   const existing = await trx.selectFrom("reviewer_replacements")
     .selectAll()
     .where("workspace_id", "=", workspaceId)
@@ -799,17 +837,6 @@ export async function persistMutationIntentRecoveryTransaction(
     return { inserted: false, activationCurrent: true, replacement: toReplacement(existing) };
   }
 
-  const absence = await trx.selectFrom("reviewer_absences")
-    .select(["id"])
-    .where("workspace_id", "=", workspaceId)
-    .where("provider", "=", input.provider)
-    .where("provider_connection_id", "=", input.providerConnectionId)
-    .where("id", "=", input.absenceId)
-    .forUpdate()
-    .executeTakeFirst();
-  if (absence === undefined) {
-    throw new ReviewerAvailabilityValidationError("Mutation intent recovery absence source is unavailable");
-  }
   await assertReplacementMutationIntent(trx, workspaceId, input);
   const inserted = await trx.insertInto("reviewer_replacements").values({
     workspace_id: workspaceId,

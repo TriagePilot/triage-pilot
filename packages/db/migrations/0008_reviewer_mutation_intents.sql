@@ -52,7 +52,8 @@ begin
   where workspace_id = new.workspace_id
     and provider = new.provider
     and provider_connection_id = new.provider_connection_id
-    and id = new.absence_id;
+    and id = new.absence_id
+  for update;
   if current_revision is null or current_revision <> new.absence_revision then
     raise exception 'reviewer mutation intent absence revision is not current';
   end if;
@@ -95,15 +96,16 @@ alter table reviewer_replacements
     (state = 'finalizer_pending'
       and outcome in ('replaced', 'skipped_policy_satisfied', 'no_replacement_available')
       and last_error is null)
-    or (state = 'completed' and last_error is null)
-    or (state = 'permanent_failure' and length(btrim(last_error)) > 0)
+    or (state = 'completed' and outcome <> 'permanent_failure' and last_error is null)
+    or (state = 'permanent_failure'
+      and last_error is not null and length(btrim(last_error)) > 0)
   ) not valid;
 
 create function validate_reviewer_replacement_insert() returns trigger
 language plpgsql as $$
 begin
   if new.outcome = 'permanent_failure' then
-    if new.state <> 'permanent_failure' or length(btrim(new.last_error)) = 0 then
+    if new.state <> 'permanent_failure' or new.last_error is null or length(btrim(new.last_error)) = 0 then
       raise exception 'permanent reviewer failure requires permanent_failure state and error';
     end if;
   elsif new.outcome in ('replaced', 'skipped_policy_satisfied', 'no_replacement_available') then
@@ -120,3 +122,30 @@ $$;
 create trigger reviewer_replacements_validate_insert
 before insert on reviewer_replacements
 for each row execute function validate_reviewer_replacement_insert();
+
+create function validate_reviewer_replacement_update() returns trigger
+language plpgsql as $$
+begin
+  if new.state = 'finalizer_pending' then
+    if new.outcome not in ('replaced', 'skipped_policy_satisfied', 'no_replacement_available')
+      or new.last_error is not null then
+      raise exception 'pending reviewer replacement state is malformed';
+    end if;
+  elsif new.state = 'completed' then
+    if new.outcome = 'permanent_failure' or new.last_error is not null then
+      raise exception 'completed reviewer replacement state is malformed';
+    end if;
+  elsif new.state = 'permanent_failure' then
+    if new.last_error is null or length(btrim(new.last_error)) = 0 then
+      raise exception 'permanent reviewer replacement state requires an error';
+    end if;
+  else
+    raise exception 'reviewer replacement state is malformed';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger reviewer_replacements_validate_update
+before update on reviewer_replacements
+for each row execute function validate_reviewer_replacement_update();

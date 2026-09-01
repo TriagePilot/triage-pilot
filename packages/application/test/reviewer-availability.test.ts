@@ -54,6 +54,14 @@ const activation: ReviewerAbsenceActivation = {
   endAt: new Date("2026-09-01T17:00:00.000Z"),
   candidates: [candidate],
 };
+const replacementScope = {
+  workspaceId: job.workspaceId,
+  provider: "github" as const,
+  providerConnectionId: job.providerConnectionId,
+  absenceId: job.absenceId,
+  absenceRevision: job.absenceRevision,
+  unavailableActorId: activation.externalActorId,
+};
 
 const providerState: ReviewerReplacementProviderState = {
   state: "open",
@@ -170,6 +178,7 @@ describe("activateReviewerAbsence", () => {
       availability: {
         listPendingFinalizers: vi.fn(async () => [{
           id: "replacement-malformed",
+          ...replacementScope,
           decisionId: candidate.decisionId,
           replacementActorId: null,
           mutationIntentId: null,
@@ -225,6 +234,7 @@ describe("activateReviewerAbsence", () => {
   ] as const)("rejects malformed recovery record state %s/%s", (outcome, state, lastError) => {
     expect(() => assertReviewerReplacementRecoveryRecord({
       id: "replacement-1",
+      ...replacementScope,
       decisionId: "decision-1",
       state,
       outcome,
@@ -237,6 +247,7 @@ describe("activateReviewerAbsence", () => {
   it("accepts a completed exact replacement for post-commit recovery", () => {
     expect(() => assertReviewerReplacementRecoveryRecord({
       id: "replacement-1",
+      ...replacementScope,
       decisionId: "decision-1",
       state: "completed",
       outcome: "replaced",
@@ -1411,6 +1422,7 @@ describe("activateReviewerAbsence", () => {
       availability: {
         listPendingFinalizers: vi.fn(async () => [{
           id: "replacement-pending",
+          ...replacementScope,
           decisionId: candidate.decisionId,
           replacementActorId: preparedIntent.replacementActorId,
           mutationIntentId: preparedIntent.id,

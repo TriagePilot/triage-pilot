@@ -160,7 +160,13 @@ type ReviewerReplacementFinalizerOutcome =
 
 interface ReviewerReplacementFinalizerRecordCommon {
   id: string;
+  workspaceId: WorkspaceId;
+  provider: ProviderKind;
+  providerConnectionId: ProviderConnectionId;
+  absenceId: string;
+  absenceRevision: number;
   decisionId: string;
+  unavailableActorId: ExternalActorId;
   state: "finalizer_pending";
 }
 
@@ -174,7 +180,13 @@ export type ReviewerReplacementFinalizerRecord =
 
 export interface ReviewerReplacementRecoveryRecord {
   id: string;
+  workspaceId: WorkspaceId;
+  provider: ProviderKind;
+  providerConnectionId: ProviderConnectionId;
+  absenceId: string;
+  absenceRevision: number;
   decisionId: string;
+  unavailableActorId: ExternalActorId;
   state: ReviewerReplacementState;
   outcome: ReviewerReplacementOutcome;
   replacementActorId: ExternalActorId | null;
@@ -188,7 +200,13 @@ export function assertReviewerReplacementRecoveryRecord(
   if (
     !isRecord(value)
     || !isNonEmptyString(value.id)
+    || !isNonEmptyString(value.workspaceId)
+    || !isProviderKind(value.provider)
+    || !isNonEmptyString(value.providerConnectionId)
+    || !isNonEmptyString(value.absenceId)
+    || !isPositiveInteger(value.absenceRevision)
     || !isNonEmptyString(value.decisionId)
+    || !isNonEmptyString(value.unavailableActorId)
     || !isReviewerReplacementState(value.state)
   ) throw new ReviewerReplacementContractError("Reviewer replacement recovery record is malformed");
   const record = value;
@@ -220,6 +238,8 @@ export type ReviewerReplacementFinalizerAction = {
 interface ReviewerReplacementFinalizerRecoveryCommon {
   kind: "reviewer_replacement_finalizer";
   job: ReviewerAbsenceActivationJobPayload;
+  provider: ProviderKind;
+  unavailableActorId: ExternalActorId;
   lastError: string;
   retryable: boolean;
 }
@@ -425,7 +445,13 @@ export function assertReviewerReplacementFinalizerRecord(
   if (
     !isRecord(value)
     || !isNonEmptyString(value.id)
+    || !isNonEmptyString(value.workspaceId)
+    || !isProviderKind(value.provider)
+    || !isNonEmptyString(value.providerConnectionId)
+    || !isNonEmptyString(value.absenceId)
+    || !isPositiveInteger(value.absenceRevision)
     || !isNonEmptyString(value.decisionId)
+    || !isNonEmptyString(value.unavailableActorId)
     || value.state !== "finalizer_pending"
   ) {
     throw new ReviewerReplacementContractError("Pending reviewer replacement finalizer is malformed");
@@ -522,6 +548,8 @@ export function assertReviewerReplacementFinalizerRecovery(
     || !isNonEmptyString(value.job.providerConnectionId)
     || !isNonEmptyString(value.job.absenceId)
     || !isPositiveInteger(value.job.absenceRevision)
+    || !isProviderKind(value.provider)
+    || !isNonEmptyString(value.unavailableActorId)
   ) {
     throw new ReviewerReplacementContractError("Reviewer replacement recovery is malformed");
   }
@@ -581,6 +609,8 @@ export function assertReviewerReplacementFinalizerRecovery(
     assertPersistReviewerReplacementInput(record.persistence);
     if (
       record.persistence.outcome !== value.outcome
+      || record.persistence.provider !== record.provider
+      || record.persistence.unavailableActorId !== record.unavailableActorId
       || record.persistence.replacementActorId !== value.replacementActorId
       || record.persistence.mutationIntentId !== value.mutationIntentId
     ) {
@@ -1549,17 +1579,22 @@ function recovery(
   const replacementActorId = "replacementActor" in source
     ? source.replacementActor
     : source.replacementActorId;
+  const provider = persistence?.provider ?? ("provider" in source ? source.provider : undefined);
+  const unavailableActorId = persistence?.unavailableActorId
+    ?? ("unavailableActorId" in source ? source.unavailableActorId : undefined);
   const value: unknown = {
     kind: "reviewer_replacement_finalizer",
     phase,
     job,
+    provider,
+    unavailableActorId,
     finalizer,
     replacementId,
     outcome: source.outcome,
     replacementActorId,
     mutationIntentId: source.mutationIntentId,
     providerEffectsApplied,
-    persistence,
+    persistence: phase === "persist_replacement" ? persistence : null,
     lastError,
     retryable,
   };
