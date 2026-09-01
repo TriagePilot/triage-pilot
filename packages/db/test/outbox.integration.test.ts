@@ -1,7 +1,9 @@
 import type {
   DecisionEventV1,
   PlatformEventSink,
+  ProviderKind,
   ReviewerReplacementEventV1,
+  ReviewerReplacementOutcome,
   WorkspaceId,
 } from "@triagepilot/contracts";
 import { describe, expect, it, vi } from "vitest";
@@ -67,8 +69,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
       const source = await seedReviewerReplacement(db, workspaceId, persisted.decisionId);
       const event = replacementEvent({
         workspaceId,
-        decisionId: persisted.decisionId,
-        providerConnectionId: source.providerConnectionId,
+        ...source,
       });
 
       await expect(stagePlatformEvent(
@@ -91,6 +92,78 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
     });
   });
 
+  it("rejects reviewer replacement events that do not match their persisted source", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const repositoryId = await seedRepository(db, workspaceId, "101");
+      const persisted = await persistDecisionWithEvent(db, workspaceId, {
+        decision: decisionInput(repositoryId, "delivery-1"),
+        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+      });
+      const source = await seedReviewerReplacement(db, workspaceId, persisted.decisionId);
+      const event = replacementEvent({ workspaceId, ...source });
+      const mismatches: Array<[string, Partial<ReviewerReplacementEventV1>]> = [
+        ["provider", { provider: "gitlab" }],
+        ["provider-connection", { providerConnectionId: "different-provider-connection" }],
+        ["absence", { absenceId: "different-absence" }],
+        ["absence-revision", { absenceRevision: source.absenceRevision + 1 }],
+        ["decision", { decisionId: "different-decision" }],
+        ["unavailable-actor", { unavailableActor: "@user-a907d2" }],
+        ["replacement-actor", { replacementActor: null }],
+        ["outcome", { outcome: "permanent_failure" }],
+      ];
+
+      for (const [name, mismatch] of mismatches) {
+        await expect(stagePlatformEvent(db, workspaceId, source.replacementId, {
+          ...event,
+          ...mismatch,
+          eventId: `${event.eventId}:${name}`,
+        })).rejects.toThrow("reviewer replacement event does not match persisted source");
+      }
+
+      await expect(db.selectFrom("decision_outbox")
+        .select("id")
+        .where("event_type", "=", "reviewer_replacement")
+        .execute()).resolves.toHaveLength(0);
+    });
+  });
+
+  it("rejects event-id reuse with a different replacement source or payload", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const repositoryId = await seedRepository(db, workspaceId, "101");
+      const firstDecision = await persistDecisionWithEvent(db, workspaceId, {
+        decision: decisionInput(repositoryId, "delivery-1"),
+        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+      });
+      const secondDecision = await persistDecisionWithEvent(db, workspaceId, {
+        decision: decisionInput(repositoryId, "delivery-2"),
+        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+      });
+      const firstSource = await seedReviewerReplacement(db, workspaceId, firstDecision.decisionId, "first");
+      const secondSource = await seedReviewerReplacement(db, workspaceId, secondDecision.decisionId, "second");
+      const firstEvent = replacementEvent({ workspaceId, ...firstSource });
+
+      await stagePlatformEvent(db, workspaceId, firstSource.replacementId, firstEvent);
+      await expect(stagePlatformEvent(db, workspaceId, secondSource.replacementId, {
+        ...replacementEvent({ workspaceId, ...secondSource }),
+        eventId: firstEvent.eventId,
+      })).rejects.toThrow("platform event id conflicts with a different persisted event");
+      await expect(stagePlatformEvent(db, workspaceId, firstSource.replacementId, {
+        ...firstEvent,
+        repositoryId: "different-repository",
+      })).rejects.toThrow("platform event id conflicts with a different persisted event");
+
+      await expect(db.selectFrom("decision_outbox")
+        .select(["reviewer_replacement_id", "payload"])
+        .where("event_type", "=", "reviewer_replacement")
+        .execute()).resolves.toEqual([{
+        reviewer_replacement_id: firstSource.replacementId,
+        payload: firstEvent,
+      }]);
+    });
+  });
+
   it("requires exactly one event source and workspace-unique event ids", async () => {
     await withPostgresTestDatabase(async (db) => {
       const workspaceId = await ensureLocalWorkspace(db);
@@ -106,8 +179,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
         schema_version: 1,
         payload: replacementEvent({
           workspaceId,
-          decisionId: persisted.decisionId,
-          providerConnectionId: source.providerConnectionId,
+          ...source,
         }),
         occurred_at: new Date("2026-08-26T10:00:00.000Z"),
         available_at: new Date("2026-08-26T10:00:00.000Z"),
@@ -161,12 +233,36 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
         event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
       });
       const retried = await persistDecisionWithEvent(db, workspaceId, {
-        decision: { ...decisionInput(repositoryId, "delivery-1"), riskScore: 35 },
-        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", riskScore: 35 }),
+        decision: decisionInput(repositoryId, "delivery-1"),
+        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
       });
 
       expect(retried.decisionId).toBe(first.decisionId);
       await expect(db.selectFrom("decision_outbox").select("id").execute()).resolves.toHaveLength(1);
+    });
+  });
+
+  it("rolls back a duplicate decision when its event id has a different payload", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const repositoryId = await seedRepository(db, workspaceId, "101");
+      const persisted = await persistDecisionWithEvent(db, workspaceId, {
+        decision: decisionInput(repositoryId, "delivery-1"),
+        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+      });
+
+      await expect(persistDecisionWithEvent(db, workspaceId, {
+        decision: { ...decisionInput(repositoryId, "delivery-1"), riskScore: 35 },
+        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", riskScore: 35 }),
+      })).rejects.toThrow("platform event id conflicts with a different persisted event");
+      await expect(db.selectFrom("routing_decisions")
+        .innerJoin("decision_outbox", "decision_outbox.decision_id", "routing_decisions.id")
+        .select(["routing_decisions.risk_score", "decision_outbox.payload"])
+        .where("routing_decisions.id", "=", persisted.decisionId)
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+        risk_score: 5,
+        payload: expect.objectContaining({ riskScore: 5 }),
+      });
     });
   });
 
@@ -378,25 +474,32 @@ function decisionEvent(input: {
 
 function replacementEvent(input: {
   workspaceId: WorkspaceId;
+  provider: ProviderKind;
   decisionId: string;
   providerConnectionId: string;
+  absenceId: string;
+  absenceRevision: number;
+  replacementId: string;
+  unavailableActor: string;
+  replacementActor: string | null;
+  outcome: ReviewerReplacementOutcome;
 }): ReviewerReplacementEventV1 {
   return {
     schemaVersion: 1,
     eventType: "reviewer_replacement",
-    eventId: "reviewer-replacement:absence-42:revision:3:decision-1:v1",
+    eventId: `reviewer-replacement:${input.absenceId}:revision:${input.absenceRevision}:${input.decisionId}:v1`,
     occurredAt: "2026-08-26T10:00:00.000Z",
     workspaceId: input.workspaceId,
-    provider: "github",
+    provider: input.provider,
     providerConnectionId: input.providerConnectionId,
-    absenceId: "absence-42",
-    absenceRevision: 3,
+    absenceId: input.absenceId,
+    absenceRevision: input.absenceRevision,
     decisionId: input.decisionId,
     repositoryId: "101",
     changeRequestId: "cr-7",
-    unavailableActor: "@user-f2a19c",
-    replacementActor: "@user-4c8d31",
-    outcome: "replaced",
+    unavailableActor: input.unavailableActor,
+    replacementActor: input.replacementActor,
+    outcome: input.outcome,
   };
 }
 
@@ -404,7 +507,18 @@ async function seedReviewerReplacement(
   db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0],
   workspaceId: WorkspaceId,
   decisionId: string,
-): Promise<{ providerConnectionId: string; replacementId: string }> {
+  suffix = "source",
+): Promise<{
+  provider: ProviderKind;
+  providerConnectionId: string;
+  absenceId: string;
+  absenceRevision: number;
+  decisionId: string;
+  replacementId: string;
+  unavailableActor: string;
+  replacementActor: string | null;
+  outcome: ReviewerReplacementOutcome;
+}> {
   const connection = await db.selectFrom("provider_connections")
     .select("id")
     .where("workspace_id", "=", workspaceId)
@@ -413,7 +527,7 @@ async function seedReviewerReplacement(
     workspace_id: workspaceId,
     provider: "github",
     provider_connection_id: connection.id,
-    external_actor_id: "@user-f2a19c",
+    external_actor_id: `@user-f2a19c-${suffix}`,
     start_at: new Date("2026-08-26T09:00:00.000Z"),
     end_at: new Date("2026-08-26T11:00:00.000Z"),
   }).returning("id").executeTakeFirstOrThrow();
@@ -424,14 +538,24 @@ async function seedReviewerReplacement(
     absence_id: absence.id,
     absence_revision: 1,
     decision_id: decisionId,
-    unavailable_actor_id: "@user-f2a19c",
+    unavailable_actor_id: `@user-f2a19c-${suffix}`,
     replacement_actor_id: "@user-4c8d31",
     outcome: "replaced",
     reason: "scheduled absence",
     started_at: new Date("2026-08-26T10:00:00.000Z"),
     completed_at: new Date("2026-08-26T10:00:01.000Z"),
   }).returning("id").executeTakeFirstOrThrow();
-  return { providerConnectionId: connection.id, replacementId: replacement.id };
+  return {
+    provider: "github",
+    providerConnectionId: connection.id,
+    absenceId: absence.id,
+    absenceRevision: 1,
+    decisionId,
+    replacementId: replacement.id,
+    unavailableActor: `@user-f2a19c-${suffix}`,
+    replacementActor: "@user-4c8d31",
+    outcome: "replaced",
+  };
 }
 
 async function seedWorkspace(

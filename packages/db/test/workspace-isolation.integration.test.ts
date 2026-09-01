@@ -64,6 +64,15 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace persistence is
         "api-a-secondary",
         "suspended",
       );
+      const connectionAGitlab = await seedConnectionAndRepository(
+        db,
+        workspaceA,
+        "gitlab",
+        "93",
+        "203",
+        "api-a-gitlab",
+        "suspended",
+      );
       const connectionB = await seedConnectionAndRepository(db, workspaceB, "github", "91", "201", "api-b");
       const repositoryA = await repositoryId(db, workspaceA, "github", "201");
       const repositoryB = await repositoryId(db, workspaceB, "github", "201");
@@ -100,6 +109,13 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace persistence is
         external_actor_id: "@user-4e5c21",
         ...window,
       }).returning("id").executeTakeFirstOrThrow();
+      await expect(db.insertInto("reviewer_absences").values({
+        workspace_id: workspaceA,
+        provider: "gitlab",
+        provider_connection_id: connectionAGitlab,
+        external_actor_id: "@user-4e5c21",
+        ...window,
+      }).execute()).resolves.toBeDefined();
       const absenceB = await db.insertInto("reviewer_absences").values({
         workspace_id: workspaceB,
         provider: "github",
@@ -111,6 +127,15 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace persistence is
       await expect(db.insertInto("reviewer_absences").values({
         workspace_id: workspaceB,
         provider: "github",
+        provider_connection_id: connectionA,
+        external_actor_id: "@user-a907d2",
+        ...window,
+      }).execute()).rejects.toMatchObject({
+        constraint: "reviewer_absences_workspace_provider_connection_fkey",
+      });
+      await expect(db.insertInto("reviewer_absences").values({
+        workspace_id: workspaceA,
+        provider: "gitlab",
         provider_connection_id: connectionA,
         external_actor_id: "@user-a907d2",
         ...window,

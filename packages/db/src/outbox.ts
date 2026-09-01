@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type { Kysely, Selectable, Transaction } from "kysely";
 import type { PlatformEventSink, PlatformEventV1, WorkspaceId } from "@triagepilot/contracts";
 
@@ -36,16 +37,63 @@ export async function stagePlatformEvent(
   sourceId: string,
   event: PlatformEventV1,
 ): Promise<void> {
+  if (db.isTransaction) {
+    await stagePlatformEventInTransaction(db, workspaceId, sourceId, event);
+    return;
+  }
+
+  await db.transaction().execute(async (trx) => {
+    await stagePlatformEventInTransaction(trx, workspaceId, sourceId, event);
+  });
+}
+
+async function stagePlatformEventInTransaction(
+  db: DatabaseExecutor,
+  workspaceId: WorkspaceId,
+  sourceId: string,
+  event: PlatformEventV1,
+): Promise<void> {
   if (event.workspaceId !== workspaceId) throw new Error("platform event workspace does not match persistence scope");
   if (event.eventType === "routing_decision" && event.decisionId !== sourceId) {
     throw new Error("platform event decision id does not match persisted decision");
+  }
+  if (event.eventType === "reviewer_replacement") {
+    const replacement = await db
+      .selectFrom("reviewer_replacements")
+      .select([
+        "provider",
+        "provider_connection_id",
+        "absence_id",
+        "absence_revision",
+        "decision_id",
+        "unavailable_actor_id",
+        "replacement_actor_id",
+        "outcome",
+      ])
+      .where("workspace_id", "=", workspaceId)
+      .where("id", "=", sourceId)
+      .forUpdate()
+      .executeTakeFirst();
+    if (
+      replacement === undefined
+      || replacement.provider !== event.provider
+      || replacement.provider_connection_id !== event.providerConnectionId
+      || replacement.absence_id !== event.absenceId
+      || replacement.absence_revision !== event.absenceRevision
+      || replacement.decision_id !== event.decisionId
+      || replacement.unavailable_actor_id !== event.unavailableActor
+      || replacement.replacement_actor_id !== event.replacementActor
+      || replacement.outcome !== event.outcome
+    ) {
+      throw new Error("reviewer replacement event does not match persisted source");
+    }
   }
 
   const source = event.eventType === "routing_decision"
     ? { decision_id: sourceId, reviewer_replacement_id: null }
     : { decision_id: null, reviewer_replacement_id: sourceId };
 
-  await db
+  const inserted = await db
     .insertInto("decision_outbox")
     .values({
       workspace_id: workspaceId,
@@ -60,7 +108,35 @@ export async function stagePlatformEvent(
     .onConflict((conflict) =>
       conflict.columns(["workspace_id", "event_id"]).doNothing(),
     )
-    .execute();
+    .returning("id")
+    .executeTakeFirst();
+  if (inserted !== undefined) return;
+
+  const existing = await db
+    .selectFrom("decision_outbox")
+    .select([
+      "decision_id",
+      "reviewer_replacement_id",
+      "event_type",
+      "schema_version",
+      "payload",
+      "occurred_at",
+    ])
+    .where("workspace_id", "=", workspaceId)
+    .where("event_id", "=", event.eventId)
+    .forUpdate()
+    .executeTakeFirst();
+  if (
+    existing === undefined
+    || existing.decision_id !== source.decision_id
+    || existing.reviewer_replacement_id !== source.reviewer_replacement_id
+    || existing.event_type !== event.eventType
+    || existing.schema_version !== event.schemaVersion
+    || existing.occurred_at.getTime() !== new Date(event.occurredAt).getTime()
+    || !isDeepStrictEqual(existing.payload, event)
+  ) {
+    throw new Error("platform event id conflicts with a different persisted event");
+  }
 }
 
 export async function claimPlatformEvents(input: {
