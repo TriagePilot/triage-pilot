@@ -98,16 +98,24 @@ export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> 
         throw new PermanentJobError("reviewer absence activation processor is not configured");
       }
       reviewerAvailabilityServices = input.buildReviewerAvailabilityServices(message);
-      const nextRecovery = reviewerReplacementRecovery === null
-        ? await input.processReviewerAbsenceActivationJob(message, reviewerAvailabilityServices)
-        : input.recoverReviewerReplacementFinalizer
-          ? await input.recoverReviewerReplacementFinalizer(
-              reviewerReplacementRecovery,
-              reviewerAvailabilityServices,
-            )
-          : (() => { throw new PermanentJobError("reviewer replacement finalizer recovery is not configured"); })();
+      let nextRecovery: ReviewerReplacementFinalizerRecovery | null;
+      if (reviewerReplacementRecovery === null) {
+        nextRecovery = await input.processReviewerAbsenceActivationJob(message, reviewerAvailabilityServices);
+      } else {
+        if (!input.recoverReviewerReplacementFinalizer) {
+          throw new PermanentJobError("reviewer replacement finalizer recovery is not configured");
+        }
+        nextRecovery = await input.recoverReviewerReplacementFinalizer(
+          reviewerReplacementRecovery,
+          reviewerAvailabilityServices,
+        );
+        if (nextRecovery === null) {
+          nextRecovery = await input.processReviewerAbsenceActivationJob(message, reviewerAvailabilityServices);
+        }
+      }
       if (nextRecovery !== null) {
-        const exhausted = reviewerReplacementRecovery !== null && lease.attemptCount >= lease.maxAttempts;
+        const exhausted = !nextRecovery.retryable
+          || (reviewerReplacementRecovery !== null && lease.attemptCount >= lease.maxAttempts);
         if (exhausted) {
           if (input.markReviewerReplacementRecoveryExhausted) {
             await input.markReviewerReplacementRecoveryExhausted(
@@ -123,7 +131,7 @@ export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> 
           return true;
         }
         const maxAttempts = reviewerReplacementRecovery === null
-          ? Math.max(lease.maxAttempts, lease.attemptCount + REVIEWER_REPLACEMENT_RECOVERY_ATTEMPTS)
+          ? lease.attemptCount + REVIEWER_REPLACEMENT_RECOVERY_ATTEMPTS
           : lease.maxAttempts;
         assertLeaseUpdated(
           await claimedQueue().markFailed(lease, nextRecovery.lastError, new Date(), {

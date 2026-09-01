@@ -161,6 +161,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace persistence is
         replacement_actor_id: "@user-2f83b9",
         outcome: "replaced",
         reason: "scheduled absence",
+        state: "finalizer_pending" as const,
+        last_error: null,
         started_at: new Date("2026-10-01T08:00:00.000Z"),
         completed_at: new Date("2026-10-01T08:00:01.000Z"),
       };
@@ -171,6 +173,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace persistence is
         absence_id: absenceA.id,
         absence_revision: 1,
         decision_id: decisionA.decisionId,
+        repository_record_id: repositoryA,
         repository_id: "201",
         change_request_id: "change:availability-a",
         expected_head_revision: "head-1",

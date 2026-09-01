@@ -6,7 +6,10 @@ import {
   persistDecision,
 } from "@triagepilot/db";
 import { withPostgresTestDatabase } from "../../../packages/db/test/postgres";
-import { processReviewerAbsenceActivationJob } from "../src/availability-processor";
+import {
+  processReviewerAbsenceActivationJob,
+  recoverReviewerReplacementFinalizer,
+} from "../src/availability-processor";
 import { createWorkerReviewerAvailabilityServiceFactory } from "../src/runtime-services";
 
 const now = new Date("2026-09-01T12:00:00.000Z");
@@ -146,6 +149,136 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker reviewer availabi
       });
     });
   });
+
+  it("continues the same activation from recovered A to fresh B without replaying A provider effects", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedActivation(db, "continue-fresh");
+      await seedAdditionalCandidate(db, fixture, "continue-fresh-b", 8);
+      const remote = new ReviewerRemote();
+      const first = fixture.buildServices(remote);
+      first.finalizers.run = vi.fn(async () => {
+        throw new Error("A finalizer interrupted");
+      });
+      const recoveryA = await processReviewerAbsenceActivationJob(fixture.message, first);
+      expect(recoveryA).toMatchObject({ phase: "run_finalizer", lastError: "A finalizer interrupted" });
+      expect(remote.mutationCounts(7)).toEqual({ deletes: 1, posts: 1 });
+      expect(remote.mutationCounts(8)).toEqual({ deletes: 0, posts: 0 });
+
+      const retry = fixture.buildServices(remote);
+      retry.finalizers.run = vi.fn(async () => {});
+      await expect(recoverReviewerReplacementFinalizer(recoveryA!, retry)).resolves.toBeNull();
+      await expect(processReviewerAbsenceActivationJob(fixture.message, retry)).resolves.toBeNull();
+
+      expect(remote.mutationCounts(7)).toEqual({ deletes: 1, posts: 1 });
+      expect(remote.mutationCounts(8)).toEqual({ deletes: 1, posts: 1 });
+      await expect(db.selectFrom("reviewer_replacements").select("state").orderBy("decision_id").execute())
+        .resolves.toHaveLength(2);
+    });
+  });
+
+  it("continues the same activation from recovered A to pending-finalizer B", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedActivation(db, "continue-pending");
+      await seedAdditionalCandidate(db, fixture, "continue-pending-b", 8);
+      const remote = new ReviewerRemote();
+      const first = fixture.buildServices(remote);
+      first.finalizers.run = vi.fn(async () => {
+        throw new Error("A finalizer interrupted");
+      });
+      const recoveryA = await processReviewerAbsenceActivationJob(fixture.message, first);
+
+      const retry = fixture.buildServices(remote);
+      retry.finalizers.run = vi.fn()
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error("B finalizer interrupted"));
+      await expect(recoverReviewerReplacementFinalizer(recoveryA!, retry)).resolves.toBeNull();
+      const recoveryB = await processReviewerAbsenceActivationJob(fixture.message, retry);
+
+      expect(recoveryB).toMatchObject({
+        phase: "run_finalizer",
+        lastError: "B finalizer interrupted",
+        replacementId: expect.any(String),
+      });
+      expect(recoveryB!.replacementId).not.toBe(recoveryA!.replacementId);
+      expect(remote.mutationCounts(7)).toEqual({ deletes: 1, posts: 1 });
+      expect(remote.mutationCounts(8)).toEqual({ deletes: 1, posts: 1 });
+    });
+  });
+
+  it.each([
+    ["prepare", "revise"],
+    ["prepare", "cancel"],
+    ["prepare", "suspend"],
+    ["delete", "revise"],
+    ["delete", "cancel"],
+    ["delete", "suspend"],
+    ["post", "revise"],
+    ["post", "cancel"],
+    ["post", "suspend"],
+  ] as const)(
+    "audits an orphaned %s-phase intent without provider replay after absence %s",
+    async (crashPhase, adminMutation) => {
+      await withPostgresTestDatabase(async (db) => {
+        const fixture = await seedActivation(db, `orphan-${crashPhase}-${adminMutation}`);
+        const remote = new ReviewerRemote();
+        const first = fixture.buildServices(remote);
+        first.finalizers.run = vi.fn(async () => {});
+
+        if (crashPhase === "prepare") {
+          const prepare = first.availability.prepareMutationIntent;
+          first.availability.prepareMutationIntent = async (input) => {
+            await prepare(input);
+            throw new Error("process terminated after prepare");
+          };
+          await expect(processReviewerAbsenceActivationJob(fixture.message, first))
+            .rejects.toThrow("process terminated after prepare");
+        } else if (crashPhase === "delete") {
+          remote.failAfterNextDelete = true;
+          await expect(processReviewerAbsenceActivationJob(fixture.message, first))
+            .rejects.toThrow("process terminated between DELETE and POST");
+        } else {
+          first.availability.persistReplacement = async () => {
+            throw new Error("process terminated after POST");
+          };
+          await expect(processReviewerAbsenceActivationJob(fixture.message, first)).resolves.toMatchObject({
+            phase: "persist_replacement",
+            lastError: "process terminated after POST",
+          });
+        }
+
+        const intent = await db.selectFrom("reviewer_mutation_intents")
+          .select("id")
+          .executeTakeFirstOrThrow();
+        const providerEffectsBeforeRetry = { deletes: remote.deleteCount, posts: remote.postCount };
+        await applyAdminMutation(db, fixture, adminMutation);
+
+        const retry = fixture.buildServices(remote);
+        retry.reviewerLoad = vi.fn(async () => {
+          throw new Error("orphan recovery must not select a new actor");
+        });
+        retry.finalizers.run = vi.fn(async () => {
+          throw new Error("orphan recovery must not run a finalizer");
+        });
+        await expect(processReviewerAbsenceActivationJob(fixture.message, retry)).resolves.toBeNull();
+
+        expect(retry.reviewerLoad).not.toHaveBeenCalled();
+        expect(remote.deleteCount).toBe(providerEffectsBeforeRetry.deletes);
+        expect(remote.postCount).toBe(providerEffectsBeforeRetry.posts);
+        await expect(db.selectFrom("reviewer_replacements")
+          .select(["outcome", "state", "last_error as lastError", "mutation_intent_id as mutationIntentId"])
+          .executeTakeFirstOrThrow()).resolves.toEqual({
+          outcome: "permanent_failure",
+          state: "permanent_failure",
+          lastError: "Durable reviewer mutation intent could not resume after activation scope changed.",
+          mutationIntentId: intent.id,
+        });
+        await expect(db.selectFrom("routing_decisions")
+          .select("selected_reviewers as selectedReviewers")
+          .where("id", "=", fixture.decisionId)
+          .executeTakeFirstOrThrow()).resolves.toEqual({ selectedReviewers: [unavailableActor] });
+      });
+    },
+  );
 });
 
 async function seedActivation(
@@ -211,6 +344,14 @@ async function seedActivation(
   };
   return {
     message,
+    absence,
+    availability,
+    decisionId: (await db.selectFrom("routing_decisions")
+      .select("id")
+      .where("routing_key", "=", `routing-${suffix}`)
+      .executeTakeFirstOrThrow()).id,
+    connectionId: connection.id,
+    repositoryRecordId: repository.id,
     buildServices(remote: ReviewerRemote) {
       return createWorkerReviewerAvailabilityServiceFactory({
         db,
@@ -222,13 +363,77 @@ async function seedActivation(
   };
 }
 
+async function seedAdditionalCandidate(
+  db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0],
+  fixture: Awaited<ReturnType<typeof seedActivation>>,
+  suffix: string,
+  pullNumber: number,
+) {
+  await persistDecision(db, fixture.message.workspaceId, {
+    repositoryId: fixture.repositoryRecordId,
+    deliveryId: `delivery-${suffix}`,
+    routingKey: `routing-${suffix}`,
+    changeRequestId: String(pullNumber),
+    pullNumber,
+    headSha: "head-1",
+    mode: "enforce",
+    action: "request_human_review",
+    actionStatus: "pending",
+    riskScore: 50,
+    selectedReviewers: [unavailableActor],
+    details: {
+      ownership: {
+        preferredReviewers: eligibleActors,
+        eligibleReviewers: eligibleActors,
+      },
+      routing: { requestedReviewerCount: 1 },
+    },
+  });
+}
+
+async function applyAdminMutation(
+  db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0],
+  fixture: Awaited<ReturnType<typeof seedActivation>>,
+  mutation: "revise" | "cancel" | "suspend",
+) {
+  if (mutation === "revise") {
+    await fixture.availability.reviseAbsence({
+      provider: "github",
+      providerConnectionId: fixture.connectionId,
+      absenceId: fixture.absence.id,
+      expectedRevision: fixture.absence.revision,
+      externalActorId: "@user-a81c73",
+      startAt: new Date("2026-09-01T10:00:00.000Z"),
+      endAt: new Date("2026-09-01T14:00:00.000Z"),
+      now,
+    });
+    return;
+  }
+  if (mutation === "cancel") {
+    await fixture.availability.cancelAbsence({
+      provider: "github",
+      providerConnectionId: fixture.connectionId,
+      absenceId: fixture.absence.id,
+      expectedRevision: fixture.absence.revision,
+      now,
+    });
+    return;
+  }
+  await db.updateTable("provider_connections")
+    .set({ status: "suspended" })
+    .where("id", "=", fixture.connectionId)
+    .execute();
+}
+
 class ReviewerRemote {
-  readonly requested = new Set([unavailableActor]);
+  readonly requestedByPull = new Map<number, Set<string>>([[7, new Set([unavailableActor])]]);
   deleteCount = 0;
   postCount = 0;
   failAfterNextDelete = false;
 
   readonly request = vi.fn(async (route: string, parameters: Record<string, unknown>) => {
+    const pullNumber = Number(parameters.pull_number);
+    const requested = this.reviewers(pullNumber);
     if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
       return { data: { state: "open", head: { sha: "head-1" }, user: { login: "user-a91f5c" } } };
     }
@@ -237,17 +442,17 @@ class ReviewerRemote {
         this.failAfterNextDelete = false;
         throw new Error("process terminated between DELETE and POST");
       }
-      return { data: { users: [...this.requested].map((actor) => ({ login: actor.slice(1) })), teams: [] } };
+      return { data: { users: [...requested].map((actor) => ({ login: actor.slice(1) })), teams: [] } };
     }
     if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") return { data: [] };
     if (route === "DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers") {
       this.deleteCount += 1;
-      for (const reviewer of parameters.reviewers as string[]) this.requested.delete(`@${reviewer}`);
+      for (const reviewer of parameters.reviewers as string[]) requested.delete(`@${reviewer}`);
       return { data: {} };
     }
     if (route === "POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers") {
       this.postCount += 1;
-      for (const reviewer of parameters.reviewers as string[]) this.requested.add(`@${reviewer}`);
+      for (const reviewer of parameters.reviewers as string[]) requested.add(`@${reviewer}`);
       return { data: {} };
     }
     throw new Error(`unexpected GitHub route: ${route}`);
@@ -255,5 +460,25 @@ class ReviewerRemote {
 
   counts() {
     return { requests: this.request.mock.calls.length, deletes: this.deleteCount, posts: this.postCount };
+  }
+
+  get requested() {
+    return this.reviewers(7);
+  }
+
+  reviewers(pullNumber: number) {
+    const existing = this.requestedByPull.get(pullNumber);
+    if (existing !== undefined) return existing;
+    const created = new Set([unavailableActor]);
+    this.requestedByPull.set(pullNumber, created);
+    return created;
+  }
+
+  mutationCounts(pullNumber: number) {
+    const calls = this.request.mock.calls as [string, Record<string, unknown>][];
+    return {
+      deletes: calls.filter(([route, parameters]) => route.startsWith("DELETE ") && parameters.pull_number === pullNumber).length,
+      posts: calls.filter(([route, parameters]) => route.startsWith("POST ") && parameters.pull_number === pullNumber).length,
+    };
   }
 }

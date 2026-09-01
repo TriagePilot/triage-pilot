@@ -4,6 +4,7 @@ import {
   activateReviewerAbsence,
   assertPersistReviewerReplacementInput,
   assertReviewerReplacementFinalizerRecovery,
+  assertReviewerReplacementRecoveryRecord,
   parseReviewerMutationIntentId,
   type ReviewerAbsenceActivation,
   type ReviewerAvailabilityPorts,
@@ -81,7 +82,9 @@ function buildPorts(overrides: Partial<ReviewerAvailabilityPorts> = {}): Reviewe
   const clockValues = [activationAt, completionAt];
   const availability = {
     listPendingFinalizers: vi.fn(async () => []),
+    loadReplacement: vi.fn(async () => null),
     loadActivation: vi.fn(async () => activation),
+    listUnfinalizedMutationIntents: vi.fn(async () => []),
     loadMutationIntent: vi.fn(async () => null),
     prepareMutationIntent: vi.fn(async (input) => ({ id: preparedIntent.id, ...input })),
     findActive: vi.fn(async () => []),
@@ -89,6 +92,11 @@ function buildPorts(overrides: Partial<ReviewerAvailabilityPorts> = {}): Reviewe
       inserted: true,
       activationCurrent: true,
       replacement: { id: "replacement-1", state: input.state },
+    })),
+    persistMutationIntentRecovery: vi.fn(async (input) => ({
+      inserted: true,
+      activationCurrent: true,
+      replacement: { id: "recovery-1", state: input.state },
     })),
     updateReplacementState: vi.fn(async (input) => ({ id: input.replacementId, state: input.state })),
   };
@@ -100,7 +108,13 @@ function buildPorts(overrides: Partial<ReviewerAvailabilityPorts> = {}): Reviewe
       message: error instanceof Error ? error.message : String(error),
     })),
   };
-  const finalizers = { run: vi.fn(async () => {}) };
+  const finalizers = {
+    run: vi.fn(async () => {}),
+    classifyError: vi.fn((error: unknown) => ({
+      kind: "retryable" as const,
+      message: error instanceof Error ? error.message : String(error),
+    })),
+  };
   return {
     clock: overrides.clock ?? { now: vi.fn(() => clockValues.shift() ?? completionAt) },
     availability: { ...availability, ...overrides.availability },
@@ -108,6 +122,45 @@ function buildPorts(overrides: Partial<ReviewerAvailabilityPorts> = {}): Reviewe
     reviewerLoad: overrides.reviewerLoad
       ?? vi.fn(async () => ({ "@user-c91e46": 0, "@user-f37a82": 1 })),
     finalizers: { ...finalizers, ...overrides.finalizers },
+  };
+}
+
+function nonMutationPersistence(outcome: "permanent_failure" | "no_replacement_available") {
+  const lastError = outcome === "permanent_failure" ? "provider failed" : null;
+  return {
+    provider: candidate.provider,
+    providerConnectionId: job.providerConnectionId,
+    absenceId: job.absenceId,
+    absenceRevision: job.absenceRevision,
+    decisionId: candidate.decisionId,
+    expectedHeadRevision: candidate.routedHeadRevision,
+    unavailableActorId: activation.externalActorId,
+    replacementActorId: null,
+    mutationIntentId: outcome === "permanent_failure" ? preparedIntent.id : null,
+    outcome,
+    reason: "terminal outcome",
+    state: outcome === "permanent_failure" ? "permanent_failure" : "finalizer_pending",
+    lastError,
+    startedAt: activationAt,
+    completedAt: completionAt,
+    replaceCohort: false,
+    event: {
+      schemaVersion: 1,
+      eventType: "reviewer_replacement",
+      eventId: "replacement-event-state-validation",
+      occurredAt: completionAt.toISOString(),
+      workspaceId: job.workspaceId,
+      provider: candidate.provider,
+      providerConnectionId: job.providerConnectionId,
+      absenceId: job.absenceId,
+      absenceRevision: job.absenceRevision,
+      decisionId: candidate.decisionId,
+      repositoryId: candidate.repository.externalId,
+      changeRequestId: candidate.changeRequestId,
+      unavailableActor: activation.externalActorId,
+      replacementActor: null,
+      outcome,
+    },
   };
 }
 
@@ -158,6 +211,39 @@ describe("activateReviewerAbsence", () => {
       ...outcome.recovery,
       mutationIntentId: null,
     })).toThrow("Provider-effect recovery requires durable mutation provenance");
+    expect(() => assertReviewerReplacementFinalizerRecovery({
+      ...outcome.recovery,
+      phase: "run_finalizer",
+      replacementId: "replacement-1",
+    })).toThrow("Reviewer replacement finalizer recovery is malformed");
+  });
+
+  it.each([
+    ["permanent_failure", "completed", "provider failed"],
+    ["permanent_failure", "finalizer_pending", "provider failed"],
+    ["skipped_closed", "finalizer_pending", null],
+  ] as const)("rejects malformed recovery record state %s/%s", (outcome, state, lastError) => {
+    expect(() => assertReviewerReplacementRecoveryRecord({
+      id: "replacement-1",
+      decisionId: "decision-1",
+      state,
+      outcome,
+      replacementActorId: null,
+      mutationIntentId: outcome === "permanent_failure" ? "intent-1" : null,
+      lastError,
+    })).toThrow("Reviewer replacement recovery state is malformed");
+  });
+
+  it("accepts a completed exact replacement for post-commit recovery", () => {
+    expect(() => assertReviewerReplacementRecoveryRecord({
+      id: "replacement-1",
+      decisionId: "decision-1",
+      state: "completed",
+      outcome: "replaced",
+      replacementActorId: "@user-c91e46",
+      mutationIntentId: "intent-1",
+      lastError: null,
+    })).not.toThrow();
   });
 
   it("treats a stale or cancelled absence revision as a successful job-level no-op", async () => {
@@ -173,6 +259,54 @@ describe("activateReviewerAbsence", () => {
 
     expect(ports.provider.inspectChangeRequest).not.toHaveBeenCalled();
     expect(ports.availability.persistReplacement).not.toHaveBeenCalled();
+  });
+
+  it("audits an unfinalized durable intent before treating a stale activation as complete", async () => {
+    const persistMutationIntentRecovery = vi.fn(async (input) => ({
+      inserted: true,
+      activationCurrent: true,
+      replacement: { id: "audit-1", state: input.state },
+    }));
+    const ports = buildPorts({
+      availability: {
+        loadActivation: vi.fn(async () => null),
+        listUnfinalizedMutationIntents: vi.fn(async () => [preparedIntent]),
+        persistMutationIntentRecovery,
+      } as never,
+    });
+
+    await expect(activateReviewerAbsence(job, ports)).resolves.toMatchObject({
+      status: "completed",
+      results: [{
+        decisionId: preparedIntent.decisionId,
+        outcome: "permanent_failure",
+        mutationIntentId: preparedIntent.id,
+      }],
+    });
+
+    expect(persistMutationIntentRecovery).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "permanent_failure",
+      state: "permanent_failure",
+      mutationIntentId: preparedIntent.id,
+      replaceCohort: false,
+    }));
+    expect(ports.provider.inspectChangeRequest).not.toHaveBeenCalled();
+    expect(ports.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["permanent_failure", "completed", "provider failed"],
+    ["permanent_failure", "finalizer_pending", "provider failed"],
+    ["no_replacement_available", "completed", null],
+  ])("rejects invalid persistence outcome/state %s/%s", (outcome, state, lastError) => {
+    const valid = nonMutationPersistence(outcome === "permanent_failure" ? "permanent_failure" : "no_replacement_available");
+    expect(() => assertPersistReviewerReplacementInput({
+      ...valid,
+      outcome,
+      state,
+      lastError,
+      event: { ...valid.event, outcome },
+    })).toThrow("state");
   });
 
   it("does not process an absence outside its half-open activation window", async () => {

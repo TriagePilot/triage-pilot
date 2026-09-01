@@ -93,10 +93,56 @@ describe("reviewer absence availability processor", () => {
     expect(services.provider.reconcileReviewRequest).not.toHaveBeenCalled();
   });
 
+  it("accepts exact already-completed history after a completion commit crash", async () => {
+    const services = buildServices();
+    const recovery = replacedRecovery("complete_replacement");
+    (services.availability as never as { loadReplacement: ReturnType<typeof vi.fn> }).loadReplacement = vi.fn(async () => ({
+      id: "replacement-1",
+      decisionId: "decision-1",
+      state: "completed",
+      outcome: "replaced",
+      replacementActorId: "@user-b71d93",
+      mutationIntentId,
+    }));
+
+    await expect(recoverReviewerReplacementFinalizer(recovery, services)).resolves.toBeNull();
+
+    expect(services.finalizers.run).not.toHaveBeenCalled();
+    expect(services.availability.updateReplacementState).not.toHaveBeenCalled();
+  });
+
+  it("converts stale provider-effect persistence into a linked audit without provider or finalizer writes", async () => {
+    const services = buildServices();
+    const recovery = replacedRecovery("persist_replacement");
+    services.availability.persistReplacement = vi.fn(async () => ({
+      inserted: false,
+      activationCurrent: false,
+      replacement: null,
+    }));
+    const persistMutationIntentRecovery = vi.fn(async () => ({
+      inserted: true,
+      activationCurrent: true,
+      replacement: { id: "audit-1", state: "permanent_failure" as const },
+    }));
+    (services.availability as never as { persistMutationIntentRecovery: typeof persistMutationIntentRecovery })
+      .persistMutationIntentRecovery = persistMutationIntentRecovery;
+
+    await expect(recoverReviewerReplacementFinalizer(recovery, services)).resolves.toBeNull();
+
+    expect(persistMutationIntentRecovery).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "permanent_failure",
+      state: "permanent_failure",
+      mutationIntentId,
+      replaceCohort: false,
+    }));
+    expect(services.finalizers.run).not.toHaveBeenCalled();
+    expect(services.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+  });
+
   it("persists null-finalizer permanent partial mutation recovery without provider or policy writes", async () => {
     const services = buildServices();
     const recovery = permanentFailureRecovery();
-    services.availability.persistReplacement = vi.fn(async () => ({
+    services.availability.persistMutationIntentRecovery = vi.fn(async () => ({
       inserted: true,
       activationCurrent: true,
       replacement: { id: "replacement-1", state: "permanent_failure" as const },
@@ -104,7 +150,7 @@ describe("reviewer absence availability processor", () => {
 
     await expect(recoverReviewerReplacementFinalizer(recovery, services)).resolves.toBeNull();
 
-    expect(services.availability.persistReplacement).toHaveBeenCalledWith(recovery.persistence);
+    expect(services.availability.persistMutationIntentRecovery).toHaveBeenCalledWith(recovery.persistence);
     expect(services.finalizers.run).not.toHaveBeenCalled();
     expect(services.availability.updateReplacementState).not.toHaveBeenCalled();
     expect(services.provider.inspectChangeRequest).not.toHaveBeenCalled();
@@ -144,21 +190,44 @@ describe("reviewer absence availability processor", () => {
     expect(services.provider.reconcileReviewRequest).not.toHaveBeenCalled();
   });
 
+  it("records exhausted persist-phase provider effects through the recovery-specific audit path", async () => {
+    const services = buildServices();
+    const recovery = replacedRecovery("persist_replacement");
+    const persistMutationIntentRecovery = vi.fn(async () => ({
+      inserted: true,
+      activationCurrent: true,
+      replacement: { id: "audit-1", state: "permanent_failure" as const },
+    }));
+    (services.availability as never as { persistMutationIntentRecovery: typeof persistMutationIntentRecovery })
+      .persistMutationIntentRecovery = persistMutationIntentRecovery;
+
+    await markReviewerReplacementRecoveryExhausted(recovery, services, "stale persistence exhausted");
+
+    expect(persistMutationIntentRecovery).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "permanent_failure",
+      lastError: "stale persistence exhausted",
+      mutationIntentId,
+    }));
+    expect(services.availability.updateReplacementState).not.toHaveBeenCalled();
+  });
+
   it("fails closed before a finalizer when recovery does not match durable pending history", async () => {
     const services = buildServices();
     const recovery = replacedRecovery("run_finalizer");
-    services.availability.listPendingFinalizers = vi.fn(async () => [{
+    services.availability.loadReplacement = vi.fn(async () => ({
       id: "replacement-1",
       decisionId: "different-decision",
       state: "finalizer_pending" as const,
       outcome: "replaced" as const,
       replacementActorId: "@user-b71d93",
       mutationIntentId,
-    }]);
+      lastError: null,
+    })) as never;
 
     await expect(recoverReviewerReplacementFinalizer(recovery, services)).resolves.toMatchObject({
       phase: "run_finalizer",
-      lastError: "Reviewer replacement recovery does not match durable pending finalizer provenance",
+      lastError: "Reviewer replacement recovery does not match durable replacement provenance",
+      retryable: false,
     });
 
     expect(services.finalizers.run).not.toHaveBeenCalled();
@@ -171,11 +240,14 @@ function buildServices(): ReviewerAvailabilityPorts {
     clock: { now: () => new Date("2026-09-01T12:00:00.000Z") },
     availability: {
       listPendingFinalizers: vi.fn(async () => []),
+      loadReplacement: vi.fn(async () => null),
       loadActivation: vi.fn(async () => null),
+      listUnfinalizedMutationIntents: vi.fn(async () => []),
       loadMutationIntent: vi.fn(async () => null),
       prepareMutationIntent: vi.fn(async () => { throw new Error("not expected"); }),
       findActive: vi.fn(async () => []),
       persistReplacement: vi.fn(async () => { throw new Error("not expected"); }),
+      persistMutationIntentRecovery: vi.fn(async () => { throw new Error("not expected"); }),
       updateReplacementState: vi.fn(async (input) => ({ id: input.replacementId, state: input.state })),
     },
     provider: {
@@ -184,7 +256,10 @@ function buildServices(): ReviewerAvailabilityPorts {
       classifyError: vi.fn(() => ({ kind: "retryable" as const, message: "retry" })),
     },
     reviewerLoad: vi.fn(async () => ({})),
-    finalizers: { run: vi.fn(async () => {}) },
+    finalizers: {
+      run: vi.fn(async () => {}),
+      classifyError: vi.fn(() => ({ kind: "retryable" as const, message: "retry" })),
+    },
   };
 }
 
@@ -243,6 +318,7 @@ function replacedRecovery(
     providerEffectsApplied: true,
     persistence: phase === "persist_replacement" ? persistence("replaced") : null,
     lastError: "database unavailable",
+    retryable: true,
   } as ReviewerReplacementFinalizerRecovery;
 }
 
@@ -259,6 +335,7 @@ function permanentFailureRecovery(): ReviewerReplacementFinalizerRecovery {
     providerEffectsApplied: true,
     persistence: persistence("permanent_failure") as never,
     lastError: "database unavailable",
+    retryable: true,
   };
 }
 
@@ -266,12 +343,13 @@ function expectPendingRecovery(
   services: ReviewerAvailabilityPorts,
   recovery: ReviewerReplacementFinalizerRecovery,
 ): void {
-  services.availability.listPendingFinalizers = vi.fn(async () => [{
+  services.availability.loadReplacement = vi.fn(async () => ({
     id: recovery.replacementId!,
     decisionId: recovery.finalizer!.decisionId,
     state: "finalizer_pending" as const,
     outcome: recovery.outcome as "replaced",
     replacementActorId: recovery.replacementActorId,
     mutationIntentId: recovery.mutationIntentId,
-  }] as never);
+    lastError: null,
+  })) as never;
 }

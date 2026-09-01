@@ -128,6 +128,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         "absence_id",
         "absence_revision",
         "decision_id",
+        "repository_record_id",
         "repository_id",
         "change_request_id",
         "expected_head_revision",

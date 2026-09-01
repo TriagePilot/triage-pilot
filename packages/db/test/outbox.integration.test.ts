@@ -745,6 +745,11 @@ async function seedReviewerReplacement(
     .select("id")
     .where("workspace_id", "=", workspaceId)
     .executeTakeFirstOrThrow();
+  const decision = await db.selectFrom("routing_decisions")
+    .select("repository_id as repositoryRecordId")
+    .where("workspace_id", "=", workspaceId)
+    .where("id", "=", decisionId)
+    .executeTakeFirstOrThrow();
   const absence = await db.insertInto("reviewer_absences").values({
     workspace_id: workspaceId,
     provider: "github",
@@ -760,6 +765,7 @@ async function seedReviewerReplacement(
     absence_id: absence.id,
     absence_revision: 1,
     decision_id: decisionId,
+    repository_record_id: decision.repositoryRecordId,
     repository_id: "101",
     change_request_id: "cr-7",
     expected_head_revision: "head-1",
@@ -778,6 +784,8 @@ async function seedReviewerReplacement(
     mutation_intent_id: intent.id,
     outcome: "replaced",
     reason: "scheduled absence",
+    state: "finalizer_pending",
+    last_error: null,
     started_at: new Date("2026-08-26T10:00:00.000Z"),
     completed_at: new Date("2026-08-26T10:00:01.000Z"),
   }).returning("id").executeTakeFirstOrThrow();

@@ -34,11 +34,13 @@ import {
 } from "@triagepilot/core";
 import {
   assertReviewerReplacementFinalizerRecord,
+  assertReviewerReplacementRecoveryRecord,
   parseReviewerMutationIntentId,
   type ReviewPolicyApplicationPorts,
   type ReviewerAvailabilityPorts,
   type ReviewerMutationIntent,
   type ReviewerReplacementFinalizerRecord,
+  type ReviewerReplacementRecoveryRecord,
   type RoutingApplicationPorts,
 } from "@triagepilot/application";
 
@@ -547,6 +549,10 @@ export function createWorkerReviewerAvailabilityServiceFactory(input: WorkerServ
           const records = await availability.listPendingFinalizers(finalizerInput);
           return records.map(toApplicationFinalizerRecord);
         },
+        async loadReplacement(replacementId) {
+          const record = await availability.loadReplacement(replacementId);
+          return record === null ? null : toApplicationRecoveryRecord(record);
+        },
         async loadActivation(absenceId, revision) {
           const activation = await availability.loadActivation(absenceId, revision);
           if (activation === null) return null;
@@ -578,6 +584,10 @@ export function createWorkerReviewerAvailabilityServiceFactory(input: WorkerServ
             })),
           };
         },
+        async listUnfinalizedMutationIntents(intentInput) {
+          const intents = await availability.listUnfinalizedMutationIntents(intentInput);
+          return intents.map(toApplicationMutationIntent);
+        },
         async loadMutationIntent(intentInput) {
           assertAvailabilityScope(message, intentInput.workspaceId, intentInput.providerConnectionId);
           const intent = await availability.loadMutationIntent(intentInput);
@@ -606,6 +616,19 @@ export function createWorkerReviewerAvailabilityServiceFactory(input: WorkerServ
             ...persistence,
             mutationIntentId: persistence.mutationIntentId,
           });
+          return {
+            inserted: persisted.inserted,
+            activationCurrent: persisted.activationCurrent,
+            replacement: persisted.replacement === null
+              ? null
+              : { id: persisted.replacement.id, state: persisted.replacement.state },
+          };
+        },
+        async persistMutationIntentRecovery(persistence) {
+          if (persistence.provider !== message.provider || persistence.providerConnectionId !== message.providerConnectionId) {
+            throw new PermanentJobError("reviewer mutation recovery scope does not match claimed job");
+          }
+          const persisted = await availability.persistMutationIntentRecovery(persistence);
           return {
             inserted: persisted.inserted,
             activationCurrent: persisted.activationCurrent,
@@ -670,6 +693,13 @@ export function createWorkerReviewerAvailabilityServiceFactory(input: WorkerServ
             throw new PermanentJobError("reviewer replacement policy failure finalizer is not configured");
           }
           await policyServices.failPolicyCheck(finalizer.summary, finalizer.decisionId);
+        },
+        classifyError(error) {
+          const classified = classifyWorkerError(error);
+          return {
+            kind: classified instanceof PermanentJobError ? "permanent" : "retryable",
+            message: classified.message,
+          };
         },
       },
     };
@@ -1064,6 +1094,32 @@ function toApplicationFinalizerRecord(record: {
       : parseReviewerMutationIntentId(record.mutationIntentId),
   };
   assertReviewerReplacementFinalizerRecord(value);
+  return value;
+}
+
+function toApplicationRecoveryRecord(record: {
+  id: string;
+  decisionId: string;
+  state: string;
+  outcome: string;
+  replacementActorId: string | null;
+  mutationIntentId: string | null;
+  lastError: string | null;
+}): ReviewerReplacementRecoveryRecord {
+  const value: unknown = {
+    id: record.id,
+    decisionId: record.decisionId,
+    state: record.state,
+    outcome: record.outcome,
+    replacementActorId: record.replacementActorId,
+    mutationIntentId: record.mutationIntentId === null ? null : parseReviewerMutationIntentId(record.mutationIntentId),
+    lastError: record.lastError,
+  };
+  try {
+    assertReviewerReplacementRecoveryRecord(value);
+  } catch {
+    throw new PermanentJobError("persisted reviewer replacement recovery is malformed");
+  }
   return value;
 }
 

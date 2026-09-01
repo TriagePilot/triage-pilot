@@ -1,3 +1,11 @@
+alter table repositories
+  add constraint repositories_mutation_intent_source_key
+  unique (workspace_id, provider, provider_connection_id, id, external_repository_id);
+
+alter table routing_decisions
+  add constraint routing_decisions_mutation_intent_source_key
+  unique (workspace_id, id, repository_id);
+
 create table reviewer_mutation_intents (
   id uuid primary key default gen_random_uuid(),
   workspace_id uuid not null references workspaces(id) on delete cascade,
@@ -6,6 +14,7 @@ create table reviewer_mutation_intents (
   absence_id uuid not null,
   absence_revision integer not null check (absence_revision > 0),
   decision_id uuid not null,
+  repository_record_id uuid not null,
   repository_id text not null check (length(btrim(repository_id)) > 0),
   change_request_id text not null check (length(btrim(change_request_id)) > 0),
   expected_head_revision text not null check (length(btrim(expected_head_revision)) > 0),
@@ -19,11 +28,11 @@ create table reviewer_mutation_intents (
     foreign key (workspace_id, provider, provider_connection_id, absence_id)
     references reviewer_absences(workspace_id, provider, provider_connection_id, id),
   constraint reviewer_mutation_intents_workspace_decision_fkey
-    foreign key (workspace_id, decision_id)
-    references routing_decisions(workspace_id, id) on delete cascade,
-  constraint reviewer_mutation_intents_workspace_repository_fkey
-    foreign key (workspace_id, provider, repository_id)
-    references repositories(workspace_id, provider, external_repository_id),
+    foreign key (workspace_id, decision_id, repository_record_id)
+    references routing_decisions(workspace_id, id, repository_id),
+  constraint reviewer_mutation_intents_scoped_repository_fkey
+    foreign key (workspace_id, provider, provider_connection_id, repository_record_id, repository_id)
+    references repositories(workspace_id, provider, provider_connection_id, id, external_repository_id),
   constraint reviewer_mutation_intents_source_key
     unique (workspace_id, provider_connection_id, absence_id, absence_revision, decision_id),
   constraint reviewer_mutation_intents_link_key
@@ -32,6 +41,39 @@ create table reviewer_mutation_intents (
       absence_id, absence_revision, decision_id, id
     )
 );
+
+create function validate_reviewer_mutation_intent_insert() returns trigger
+language plpgsql as $$
+declare
+  current_revision integer;
+begin
+  select revision into current_revision
+  from reviewer_absences
+  where workspace_id = new.workspace_id
+    and provider = new.provider
+    and provider_connection_id = new.provider_connection_id
+    and id = new.absence_id;
+  if current_revision is null or current_revision <> new.absence_revision then
+    raise exception 'reviewer mutation intent absence revision is not current';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger reviewer_mutation_intents_validate_insert
+before insert on reviewer_mutation_intents
+for each row execute function validate_reviewer_mutation_intent_insert();
+
+create function reject_reviewer_mutation_intent_update() returns trigger
+language plpgsql as $$
+begin
+  raise exception 'reviewer mutation intents are immutable';
+end;
+$$;
+
+create trigger reviewer_mutation_intents_reject_update
+before update on reviewer_mutation_intents
+for each row execute function reject_reviewer_mutation_intent_update();
 
 alter table reviewer_replacements add column mutation_intent_id uuid;
 alter table reviewer_replacements
@@ -46,3 +88,35 @@ alter table reviewer_replacements
 alter table reviewer_replacements
   add constraint reviewer_replacements_replaced_intent_check
   check (outcome <> 'replaced' or mutation_intent_id is not null) not valid;
+
+alter table reviewer_replacements
+  add constraint reviewer_replacements_state_outcome_check
+  check (
+    (state = 'finalizer_pending'
+      and outcome in ('replaced', 'skipped_policy_satisfied', 'no_replacement_available')
+      and last_error is null)
+    or (state = 'completed' and last_error is null)
+    or (state = 'permanent_failure' and length(btrim(last_error)) > 0)
+  ) not valid;
+
+create function validate_reviewer_replacement_insert() returns trigger
+language plpgsql as $$
+begin
+  if new.outcome = 'permanent_failure' then
+    if new.state <> 'permanent_failure' or length(btrim(new.last_error)) = 0 then
+      raise exception 'permanent reviewer failure requires permanent_failure state and error';
+    end if;
+  elsif new.outcome in ('replaced', 'skipped_policy_satisfied', 'no_replacement_available') then
+    if new.state <> 'finalizer_pending' or new.last_error is not null then
+      raise exception 'mapped reviewer finalizer outcome requires finalizer_pending state';
+    end if;
+  elsif new.state <> 'completed' or new.last_error is not null then
+    raise exception 'reviewer outcome without finalizer requires completed state';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger reviewer_replacements_validate_insert
+before insert on reviewer_replacements
+for each row execute function validate_reviewer_replacement_insert();

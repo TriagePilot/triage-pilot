@@ -3,11 +3,13 @@ import { describe, expect, it } from "vitest";
 import type { ProviderKind, ReviewerReplacementEventV1 } from "@triagepilot/contracts";
 
 import {
+  applyFixedRetention,
   ProviderConnectionUnavailableError,
   ReviewerAbsenceRevisionError,
   ReviewerAvailabilityValidationError,
   createWorkspaceReviewerAvailability,
   persistDecision,
+  recoverStaleJobs,
 } from "../src";
 import { withPostgresTestDatabase } from "./postgres";
 
@@ -77,6 +79,315 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer avail
         absenceRevision: fixture.absence.revision,
         decisionId: fixture.decisionId,
       })).resolves.toBeNull();
+    });
+  });
+
+  it("rejects direct mutation of an immutable reviewer mutation intent", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "availability-intent-immutable");
+
+      await expect(db.updateTable("reviewer_mutation_intents")
+        .set({ replacement_actor_id: alternateReplacementActor })
+        .where("id", "=", fixture.mutationIntentId)
+        .execute()).rejects.toThrow(/immutable/i);
+
+      await expect(fixture.availability.loadMutationIntent({
+        workspaceId: fixture.scope.workspaceId,
+        providerConnectionId: fixture.scope.providerConnectionId,
+        absenceId: fixture.absence.id,
+        absenceRevision: fixture.absence.revision,
+        decisionId: fixture.decisionId,
+      })).resolves.toMatchObject({ replacementActorId: replacementActor });
+    });
+  });
+
+  it("rejects direct intent inserts that mix connection, repository, decision, or absence revision", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "availability-intent-source-a");
+      const connectionB = await db.insertInto("provider_connections").values({
+        workspace_id: fixture.scope.workspaceId,
+        provider: "github",
+        external_connection_id: "availability-intent-source-b",
+        workspace_login: "source-b",
+        account_type: "organization",
+        status: "suspended",
+        permissions: {},
+      }).returning("id").executeTakeFirstOrThrow();
+      const repositoryB = await db.insertInto("repositories").values({
+        workspace_id: fixture.scope.workspaceId,
+        provider: "github",
+        provider_connection_id: connectionB.id,
+        external_repository_id: "source-b-repository",
+        owner: "example",
+        name: "source-b",
+        config_state: "valid",
+      }).returning("id").executeTakeFirstOrThrow();
+      const decisionB = await persistDecision(db, fixture.scope.workspaceId, {
+        repositoryId: repositoryB.id,
+        deliveryId: "source-b-delivery",
+        routingKey: "source-b-routing",
+        changeRequestId: "source-b-change",
+        pullNumber: 18,
+        headSha: "source-b-head",
+        mode: "enforce",
+        action: "request_human_review",
+        actionStatus: "pending",
+        riskScore: 50,
+        selectedReviewers: [unavailableActor],
+        details: {
+          ownership: { preferredReviewers: [unavailableActor, replacementActor], eligibleReviewers: [unavailableActor, replacementActor] },
+          routing: { requestedReviewerCount: 1 },
+        },
+      });
+      const repositoryA = await db.selectFrom("repositories").select("id")
+        .where("workspace_id", "=", fixture.scope.workspaceId)
+        .where("external_repository_id", "=", fixture.externalRepositoryId)
+        .executeTakeFirstOrThrow();
+      await db.deleteFrom("reviewer_mutation_intents").where("id", "=", fixture.mutationIntentId).execute();
+
+      const insertMixed = (repositoryRecordId: string, repositoryId: string, decisionId: string, absenceRevision: number) => sql`
+        insert into reviewer_mutation_intents (
+          workspace_id, provider, provider_connection_id, absence_id, absence_revision,
+          decision_id, repository_record_id, repository_id, change_request_id, expected_head_revision,
+          unavailable_actor_id, replacement_actor_id
+        ) values (
+          ${fixture.scope.workspaceId}::uuid, 'github', ${fixture.scope.providerConnectionId}::uuid,
+          ${fixture.absence.id}::uuid, ${absenceRevision}, ${decisionId}::uuid, ${repositoryRecordId}::uuid, ${repositoryId},
+          ${changeRequestId}, 'head-1', ${unavailableActor}, ${alternateReplacementActor}
+        )
+      `.execute(db);
+
+      await expect(insertMixed(repositoryB.id, "source-b-repository", fixture.decisionId, fixture.absence.revision))
+        .rejects.toThrow();
+      await expect(insertMixed(repositoryA.id, fixture.externalRepositoryId, decisionB.decisionId, fixture.absence.revision))
+        .rejects.toThrow();
+      await expect(insertMixed(repositoryA.id, fixture.externalRepositoryId, fixture.decisionId, fixture.absence.revision + 1))
+        .rejects.toThrow(/revision/i);
+    });
+  });
+
+  it.each([
+    ["permanent_failure", "completed", "provider failed"],
+    ["permanent_failure", "finalizer_pending", "provider failed"],
+    ["no_replacement_available", "completed", null],
+  ] as const)("rejects invalid replacement state/outcome %s/%s before writing", async (outcome, state, lastError) => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, `availability-invalid-${outcome}-${state}`);
+      const input = nonMutatingReplacementInput(fixture, outcome === "no_replacement_available" ? outcome : "permanent_failure");
+
+      await expect(fixture.availability.persistReplacement({
+        ...input,
+        outcome,
+        state,
+        lastError,
+        event: { ...input.event, outcome },
+      } as never)).rejects.toBeInstanceOf(ReviewerAvailabilityValidationError);
+      await expect(db.selectFrom("reviewer_replacements").select("id").execute()).resolves.toEqual([]);
+    });
+  });
+
+  it("retains cutoff-crossing decisions needed by an intent or pending finalizer without blocking unrelated deletion", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const prepared = await seedReplacementFixture(db, "availability-retention-intent");
+      const pending = await seedReplacementFixture(db, "availability-retention-finalizer");
+      await pending.availability.persistReplacement(replacementInput(pending));
+      const old = new Date("2026-05-01T00:00:00.000Z");
+      const unprotected = await db.insertInto("routing_decisions").values({
+        workspace_id: prepared.scope.workspaceId,
+        delivery_id: "retention-unprotected",
+        routing_key: "retention-unprotected",
+        action: "no_eligible_reviewer",
+        risk_score: 1,
+        details: {},
+        effective_config_hash: "retention-hash",
+        inheritance_mode: "legacy",
+        created_at: old,
+      }).returning("id").executeTakeFirstOrThrow();
+      await db.updateTable("routing_decisions").set({ created_at: old })
+        .where("id", "in", [prepared.decisionId, pending.decisionId]).execute();
+
+      await applyFixedRetention(db, prepared.scope.workspaceId, new Date("2026-09-01T00:00:00.000Z"));
+      await applyFixedRetention(db, pending.scope.workspaceId, new Date("2026-09-01T00:00:00.000Z"));
+
+      await expect(db.selectFrom("routing_decisions").select("id")
+        .where("id", "in", [prepared.decisionId, pending.decisionId]).execute()).resolves.toHaveLength(2);
+      await expect(db.selectFrom("routing_decisions").select("id").where("id", "=", unprotected.id).executeTakeFirst())
+        .resolves.toBeUndefined();
+      await expect(db.selectFrom("reviewer_mutation_intents").select("id").execute()).resolves.toHaveLength(2);
+      await expect(db.selectFrom("reviewer_replacements").select("state").executeTakeFirstOrThrow())
+        .resolves.toMatchObject({ state: "finalizer_pending" });
+    });
+  });
+
+  it("atomically marks a stale last-attempt finalizer and its job permanently failed", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "availability-stale-finalizer");
+      const persisted = await fixture.availability.persistReplacement(replacementInput(fixture));
+      const replacementId = persisted.replacement!.id;
+      const recovery = {
+        kind: "reviewer_replacement_finalizer",
+        phase: "run_finalizer",
+        job: {
+          kind: "activate_reviewer_absence",
+          workspaceId: fixture.scope.workspaceId,
+          providerConnectionId: fixture.scope.providerConnectionId,
+          absenceId: fixture.absence.id,
+          absenceRevision: fixture.absence.revision,
+        },
+        finalizer: { action: "reevaluate_policy", decisionId: fixture.decisionId, summary: null },
+        replacementId,
+        outcome: "replaced",
+        replacementActorId: replacementActor,
+        mutationIntentId: fixture.mutationIntentId,
+        providerEffectsApplied: true,
+        persistence: null,
+        retryable: true,
+        lastError: "finalizer unavailable",
+      };
+      const lockedAt = new Date("2026-09-01T10:00:00.000Z");
+      await db.updateTable("jobs").set({
+        status: "running",
+        attempt_count: 4,
+        max_attempts: 4,
+        locked_at: lockedAt,
+        locked_by: "dead-worker",
+        payload: {
+          kind: "activate_reviewer_absence",
+          workspaceId: fixture.scope.workspaceId,
+          providerConnectionId: fixture.scope.providerConnectionId,
+          absenceId: fixture.absence.id,
+          absenceRevision: fixture.absence.revision,
+          reviewerReplacementFinalizerRecovery: recovery,
+        },
+      }).where("workspace_id", "=", fixture.scope.workspaceId)
+        .where("kind", "=", "activate_reviewer_absence").execute();
+
+      await recoverStaleJobs(db, fixture.scope.workspaceId, new Date("2026-09-01T10:16:00.000Z"));
+
+      await expect(db.selectFrom("reviewer_replacements").select(["state", "last_error"])
+        .where("id", "=", replacementId).executeTakeFirstOrThrow()).resolves.toEqual({
+        state: "permanent_failure",
+        last_error: "job lease expired after maximum attempts",
+      });
+      await expect(db.selectFrom("jobs").select(["status", "last_error"])
+        .where("workspace_id", "=", fixture.scope.workspaceId).where("kind", "=", "activate_reviewer_absence")
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+        status: "failed",
+        last_error: "job lease expired after maximum attempts",
+      });
+    });
+  });
+
+  it("atomically audits a stale last-attempt provider-persistence recovery before failing its job", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "availability-stale-persistence");
+      const persistence = replacementInput(fixture);
+      const lockedAt = new Date("2026-09-01T10:00:00.000Z");
+      await db.updateTable("jobs").set({
+        status: "running",
+        attempt_count: 4,
+        max_attempts: 4,
+        locked_at: lockedAt,
+        locked_by: "dead-worker",
+        payload: {
+          kind: "activate_reviewer_absence",
+          workspaceId: fixture.scope.workspaceId,
+          providerConnectionId: fixture.scope.providerConnectionId,
+          absenceId: fixture.absence.id,
+          absenceRevision: fixture.absence.revision,
+          reviewerReplacementFinalizerRecovery: {
+            kind: "reviewer_replacement_finalizer",
+            phase: "persist_replacement",
+            job: {
+              kind: "activate_reviewer_absence",
+              workspaceId: fixture.scope.workspaceId,
+              providerConnectionId: fixture.scope.providerConnectionId,
+              absenceId: fixture.absence.id,
+              absenceRevision: fixture.absence.revision,
+            },
+            finalizer: { action: "reevaluate_policy", decisionId: fixture.decisionId, summary: null },
+            replacementId: null,
+            outcome: "replaced",
+            replacementActorId: replacementActor,
+            mutationIntentId: fixture.mutationIntentId,
+            providerEffectsApplied: true,
+            persistence,
+            retryable: true,
+            lastError: "replacement persistence unavailable",
+          },
+        },
+      }).where("workspace_id", "=", fixture.scope.workspaceId)
+        .where("kind", "=", "activate_reviewer_absence").execute();
+
+      await recoverStaleJobs(db, fixture.scope.workspaceId, new Date("2026-09-01T10:16:00.000Z"));
+
+      await expect(db.selectFrom("reviewer_replacements")
+        .select(["outcome", "state", "last_error", "mutation_intent_id"])
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+        outcome: "permanent_failure",
+        state: "permanent_failure",
+        last_error: "job lease expired after maximum attempts",
+        mutation_intent_id: fixture.mutationIntentId,
+      });
+      await expect(readSelectedActors(db, fixture.decisionId)).resolves.toEqual([unavailableActor]);
+      await expect(db.selectFrom("jobs").select("status")
+        .where("workspace_id", "=", fixture.scope.workspaceId).where("kind", "=", "activate_reviewer_absence")
+        .executeTakeFirstOrThrow()).resolves.toEqual({ status: "failed" });
+    });
+  });
+
+  it("does not mutate a pending replacement for a malformed stale recovery payload", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "availability-stale-malformed");
+      const persisted = await fixture.availability.persistReplacement(replacementInput(fixture));
+      const replacementId = persisted.replacement!.id;
+      const lockedAt = new Date("2026-09-01T10:00:00.000Z");
+      await db.updateTable("jobs").set({
+        status: "running",
+        attempt_count: 4,
+        max_attempts: 4,
+        locked_at: lockedAt,
+        locked_by: "dead-worker",
+        payload: {
+          kind: "activate_reviewer_absence",
+          workspaceId: fixture.scope.workspaceId,
+          providerConnectionId: fixture.scope.providerConnectionId,
+          absenceId: fixture.absence.id,
+          absenceRevision: fixture.absence.revision,
+          reviewerReplacementFinalizerRecovery: {
+            kind: "reviewer_replacement_finalizer",
+            phase: "run_finalizer",
+            job: {
+              kind: "activate_reviewer_absence",
+              workspaceId: fixture.scope.workspaceId,
+              providerConnectionId: fixture.scope.providerConnectionId,
+              absenceId: fixture.absence.id,
+              absenceRevision: fixture.absence.revision,
+            },
+            finalizer: { action: "reevaluate_policy", decisionId: fixture.decisionId, summary: null },
+            replacementId,
+            outcome: "replaced",
+            replacementActorId: replacementActor,
+            mutationIntentId: "intent-does-not-match",
+            providerEffectsApplied: true,
+            persistence: null,
+            retryable: true,
+            lastError: "finalizer unavailable",
+          },
+        },
+      }).where("workspace_id", "=", fixture.scope.workspaceId)
+        .where("kind", "=", "activate_reviewer_absence").execute();
+
+      await recoverStaleJobs(db, fixture.scope.workspaceId, new Date("2026-09-01T10:16:00.000Z"));
+
+      await expect(db.selectFrom("reviewer_replacements").select(["state", "last_error"])
+        .where("id", "=", replacementId).executeTakeFirstOrThrow()).resolves.toEqual({
+        state: "finalizer_pending",
+        last_error: null,
+      });
+      await expect(db.selectFrom("jobs").select("status")
+        .where("workspace_id", "=", fixture.scope.workspaceId).where("kind", "=", "activate_reviewer_absence")
+        .executeTakeFirstOrThrow()).resolves.toEqual({ status: "failed" });
     });
   });
 
@@ -453,6 +764,65 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer avail
     });
   });
 
+  it.each(["revise", "cancel", "window_expired"] as const)(
+    "persists and exactly replays a linked permanent-failure audit after %s rejects normal persistence",
+    async (mutation) => {
+      await withPostgresTestDatabase(async (db) => {
+        const fixture = await seedReplacementFixture(db, `availability-intent-audit-${mutation}`);
+        let completedAt = now;
+        if (mutation === "revise") {
+          await fixture.availability.reviseAbsence({
+            provider: fixture.scope.provider,
+            providerConnectionId: fixture.scope.providerConnectionId,
+            absenceId: fixture.absence.id,
+            expectedRevision: fixture.absence.revision,
+            externalActorId: "@user-a81c73",
+            startAt: new Date("2026-08-31T12:00:00.000Z"),
+            endAt: new Date("2026-09-03T12:00:00.000Z"),
+            now,
+          });
+        } else if (mutation === "cancel") {
+          await fixture.availability.cancelAbsence({
+            provider: fixture.scope.provider,
+            providerConnectionId: fixture.scope.providerConnectionId,
+            absenceId: fixture.absence.id,
+            expectedRevision: fixture.absence.revision,
+            now,
+          });
+        } else {
+          completedAt = new Date("2026-09-03T12:00:00.000Z");
+        }
+        const normalInput = replacementInput(fixture);
+        const normal = {
+          ...normalInput,
+          completedAt,
+          event: { ...normalInput.event, occurredAt: completedAt.toISOString() },
+        };
+        await expect(fixture.availability.persistReplacement(normal)).resolves.toEqual({
+          inserted: false,
+          activationCurrent: false,
+          replacement: null,
+        });
+        const audit = mutationIntentRecoveryInput(fixture, completedAt, `persistence exhausted after ${mutation}`);
+
+        const first = await fixture.availability.persistMutationIntentRecovery(audit);
+        await expect(fixture.availability.persistMutationIntentRecovery(audit)).resolves.toMatchObject({
+          inserted: false,
+          replacement: { id: first.replacement!.id },
+        });
+        await expect(fixture.availability.listReplacementHistory(fixture.absence.id)).resolves.toEqual([
+          expect.objectContaining({
+            id: first.replacement!.id,
+            outcome: "permanent_failure",
+            state: "permanent_failure",
+            mutationIntentId: fixture.mutationIntentId,
+          }),
+        ]);
+        await expect(readSelectedActors(db, fixture.decisionId)).resolves.toEqual([unavailableActor]);
+      });
+    },
+  );
+
   it.each(["revise", "cancel", "suspend"] as const)(
     "keeps revision-specific pending finalizers recoverable after absence %s",
     async (mutation) => {
@@ -827,10 +1197,38 @@ function nonMutatingReplacementInput(
     ...input,
     replacementActorId: null,
     outcome,
-    state: outcome === "permanent_failure" ? "permanent_failure" as const : "completed" as const,
+    state: outcome === "permanent_failure"
+      ? "permanent_failure" as const
+      : outcome === "no_replacement_available"
+        ? "finalizer_pending" as const
+        : "completed" as const,
     lastError: outcome === "permanent_failure" ? "provider rejected replacement" : null,
     replaceCohort: false,
     event: { ...input.event, replacementActor: null, outcome },
+  };
+}
+
+function mutationIntentRecoveryInput(
+  fixture: Awaited<ReturnType<typeof seedReplacementFixture>>,
+  completedAt: Date,
+  error: string,
+) {
+  const input = replacementInput(fixture);
+  return {
+    ...input,
+    replacementActorId: null,
+    outcome: "permanent_failure" as const,
+    reason: error,
+    state: "permanent_failure" as const,
+    lastError: error,
+    completedAt,
+    replaceCohort: false,
+    event: {
+      ...input.event,
+      occurredAt: completedAt.toISOString(),
+      replacementActor: null,
+      outcome: "permanent_failure" as const,
+    },
   };
 }
 

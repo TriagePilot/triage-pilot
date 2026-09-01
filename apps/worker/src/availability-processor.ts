@@ -1,11 +1,14 @@
 import {
   activateReviewerAbsence,
+  assertPersistReviewerReplacementInput,
   assertReviewerReplacementFinalizerRecovery,
   type ReviewerAvailabilityPorts,
   type ReviewerReplacementFinalizerRecovery,
+  type ReviewerReplacementRecoveryRecord,
 } from "@triagepilot/application";
 import type { ReviewerAbsenceActivationJobPayload } from "@triagepilot/contracts";
 import type { ProviderKind } from "@triagepilot/contracts";
+import { classifyWorkerError, PermanentJobError } from "./errors";
 
 export type ReviewerAvailabilityServices = ReviewerAvailabilityPorts;
 export interface ReviewerAbsenceActivationJobMessage extends ReviewerAbsenceActivationJobPayload {
@@ -29,17 +32,27 @@ export async function recoverReviewerReplacementFinalizer(
 
   if (recovery.phase !== "persist_replacement") {
     try {
-      await assertPendingFinalizerMatchesRecovery(recovery, services);
+      const record = await assertReplacementMatchesRecovery(recovery, services);
+      if (recovery.phase === "complete_replacement" && record.state === "completed") return null;
+      if (record.state !== "finalizer_pending") {
+        throw new PermanentJobError("Reviewer replacement recovery is not pending finalization");
+      }
     } catch (error) {
-      return { ...recovery, lastError: errorMessage(error) };
+      return classifiedRecovery(recovery, error);
     }
   }
 
   if (recovery.phase === "persist_replacement") {
     try {
-      const persisted = await services.availability.persistReplacement(recovery.persistence);
+      const persisted = recovery.outcome === "permanent_failure"
+        ? await services.availability.persistMutationIntentRecovery(recovery.persistence)
+        : await services.availability.persistReplacement(recovery.persistence);
       if (!persisted.activationCurrent || persisted.replacement === null) {
-        throw new Error("Reviewer replacement recovery persistence rejected durable provider effects");
+        const audited = await services.availability.persistMutationIntentRecovery(
+          mutationIntentRecoveryAudit(recovery, "Final replacement persistence rejected stale state."),
+        );
+        if (audited.replacement === null) throw new Error("Reviewer mutation recovery audit was not persisted");
+        return null;
       }
       if (recovery.finalizer === null) return null;
       recovery = {
@@ -49,7 +62,7 @@ export async function recoverReviewerReplacementFinalizer(
         persistence: null,
       } as ReviewerReplacementFinalizerRecovery;
     } catch (error) {
-      return { ...recovery, lastError: errorMessage(error) };
+      return classifiedRecovery(recovery, error);
     }
   }
 
@@ -67,7 +80,7 @@ export async function recoverReviewerReplacementFinalizer(
         phase: "complete_replacement",
       } as ReviewerReplacementFinalizerRecovery;
     } catch (error) {
-      return { ...recovery, lastError: errorMessage(error) };
+      return classifiedRecovery(recovery, error);
     }
   }
 
@@ -82,7 +95,7 @@ export async function recoverReviewerReplacementFinalizer(
       if (completed === null) throw new Error("Reviewer replacement finalizer completion was not persisted");
       return null;
     } catch (error) {
-      return { ...recovery, lastError: errorMessage(error) };
+      return classifiedRecovery(recovery, error);
     }
   }
 
@@ -95,8 +108,17 @@ export async function markReviewerReplacementRecoveryExhausted(
   error: string,
 ): Promise<void> {
   assertReviewerReplacementFinalizerRecovery(recovery);
-  if (recovery.replacementId === null) return;
-  await assertPendingFinalizerMatchesRecovery(recovery, services);
+  if (recovery.replacementId === null) {
+    const persisted = await services.availability.persistMutationIntentRecovery(
+      mutationIntentRecoveryAudit(recovery, error),
+    );
+    if (persisted.replacement === null) throw new Error("Exhausted reviewer mutation recovery audit was not persisted");
+    return;
+  }
+  const record = await assertReplacementMatchesRecovery(recovery, services);
+  if (record.state !== "finalizer_pending") {
+    throw new Error("Exhausted reviewer replacement is not pending finalization");
+  }
   const updated = await services.availability.updateReplacementState({
     replacementId: recovery.replacementId,
     expectedState: "finalizer_pending",
@@ -106,27 +128,58 @@ export async function markReviewerReplacementRecoveryExhausted(
   if (updated === null) throw new Error("Exhausted reviewer replacement recovery was not persisted");
 }
 
-async function assertPendingFinalizerMatchesRecovery(
+async function assertReplacementMatchesRecovery(
   recovery: ReviewerReplacementFinalizerRecovery,
   services: ReviewerAvailabilityServices,
-): Promise<void> {
+): Promise<ReviewerReplacementRecoveryRecord> {
   if (recovery.replacementId === null) {
     throw new Error("Reviewer replacement recovery has no durable replacement identity");
   }
-  const pending = await services.availability.listPendingFinalizers({
-    absenceId: recovery.job.absenceId,
-    absenceRevision: recovery.job.absenceRevision,
-  });
-  const record = pending.find((candidate) => candidate.id === recovery.replacementId);
+  const record = await services.availability.loadReplacement(recovery.replacementId);
   if (
-    record === undefined
+    record === null
     || record.decisionId !== recovery.finalizer?.decisionId
     || record.outcome !== recovery.outcome
     || record.replacementActorId !== recovery.replacementActorId
     || record.mutationIntentId !== recovery.mutationIntentId
-  ) throw new Error("Reviewer replacement recovery does not match durable pending finalizer provenance");
+  ) throw new PermanentJobError("Reviewer replacement recovery does not match durable replacement provenance");
+  return record;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function mutationIntentRecoveryAudit(
+  recovery: ReviewerReplacementFinalizerRecovery,
+  error: string,
+) {
+  if (recovery.persistence === null || recovery.mutationIntentId === null) {
+    throw new PermanentJobError("Reviewer mutation recovery has no durable persistence provenance");
+  }
+  const value: unknown = {
+    ...recovery.persistence,
+    replacementActorId: null,
+    mutationIntentId: recovery.mutationIntentId,
+    outcome: "permanent_failure",
+    reason: error,
+    state: "permanent_failure",
+    lastError: error,
+    replaceCohort: false,
+    event: {
+      ...recovery.persistence.event,
+      replacementActor: null,
+      outcome: "permanent_failure",
+    },
+  };
+  assertPersistReviewerReplacementInput(value);
+  return value;
+}
+
+function classifiedRecovery(
+  recovery: ReviewerReplacementFinalizerRecovery,
+  error: unknown,
+): ReviewerReplacementFinalizerRecovery {
+  const classified = classifyWorkerError(error);
+  return {
+    ...recovery,
+    lastError: classified.message,
+    retryable: !(classified instanceof PermanentJobError),
+  };
 }

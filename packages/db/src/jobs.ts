@@ -2,6 +2,11 @@ import type { Kysely } from "kysely";
 import type { ProviderConnectionId, ProviderKind, WorkspaceId } from "@triagepilot/contracts";
 
 import type { Database, JobRow } from "./kysely.js";
+import {
+  buildMutationIntentRecoveryAudit,
+  persistMutationIntentRecoveryTransaction,
+  type PersistReviewerReplacementInput,
+} from "./availability.js";
 
 export type JobKind = "process_pull_request" | "evaluate_human_review_policy" | "activate_reviewer_absence";
 export type JobStatus = "queued" | "running" | "succeeded" | "failed";
@@ -77,34 +82,208 @@ export async function recoverStaleJobs(
   staleAfterMs = 15 * 60 * 1000,
 ): Promise<void> {
   const staleBefore = new Date(now.getTime() - staleAfterMs);
-  await db
-    .updateTable("jobs")
-    .set({
-      status: "failed",
-      run_at: now,
-      locked_at: null,
-      locked_by: null,
-      last_error: "job lease expired after maximum attempts",
-      updated_at: now,
-    })
-    .where("workspace_id", "=", workspaceId)
-    .where("status", "=", "running")
-    .where("locked_at", "<", staleBefore)
-    .whereRef("attempt_count", ">=", "max_attempts")
-    .execute();
-  await db
-    .updateTable("jobs")
-    .set({
-      status: "queued",
-      locked_at: null,
-      locked_by: null,
-      updated_at: now,
-    })
-    .where("workspace_id", "=", workspaceId)
-    .where("status", "=", "running")
-    .where("locked_at", "<", staleBefore)
-    .whereRef("attempt_count", "<", "max_attempts")
-    .execute();
+  await db.transaction().execute(async (trx) => {
+    const exhausted = await trx.selectFrom("jobs")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .where("status", "=", "running")
+      .where("locked_at", "<", staleBefore)
+      .whereRef("attempt_count", ">=", "max_attempts")
+      .forUpdate()
+      .execute();
+    const failure = "job lease expired after maximum attempts";
+    for (const job of exhausted) {
+      const persistenceAudit = parseStaleReviewerPersistenceRecovery(job, failure);
+      if (persistenceAudit !== null) {
+        await persistMutationIntentRecoveryTransaction(trx, job.workspace_id, persistenceAudit);
+      }
+      const recovery = parseStaleReviewerFinalizerRecovery(job);
+      if (recovery !== null) {
+        await trx.updateTable("reviewer_replacements")
+          .set({ state: "permanent_failure", last_error: failure })
+          .where("id", "=", recovery.replacementId)
+          .where("workspace_id", "=", job.workspace_id)
+          .where("provider", "=", job.provider)
+          .where("provider_connection_id", "=", job.provider_connection_id)
+          .where("absence_id", "=", recovery.absenceId)
+          .where("absence_revision", "=", recovery.absenceRevision)
+          .where("decision_id", "=", recovery.decisionId)
+          .where("outcome", "=", recovery.outcome)
+          .where("replacement_actor_id", recovery.replacementActorId === null ? "is" : "=", recovery.replacementActorId)
+          .where("mutation_intent_id", recovery.mutationIntentId === null ? "is" : "=", recovery.mutationIntentId)
+          .where("state", "=", "finalizer_pending")
+          .execute();
+      }
+      await trx.updateTable("jobs")
+        .set({
+          status: "failed",
+          run_at: now,
+          locked_at: null,
+          locked_by: null,
+          last_error: failure,
+          updated_at: now,
+        })
+        .where("id", "=", job.id)
+        .where("workspace_id", "=", workspaceId)
+        .where("status", "=", "running")
+        .where("locked_by", "=", job.locked_by)
+        .where("attempt_count", "=", job.attempt_count)
+        .execute();
+    }
+    await trx.updateTable("jobs")
+      .set({
+        status: "queued",
+        locked_at: null,
+        locked_by: null,
+        updated_at: now,
+      })
+      .where("workspace_id", "=", workspaceId)
+      .where("status", "=", "running")
+      .where("locked_at", "<", staleBefore)
+      .whereRef("attempt_count", "<", "max_attempts")
+      .execute();
+  });
+}
+
+function parseStaleReviewerPersistenceRecovery(
+  job: JobRow,
+  failure: string,
+): PersistReviewerReplacementInput | null {
+  if (job.kind !== "activate_reviewer_absence" || !isRecord(job.payload)) return null;
+  const payload = job.payload;
+  const raw = payload.reviewerReplacementFinalizerRecovery;
+  if (
+    !isRecord(raw)
+    || raw.kind !== "reviewer_replacement_finalizer"
+    || raw.phase !== "persist_replacement"
+    || raw.replacementId !== null
+    || !isUuid(raw.mutationIntentId)
+    || raw.providerEffectsApplied !== true
+    || typeof raw.retryable !== "boolean"
+    || !isNonBlank(raw.lastError)
+    || !isRecord(raw.persistence)
+    || !isRecord(raw.job)
+    || raw.job.kind !== "activate_reviewer_absence"
+    || raw.job.workspaceId !== job.workspace_id
+    || raw.job.providerConnectionId !== job.provider_connection_id
+    || !isUuid(raw.job.absenceId)
+    || !isPositiveInteger(raw.job.absenceRevision)
+    || payload.workspaceId !== job.workspace_id
+    || payload.providerConnectionId !== job.provider_connection_id
+    || payload.absenceId !== raw.job.absenceId
+    || payload.absenceRevision !== raw.job.absenceRevision
+  ) return null;
+  if (raw.outcome === "replaced") {
+    if (
+      !isNonBlank(raw.replacementActorId)
+      || !isRecord(raw.finalizer)
+      || raw.finalizer.action !== "reevaluate_policy"
+      || !isUuid(raw.finalizer.decisionId)
+      || !isNullableString(raw.finalizer.summary)
+    ) return null;
+  } else if (raw.outcome === "permanent_failure") {
+    if (raw.replacementActorId !== null || raw.finalizer !== null) return null;
+  } else return null;
+  if (
+    raw.persistence.outcome !== raw.outcome
+    || raw.persistence.replacementActorId !== raw.replacementActorId
+    || raw.persistence.mutationIntentId !== raw.mutationIntentId
+    || (isRecord(raw.finalizer) && raw.persistence.decisionId !== raw.finalizer.decisionId)
+  ) return null;
+  try {
+    const audit = buildMutationIntentRecoveryAudit(raw.persistence, job.workspace_id, failure);
+    if (
+      audit.provider !== job.provider
+      || audit.providerConnectionId !== job.provider_connection_id
+      || audit.absenceId !== raw.job.absenceId
+      || audit.absenceRevision !== raw.job.absenceRevision
+      || audit.mutationIntentId !== raw.mutationIntentId
+    ) return null;
+    return audit;
+  } catch {
+    return null;
+  }
+}
+
+function parseStaleReviewerFinalizerRecovery(job: JobRow): {
+  replacementId: string;
+  absenceId: string;
+  absenceRevision: number;
+  decisionId: string;
+  outcome: "replaced" | "skipped_policy_satisfied" | "no_replacement_available";
+  replacementActorId: string | null;
+  mutationIntentId: string | null;
+} | null {
+  if (job.kind !== "activate_reviewer_absence" || !isRecord(job.payload)) return null;
+  const payload = job.payload;
+  const raw = payload.reviewerReplacementFinalizerRecovery;
+  if (
+    !isRecord(raw)
+    || raw.kind !== "reviewer_replacement_finalizer"
+    || (raw.phase !== "run_finalizer" && raw.phase !== "complete_replacement")
+    || !isUuid(raw.replacementId)
+    || raw.persistence !== null
+    || typeof raw.retryable !== "boolean"
+    || !isNonBlank(raw.lastError)
+    || !isRecord(raw.job)
+    || raw.job.kind !== "activate_reviewer_absence"
+    || raw.job.workspaceId !== job.workspace_id
+    || raw.job.providerConnectionId !== job.provider_connection_id
+    || !isUuid(raw.job.absenceId)
+    || !isPositiveInteger(raw.job.absenceRevision)
+    || payload.workspaceId !== job.workspace_id
+    || payload.providerConnectionId !== job.provider_connection_id
+    || payload.absenceId !== raw.job.absenceId
+    || payload.absenceRevision !== raw.job.absenceRevision
+    || !isRecord(raw.finalizer)
+    || !isUuid(raw.finalizer.decisionId)
+    || !isNullableString(raw.finalizer.summary)
+  ) return null;
+  if (raw.outcome === "replaced") {
+    if (
+      !isNonBlank(raw.replacementActorId)
+      || !isUuid(raw.mutationIntentId)
+      || raw.providerEffectsApplied !== true
+      || raw.finalizer.action !== "reevaluate_policy"
+    ) return null;
+  } else if (raw.outcome === "skipped_policy_satisfied" || raw.outcome === "no_replacement_available") {
+    if (
+      raw.replacementActorId !== null
+      || raw.providerEffectsApplied !== false
+      || (raw.mutationIntentId !== null && !isUuid(raw.mutationIntentId))
+      || raw.finalizer.action !== (raw.outcome === "no_replacement_available" ? "fail_policy" : "reevaluate_policy")
+    ) return null;
+  } else return null;
+  return {
+    replacementId: raw.replacementId,
+    absenceId: raw.job.absenceId,
+    absenceRevision: raw.job.absenceRevision,
+    decisionId: raw.finalizer.decisionId,
+    outcome: raw.outcome,
+    replacementActorId: raw.replacementActorId,
+    mutationIntentId: raw.mutationIntentId,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isNonBlank(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function isUuid(value: unknown): value is string {
+  return isNonBlank(value)
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
 function toJobRecord(row: JobRow): JobRecord {

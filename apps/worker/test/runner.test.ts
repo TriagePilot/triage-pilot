@@ -197,6 +197,7 @@ describe("runWorkerOnce", () => {
     }));
     const services = {} as ReviewerAvailabilityPorts;
     const recoverReviewerReplacementFinalizer = vi.fn(async () => null);
+    const processReviewerAbsenceActivationJob = vi.fn(async () => null);
 
     await runWorkerOnce({
       jobClaimer: queue,
@@ -205,7 +206,7 @@ describe("runWorkerOnce", () => {
       now: new Date("2026-09-01T12:00:00.000Z"),
       processRoutingJob: vi.fn(async () => {}),
       buildRoutingServices: vi.fn(() => ({}) as never),
-      processReviewerAbsenceActivationJob: vi.fn(async () => null),
+      processReviewerAbsenceActivationJob,
       recoverReviewerReplacementFinalizer,
       buildReviewerAvailabilityServices: vi.fn(() => services),
     });
@@ -221,7 +222,55 @@ describe("runWorkerOnce", () => {
       }),
       services,
     );
+    expect(processReviewerAbsenceActivationJob).toHaveBeenCalledWith(
+      expect.objectContaining({ absenceId: "absence-1", absenceRevision: 3 }),
+      services,
+    );
     expect(queue.markSucceeded).toHaveBeenCalledOnce();
+  });
+
+  it("continues the same claim after recovering A and preserves the bound when B needs recovery", async () => {
+    const queue = buildQueueWithJob();
+    const recoveryA = serializedRecovery("run_finalizer");
+    const recoveryB = { ...serializedRecovery("run_finalizer"), replacementId: "replacement-2" };
+    queue.claimNext.mockResolvedValue(activationJob({
+      attemptCount: 2,
+      maxAttempts: 4,
+      payload: {
+        kind: "activate_reviewer_absence",
+        workspaceId: "ws_local",
+        providerConnectionId: "123",
+        absenceId: "absence-1",
+        absenceRevision: 3,
+        reviewerReplacementFinalizerRecovery: recoveryA,
+      },
+    }));
+
+    await runWorkerOnce({
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
+      workerId: "worker-1",
+      now: new Date("2026-09-01T12:00:00.000Z"),
+      processRoutingJob: vi.fn(async () => {}),
+      buildRoutingServices: vi.fn(() => ({}) as never),
+      recoverReviewerReplacementFinalizer: vi.fn(async () => null),
+      processReviewerAbsenceActivationJob: vi.fn(async () => recoveryB as never),
+      buildReviewerAvailabilityServices: vi.fn(() => ({} as ReviewerAvailabilityPorts)),
+    });
+
+    expect(queue.markSucceeded).not.toHaveBeenCalled();
+    expect(queue.markFailed).toHaveBeenCalledWith(
+      { ...jobLease, attemptCount: 2, maxAttempts: 4 },
+      "database unavailable",
+      expect.any(Date),
+      {
+        retryable: true,
+        recovery: {
+          payload: expect.objectContaining({ reviewerReplacementFinalizerRecovery: recoveryB }),
+          maxAttempts: 4,
+        },
+      },
+    );
   });
 
   it("rejects incomplete provider-effect recovery before service or credential composition", async () => {
@@ -264,7 +313,7 @@ describe("runWorkerOnce", () => {
 
   it("queues bounded recovery instead of repeating provider effects", async () => {
     const queue = buildQueueWithJob();
-    const claimed = activationJob({ attemptCount: 2, maxAttempts: 5 });
+    const claimed = activationJob({ attemptCount: 1, maxAttempts: 5 });
     queue.claimNext.mockResolvedValue(claimed);
     const recovery = serializedRecovery("persist_replacement", true);
 
@@ -280,16 +329,55 @@ describe("runWorkerOnce", () => {
     });
 
     expect(queue.markFailed).toHaveBeenCalledWith(
-      { ...jobLease, attemptCount: 2 },
-      recovery.lastError,
+      jobLease,
+      "database unavailable",
       expect.any(Date),
       {
         retryable: true,
         recovery: {
           payload: expect.objectContaining({ reviewerReplacementFinalizerRecovery: recovery }),
-          maxAttempts: 5,
+          maxAttempts: 4,
         },
       },
+    );
+  });
+
+  it("stops a permanently classified finalizer recovery immediately", async () => {
+    const queue = buildQueueWithJob();
+    const recovery = { ...serializedRecovery("run_finalizer"), retryable: false };
+    queue.claimNext.mockResolvedValue(activationJob({
+      attemptCount: 2,
+      maxAttempts: 4,
+      payload: {
+        kind: "activate_reviewer_absence",
+        workspaceId: "ws_local",
+        providerConnectionId: "123",
+        absenceId: "absence-1",
+        absenceRevision: 3,
+        reviewerReplacementFinalizerRecovery: serializedRecovery("run_finalizer"),
+      },
+    }));
+    const markReviewerReplacementRecoveryExhausted = vi.fn(async () => {});
+
+    await runWorkerOnce({
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
+      workerId: "worker-1",
+      now: new Date("2026-09-01T12:00:00.000Z"),
+      processRoutingJob: vi.fn(async () => {}),
+      buildRoutingServices: vi.fn(() => ({}) as never),
+      processReviewerAbsenceActivationJob: vi.fn(async () => null),
+      recoverReviewerReplacementFinalizer: vi.fn(async () => recovery as never),
+      markReviewerReplacementRecoveryExhausted,
+      buildReviewerAvailabilityServices: vi.fn(() => ({} as ReviewerAvailabilityPorts)),
+    });
+
+    expect(markReviewerReplacementRecoveryExhausted).toHaveBeenCalledOnce();
+    expect(queue.markFailed).toHaveBeenCalledWith(
+      { ...jobLease, attemptCount: 2, maxAttempts: 4 },
+      "database unavailable",
+      expect.any(Date),
+      { retryable: false },
     );
   });
 
@@ -1093,5 +1181,6 @@ function serializedRecovery(
     providerEffectsApplied,
     persistence,
     lastError: "database unavailable",
+    retryable: true,
   })) as Record<string, unknown>;
 }

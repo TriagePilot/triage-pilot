@@ -2,82 +2,92 @@
 
 ## Status
 
-Task 9 is complete. Claimed reviewer-absence activation jobs now validate their database-owned scope before any workspace repository, provider credential, or adapter is composed. Activation calls the Task 8 use case, persists immutable mutation intent before provider mutation, and resumes only the mapped pending finalizer after terminal history exists. Shadow behavior remains write-free.
+Task 9 and fix round 1 are complete. Claimed reviewer-absence jobs validate scope before composing database repositories, credentials, or provider adapters. Activation uses the Task 8 use case, resumes durable provider-mutation intent, preserves finalizer provenance, and continues across all candidates in the same claimed activation.
 
-The implementation adds migration `0008_reviewer_mutation_intents.sql`. Released migrations `0001` through `0006` were not edited; `0007` was also left unchanged. Because `0008` is now the highest migration, Task 14 must start at `0009` or later and must not reuse or reorder `0008`.
+Migration `0008_reviewer_mutation_intents.sql` remains the highest migration. Migrations `0001` through `0007` were not changed. Task 14 must update its release evidence to expect `0008`; it must not create or start another migration for this handoff.
 
-## RED
+## RED and GREEN
 
-Tests were added before each implementation slice and failed for the intended missing behavior:
+The review findings were implemented test-first. Narrow RED slices proved the missing behavior before implementation:
 
-- the database intent contract failed because `prepareMutationIntent` and `loadMutationIntent` did not exist;
-- concurrent prepare and replacement-linkage tests failed because no atomic immutable record or exact replacement provenance existed;
-- worker processor tests failed because the activation processor did not exist;
-- five runner dispatch tests failed because `activate_reviewer_absence` was unsupported;
-- runtime and composition tests failed because the reviewer-availability service factory and claimed-scope guards were absent;
-- the first complete integration run exposed nine expected migration-list, schema, and direct-replacement fixture mismatches.
+- recovery A incorrectly ended the whole claimed activation instead of continuing to B;
+- orphaned prepared intent could disappear behind revise, cancel, or connection suspension;
+- retention could delete a decision required by intent or finalizer recovery;
+- invalid outcome/state pairs reached persistence adapters;
+- `complete_replacement` rejected an already-committed exact completion;
+- persist-phase exhaustion and last-attempt stale leases could lose durable failure visibility;
+- intent rows were mutable by direct SQL and direct inserts could mix repository sources;
+- recovery bounds inherited an unrelated larger job maximum;
+- permanent finalizer failures were treated as retryable;
+- report handoff incorrectly described a later migration.
 
-Each RED was narrow and was followed by the smallest implementation or fixture change needed to establish the new contract.
+Final GREEN evidence:
 
-## GREEN
+- application, processor, runner, and runtime units: 124/124;
+- real PostgreSQL crash/continuation matrix: 15/15;
+- self-hosted worker composition: 10/10;
+- availability database slice: 34/34;
+- full supported PostgreSQL integration gate: 101/101;
+- root suite: 622 passed, 134 expected database-dependent skips;
+- build and type checks, package boundary, Compose rendering, Docker build, diff check, and both Git-history and working-tree secret scans passed.
 
-- Durable intent and availability database tests: 22/22.
-- PostgreSQL job tests, including activation recovery bounds and stale leases: 10/10.
-- Worker availability processor, runner, and runtime service unit tests: 8/8, 32/32, and 30/30.
-- Real-PostgreSQL crash matrix: 4/4.
-- Self-hosted worker composition: 10/10.
-- Complete PostgreSQL integration suite: 89/89.
-- Default unit suite: 609 passed with 111 expected database-dependent skips.
-- Root build and type checks, package boundary, container build, `git diff --check`, and redacted Git-history and working-directory secret scans passed.
+The standalone public-boundary diagnostic continues to report only the two inherited Task 6 report findings present at the base revision. Its unit gate passes and this change adds no finding.
 
-The standalone public-boundary diagnostic still reports only the two committed Task 6 report findings already present at the base revision. Its unit gate passed, and Task 9 introduced no new finding.
+## Storage and source integrity
 
-## Storage design
+`reviewer_mutation_intents` is provider-neutral durable storage. The atomic create-or-load key is `(workspace_id, provider_connection_id, absence_id, absence_revision, decision_id)`. The immutable row stores provider, repository record and external identity, change-request identity, expected head revision, unavailable actor, and selected replacement actor.
 
-`reviewer_mutation_intents` is provider-neutral durable storage with a database UUID identity. Its complete unique key is `(workspace_id, provider_connection_id, absence_id, absence_revision, decision_id)`. Scoped foreign keys bind the workspace, provider connection, absence revision, decision, and repository. The immutable row also stores provider kind, repository identity, durable change-request identity, expected head revision, unavailable actor, and selected replacement actor.
+`prepareMutationIntent` locks and validates the current source, uses `INSERT ... ON CONFLICT DO NOTHING`, reloads the authoritative row, and compares every immutable field. An exact concurrent retry receives the same intent; a differing proposal fails closed. A database trigger rejects direct updates.
 
-`prepareMutationIntent` locks and validates the current absence and decision source, performs `INSERT ... ON CONFLICT DO NOTHING`, then loads the authoritative row. An exact retry returns the same row. A concurrent prepare whose source or actor differs fails closed rather than overwriting or adopting the new proposal. `loadMutationIntent` remains available after absence revision changes and provider-connection suspension so recovery can use the original actor.
+Composite constraints bind the intent to the same provider connection, repository record, external repository identity, and decision repository. An insert trigger validates the current absence revision. A foreign key cannot include revision because revision is intentionally mutable after preparation; the insert-only trigger validates creation without preventing later revise/cancel recovery. Direct mixed-source and wrong-revision inserts are rejected.
 
-`reviewer_replacements.mutation_intent_id` carries the exact source link. New `replaced` history requires a non-null link, and persistence checks the full immutable intent source plus replacement actor. Pending-finalizer reads return the same link. Branded, nonblank mutation-intent IDs are parsed at database-to-application and queued-recovery boundaries.
+`reviewer_replacements.mutation_intent_id` retains provenance through replacement persistence and finalizer recovery. Runtime boundaries parse nonblank branded intent IDs, and stale-job recovery accepts only UUID-shaped database identities.
 
-## Intent lifecycle and crash recovery
+## Intent lifecycle and crash table
 
-| Interruption point | Durable state | Exact retry behavior |
+| Interruption | Durable state | Exact recovery |
 | --- | --- | --- |
-| Before prepare | No intent and no provider effect | Ordinary selection may run. |
-| After prepare, before provider mutation | Immutable intent with exact actor | Load the intent and revalidate the current request; do not select a new actor. |
-| After DELETE, before POST | Intent plus partially changed provider state | Re-inspect provider state, avoid the completed DELETE, and POST only the stored actor. |
-| After POST, before history persistence | Intent plus completed provider effect | Re-inspect, repeat no provider effect, and persist linked terminal history. |
-| After terminal history, before finalizer | Linked `finalizer_pending` replacement | Replay only the mapped finalizer; perform no provider inspection, DELETE, or POST. |
-| After finalizer, before completion | Linked pending row plus `complete_replacement` recovery | Persist only the terminal replacement state. |
+| Before prepare | no intent/effect | ordinary selection may run |
+| After prepare | immutable actor intent | resume the same actor; never select another |
+| After DELETE | intent plus possible partial provider state | inspect state; never repeat completed DELETE |
+| After POST | intent plus applied provider state | perform no provider write; persist linked history |
+| After history commit | linked `finalizer_pending` row | run only its mapped finalizer |
+| After completion commit | exact completed row | `complete_replacement` replay succeeds idempotently |
+| Activation changed after prepare/DELETE/POST | unfinalized intent | write linked `permanent_failure` audit/event with no provider, policy, finalizer, or cohort write |
 
-The crash matrix used a stateful provider double and a disposable PostgreSQL instance. It proves process death after prepare, between DELETE and POST, after POST but before persistence, and after terminal persistence. Every retry retains the same mutation intent and actor and never repeats an already completed provider effect.
+The real database matrix covers prepare, DELETE, and POST interruption followed by each of revise, cancel, and provider-connection suspension. It also covers current-state resumption, final persistence, and finalizer interruption. Provider write counts prove completed effects are not replayed.
 
-Intents are retained through terminal replacement persistence and all pending-finalizer phases, including after absence revise, cancel, or provider-connection suspend. No activation-path cleanup was added. Later retention work may retire intents only after neither activation nor finalizer recovery can reference them.
+Unfinalized intents are discovered independently of current absence revision/status and active connection. When the original activation is still current, it resumes normally. When it is no longer valid, recovery-specific persistence validates the immutable intent/source, creates one idempotent permanent-failure history/event, and leaves the reviewer cohort untouched.
 
-## Recovery validation and phase semantics
+## Continuation and recovery phases
 
-`ReviewerReplacementFinalizerRecovery` remains separate from policy-check recovery and is runtime validated before dispatch. The runner rejects incomplete phases, invalid timestamps, blank intent IDs, mixed recovery kinds, or scope that differs from the claimed job.
+After a recovery phase returns success, the runner invokes activation processing again under the same claim. Completed A is excluded by history, then B is processed. Real tests cover A recovery followed by fresh B and by B pending finalizer; A provider effects remain at one DELETE and one POST.
 
-- `persist_replacement` contains the exact discriminated persistence payload. It performs only database history/cohort/event persistence.
-- `run_finalizer` requires a durable replacement identity and a matching pending-finalizer row. It runs only the finalizer mapped by that row.
-- `complete_replacement` revalidates the same pending row, then changes only replacement state.
+Recovery remains separate from policy-check recovery and is discriminated as:
 
-Pending validation compares replacement, decision, outcome, replacement actor, and mutation-intent identities. A null-finalizer provider-effect recovery persists linked terminal history and returns without policy or provider writes. Provider effects already observed as applied are not repeated.
+- `persist_replacement`: exact persistence payload and durable intent; provider effects are never repeated;
+- `run_finalizer`: exact pending replacement, outcome, actor, intent, and mapped finalizer;
+- `complete_replacement`: exact pending or already-completed replacement; only state completion is allowed.
 
-Finalizer policy composition resolves the exact persisted decision and repository in the claimed workspace/provider-connection scope. It can resume after connection suspension, while fresh provider mutation still requires an active connection. Repository owner, name, external ID, provider kind, connection, and workspace are all checked before credential lookup or adapter construction.
+Persistence validators require `permanent_failure` outcome to use permanent-failure state and nonblank error, mapped finalizer outcomes to begin pending with no error, and outcomes without finalizers to begin completed. Database insert enforcement and runtime record validation reject invalid combinations before writes. A mapped replacement may later be completed or permanently failed by its finalizer lifecycle.
 
-## Retry, stale lease, and exhaustion
+Permanent and retryable finalizer classifications remain intact through application, processor, and runner. Permanent errors stop immediately and persist visible terminal state.
 
-Existing worker error classification determines retryable versus permanent dispatch failures. Once activation produces recovery, the runner grants a bounded three recovery attempts without resetting the bound on later phases. On valid exhausted recovery, the linked replacement becomes `permanent_failure` with the last error before the job is failed permanently, preserving operator-visible history.
+## Retention, exhaustion, and stale leases
 
-Every success, retry, permanent failure, and recovery transition uses the full claimed lease. A zero-row transition is treated as `StaleJobLeaseError`; a stale worker cannot overwrite a newer claim or completion. Tests cover stale success and stale recovery failure paths.
+Ninety-day decision retention uses per-row `NOT EXISTS` protection for mutation intents, replacement history, and queued/running activation jobs. Protected rows do not abort deletion of unrelated expired decisions. The decision foreign key is restrictive, so retention cannot cascade-delete intent provenance. Terminal cleanup remains future work; safety currently favors retention.
 
-## Tests and operational hygiene
+The first recovery grants exactly three additional claims by setting `max_attempts = current attempt + 3`. Later recovery phases retain that fixed maximum. Tests cover an attempt-1/default-max-5 activation receiving only attempts 2, 3, and 4.
 
-All database tests used one disposable PostgreSQL container on a random host port with an anonymous volume. No credential value was logged, no persistent database was used, and the container and volume were removed after verification.
+Persist-phase stale rejection, explicit exhaustion, and stale last-attempt recovery all create linked permanent-failure audit history without cohort/provider/finalizer mutation. Revised, cancelled, suspended, and window-expired cases are covered, including exact replay.
 
-Commands run:
+Stale last-attempt finalizer recovery locks the job transactionally, validates kind/workspace/provider connection/replacement/absence revision/decision/outcome/actor/intent, updates the exact pending replacement to permanent failure, then fails the job in the same transaction. Malformed recovery fails the job without mutating an unrelated replacement. Every ordinary worker transition still requires the exact claimed lease; stale workers cannot overwrite newer state.
+
+## Test and operational hygiene
+
+All database tests used a disposable PostgreSQL container on a random host port with no persistent volume. No credential value was emitted. The container was removed after verification.
+
+Representative commands:
 
 ```text
 TEST_DATABASE_URL=<disposable> pnpm test:integration
@@ -86,6 +96,7 @@ pnpm test
 pnpm check
 pnpm check:package-boundary
 pnpm check:public-boundary
+docker compose config
 docker build -q .
 gitleaks git --no-banner --redact .
 gitleaks dir --no-banner --redact .
@@ -94,16 +105,12 @@ git diff --check
 
 ## Commit
 
-Single local commit subject:
+Single local commit subject: `fix: make availability recovery lossless`.
 
-```text
-feat: process reviewer absence activations
-```
-
-No push, pull request, tag, publication, dependency change, or persistent database operation was performed.
+No push, pull request, tag, publication, dependency change, credential output, or persistent database operation was performed.
 
 ## Concerns
 
-- Durable mutation intents intentionally have no cleanup path in Task 9. This is the safe recovery posture; later retention work must prove no activation or finalizer reference remains before deletion.
-- The standalone public-boundary diagnostic has two inherited Task 6 report findings at the base revision. Task 9 adds no new finding.
-- Task 14 must treat `0008_reviewer_mutation_intents.sql` as released history for planning purposes and begin at `0009` or later.
+- Intent and protected terminal-history cleanup is intentionally deferred. Any later cleanup must prove no activation, recovery job, or finalizer can still reference the rows.
+- The standalone public-boundary command still exits nonzero for the two inherited Task 6 report findings; the boundary unit gate passes and Task 9 adds none.
+- Task 14 only updates release evidence for highest migration `0008`; it does not create or begin another migration.

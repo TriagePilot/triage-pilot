@@ -168,11 +168,14 @@ export interface WorkspaceReviewerAvailability {
     at: Date;
   }): Promise<ReviewerAbsenceWindow[]>;
   loadActivation(absenceId: string, revision: number): Promise<ReviewerAbsenceActivation | null>;
+  loadReplacement(replacementId: string): Promise<ReviewerReplacement | null>;
+  listUnfinalizedMutationIntents(input: { absenceId: string; absenceRevision: number }): Promise<ReviewerMutationIntent[]>;
   loadMutationIntent(input: ReviewerMutationIntentKey): Promise<ReviewerMutationIntent | null>;
   prepareMutationIntent(input: PrepareReviewerMutationIntentInput): Promise<ReviewerMutationIntent>;
   listPendingFinalizers(input: { absenceId: string; absenceRevision: number }): Promise<ReviewerReplacement[]>;
   listReplacementHistory(absenceId?: string): Promise<ReviewerReplacement[]>;
   persistReplacement(input: PersistReviewerReplacementInput): Promise<PersistReviewerReplacementResult>;
+  persistMutationIntentRecovery(input: PersistReviewerReplacementInput): Promise<PersistReviewerReplacementResult>;
   updateReplacementState(input: {
     replacementId: string;
     expectedState: ReviewerReplacementState;
@@ -393,6 +396,39 @@ export function createWorkspaceReviewerAvailability(
       return row === undefined ? null : toMutationIntent(row);
     },
 
+    async loadReplacement(replacementId) {
+      if (!isNonBlank(replacementId)) throw new ReviewerAvailabilityValidationError("Replacement identifier is malformed");
+      const row = await db.selectFrom("reviewer_replacements")
+        .selectAll()
+        .where("workspace_id", "=", workspaceId)
+        .where("id", "=", replacementId)
+        .executeTakeFirst();
+      return row === undefined ? null : toReplacement(row);
+    },
+
+    async listUnfinalizedMutationIntents(input) {
+      validateExpectedRevision(input.absenceRevision);
+      const rows = await db.selectFrom("reviewer_mutation_intents")
+        .selectAll()
+        .where("workspace_id", "=", workspaceId)
+        .where("absence_id", "=", input.absenceId)
+        .where("absence_revision", "=", input.absenceRevision)
+        .where(({ not, exists, selectFrom }) => not(exists(
+          selectFrom("reviewer_replacements")
+            .select("reviewer_replacements.id")
+            .whereRef("reviewer_replacements.workspace_id", "=", "reviewer_mutation_intents.workspace_id")
+            .whereRef("reviewer_replacements.provider", "=", "reviewer_mutation_intents.provider")
+            .whereRef("reviewer_replacements.provider_connection_id", "=", "reviewer_mutation_intents.provider_connection_id")
+            .whereRef("reviewer_replacements.absence_id", "=", "reviewer_mutation_intents.absence_id")
+            .whereRef("reviewer_replacements.absence_revision", "=", "reviewer_mutation_intents.absence_revision")
+            .whereRef("reviewer_replacements.decision_id", "=", "reviewer_mutation_intents.decision_id"),
+        )))
+        .orderBy("created_at", "asc")
+        .orderBy("id", "asc")
+        .execute();
+      return rows.map(toMutationIntent);
+    },
+
     async prepareMutationIntent(input) {
       validateMutationIntentInput(input, workspaceId);
       return await db.transaction().execute(async (trx) => {
@@ -415,6 +451,7 @@ export function createWorkspaceReviewerAvailability(
             "routing_decisions.details as decisionDetails",
             "repositories.provider",
             "repositories.provider_connection_id as providerConnectionId",
+            "repositories.id as repositoryRecordId",
             "repositories.external_repository_id as repositoryId",
           ])
           .where("reviewer_absences.workspace_id", "=", workspaceId)
@@ -452,6 +489,7 @@ export function createWorkspaceReviewerAvailability(
             absence_id: input.absenceId,
             absence_revision: input.absenceRevision,
             decision_id: input.decisionId,
+            repository_record_id: source.repositoryRecordId,
             repository_id: input.repositoryId,
             change_request_id: input.changeRequestId,
             expected_head_revision: input.expectedHeadRevision,
@@ -652,6 +690,19 @@ export function createWorkspaceReviewerAvailability(
       });
     },
 
+    async persistMutationIntentRecovery(input) {
+      validateReplacementInput(input, workspaceId);
+      if (
+        input.outcome !== "permanent_failure"
+        || input.state !== "permanent_failure"
+        || input.mutationIntentId === null
+        || input.replacementActorId !== null
+        || input.replaceCohort
+      ) throw new ReviewerAvailabilityValidationError("Mutation intent recovery audit is malformed");
+      return await db.transaction().execute(async (trx) =>
+        persistMutationIntentRecoveryTransaction(trx, workspaceId, input));
+    },
+
     async updateReplacementState(input) {
       validateReplacementState(input.state);
       validateReplacementState(input.expectedState);
@@ -680,6 +731,115 @@ export function createWorkspaceReviewerAvailability(
       });
     },
   };
+}
+
+export function buildMutationIntentRecoveryAudit(
+  source: unknown,
+  workspaceId: WorkspaceId,
+  error: string,
+): PersistReviewerReplacementInput {
+  if (!isUnknownRecord(source) || !isUnknownRecord(source.event) || !isNonBlank(error)) {
+    throw new ReviewerAvailabilityValidationError("Mutation intent recovery source is malformed");
+  }
+  const hydrated = {
+    ...source,
+    startedAt: hydrateDate(source.startedAt),
+    completedAt: hydrateDate(source.completedAt),
+    event: source.event,
+  } as unknown as PersistReviewerReplacementInput;
+  validateReplacementInput(hydrated, workspaceId);
+  if (hydrated.mutationIntentId === null) {
+    throw new ReviewerAvailabilityValidationError("Mutation intent recovery has no durable intent");
+  }
+  const audit: PersistReviewerReplacementInput = {
+    ...hydrated,
+    replacementActorId: null,
+    outcome: "permanent_failure",
+    reason: error,
+    state: "permanent_failure",
+    lastError: error,
+    replaceCohort: false,
+    event: {
+      ...hydrated.event,
+      replacementActor: null,
+      outcome: "permanent_failure",
+    },
+  };
+  validateReplacementInput(audit, workspaceId);
+  return audit;
+}
+
+export async function persistMutationIntentRecoveryTransaction(
+  trx: Transaction<Database>,
+  workspaceId: WorkspaceId,
+  input: PersistReviewerReplacementInput,
+): Promise<PersistReviewerReplacementResult> {
+  validateReplacementInput(input, workspaceId);
+  if (
+    input.outcome !== "permanent_failure"
+    || input.state !== "permanent_failure"
+    || input.mutationIntentId === null
+    || input.replacementActorId !== null
+    || input.replaceCohort
+  ) throw new ReviewerAvailabilityValidationError("Mutation intent recovery audit is malformed");
+  const existing = await trx.selectFrom("reviewer_replacements")
+    .selectAll()
+    .where("workspace_id", "=", workspaceId)
+    .where("provider", "=", input.provider)
+    .where("provider_connection_id", "=", input.providerConnectionId)
+    .where("absence_id", "=", input.absenceId)
+    .where("absence_revision", "=", input.absenceRevision)
+    .where("decision_id", "=", input.decisionId)
+    .forUpdate()
+    .executeTakeFirst();
+  if (existing !== undefined) {
+    assertReplacementRetryMatches(existing, input);
+    const hasPersistedEvent = await assertReplacementEventRetryMatches(trx, workspaceId, existing.id, input.event);
+    if (hasPersistedEvent) await stagePlatformEvent(trx, workspaceId, existing.id, input.event);
+    return { inserted: false, activationCurrent: true, replacement: toReplacement(existing) };
+  }
+
+  const absence = await trx.selectFrom("reviewer_absences")
+    .select(["id"])
+    .where("workspace_id", "=", workspaceId)
+    .where("provider", "=", input.provider)
+    .where("provider_connection_id", "=", input.providerConnectionId)
+    .where("id", "=", input.absenceId)
+    .forUpdate()
+    .executeTakeFirst();
+  if (absence === undefined) {
+    throw new ReviewerAvailabilityValidationError("Mutation intent recovery absence source is unavailable");
+  }
+  await assertReplacementMutationIntent(trx, workspaceId, input);
+  const inserted = await trx.insertInto("reviewer_replacements").values({
+    workspace_id: workspaceId,
+    provider: input.provider,
+    provider_connection_id: input.providerConnectionId,
+    absence_id: input.absenceId,
+    absence_revision: input.absenceRevision,
+    decision_id: input.decisionId,
+    unavailable_actor_id: input.unavailableActorId,
+    replacement_actor_id: null,
+    mutation_intent_id: input.mutationIntentId,
+    outcome: "permanent_failure",
+    reason: input.reason,
+    state: "permanent_failure",
+    last_error: input.lastError,
+    started_at: input.startedAt,
+    completed_at: input.completedAt,
+  }).returningAll().executeTakeFirstOrThrow();
+  await stagePlatformEvent(trx, workspaceId, inserted.id, input.event);
+  return { inserted: true, activationCurrent: true, replacement: toReplacement(inserted) };
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function hydrateDate(value: unknown): Date {
+  const date = value instanceof Date ? value : typeof value === "string" ? new Date(value) : new Date(Number.NaN);
+  validateDate(date, "recovery timestamp");
+  return date;
 }
 
 async function ensureWorkspaceSettings(db: Kysely<Database>, workspaceId: WorkspaceId) {
@@ -867,6 +1027,14 @@ function validateReplacementInput(input: PersistReviewerReplacementInput, worksp
     || (input.outcome === "replaced" && input.mutationIntentId === null)
     || (input.outcome === "simulated_replacement" && input.mutationIntentId !== null)
   ) throw new ReviewerAvailabilityValidationError("Replacement mutation intent identifier is malformed");
+  const expectedState = input.outcome === "permanent_failure"
+    ? "permanent_failure"
+    : hasMappedFinalizer(input.outcome)
+      ? "finalizer_pending"
+      : "completed";
+  if (input.state !== expectedState) {
+    throw new ReviewerAvailabilityValidationError("Replacement state does not match outcome finalization");
+  }
   if (
     input.event.workspaceId !== workspaceId
     || input.event.provider !== input.provider
@@ -924,6 +1092,12 @@ function validActorList(actors: string[]): string[] {
 
 function replacesCohort(outcome: ReviewerReplacementOutcome): boolean {
   return outcome === "replaced" || outcome === "simulated_replacement";
+}
+
+function hasMappedFinalizer(outcome: ReviewerReplacementOutcome): boolean {
+  return outcome === "replaced"
+    || outcome === "skipped_policy_satisfied"
+    || outcome === "no_replacement_available";
 }
 
 function staleReplacementResult(): PersistReviewerReplacementResult {

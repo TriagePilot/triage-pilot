@@ -58,6 +58,9 @@ describe("applyFixedRetention", () => {
         conditions: [
           ["workspace_id", "=", "00000000-0000-4000-8000-000000000001"],
           ["created_at", "<", new Date("2026-05-20T10:00:00.000Z")],
+          [expect.any(Function)],
+          [expect.any(Function)],
+          [expect.any(Function)],
         ],
       },
     ]);

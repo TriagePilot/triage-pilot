@@ -161,6 +161,7 @@ export interface ReviewerMutationIntentsTable {
   absence_id: string;
   absence_revision: number;
   decision_id: string;
+  repository_record_id: string;
   repository_id: string;
   change_request_id: string;
   expected_head_revision: string;
