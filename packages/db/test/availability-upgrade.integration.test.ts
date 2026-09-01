@@ -3,7 +3,7 @@ import type { DecisionEventV1 } from "@triagepilot/contracts";
 import pg from "pg";
 import { describe, expect, it } from "vitest";
 
-import { createDatabase, runMigrations, stagePlatformEvent } from "../src";
+import { createDatabase, persistDecisionWithEvent, runMigrations } from "../src";
 import { withPostgresTestDatabaseUrl } from "./postgres";
 
 const PRE_WORKSPACE_MIGRATIONS = [
@@ -143,7 +143,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability mi
     });
   }, 20_000);
 
-  it("normalizes a legacy Phase event so the equivalent current event remains idempotent", async () => {
+  it("retries a migrated Phase terminal decision with its source-bound historical event time", async () => {
     await withPostgresTestDatabaseUrl(async (databaseUrl) => {
       await applyMigrationHistory(databaseUrl, [
         ...PRE_WORKSPACE_MIGRATIONS,
@@ -152,6 +152,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability mi
       ]);
       const setup = new pg.Pool({ connectionString: databaseUrl });
       let workspaceId: string;
+      let repositoryId: string;
       let decisionId: string;
       let currentEvent: DecisionEventV1;
       try {
@@ -173,16 +174,19 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability mi
           ) values ($1, 'github', $2, 'phase-repository', 'workspace-a', 'api', 'main', 'valid')
           returning id
         `, [workspaceId, connection.rows[0]?.id]);
+        repositoryId = requiredId(repository.rows[0]?.id);
         const decision = await setup.query<{ id: string }>(`
           insert into routing_decisions (
             workspace_id, repository_id, delivery_id, routing_key, action, risk_score,
-            details, effective_config_hash, inheritance_mode
+            selected_reviewers, details, effective_config_hash, inheritance_mode,
+            pull_number, head_sha, action_status, action_applied_at, created_at
           ) values (
             $1, $2, 'phase-upgrade-delivery', 'phase-upgrade-routing',
-            'request_human_review', 50, '{}', 'phase-hash', 'legacy'
+            'request_human_review', 50, '["@user-c79a42"]', '{}', 'phase-hash', 'legacy',
+            17, 'phase-head', 'succeeded', '2026-10-01T08:30:00Z', '2026-10-01T07:00:00Z'
           )
           returning id
-        `, [workspaceId, repository.rows[0]?.id]);
+        `, [workspaceId, repositoryId]);
         decisionId = requiredId(decision.rows[0]?.id);
         const legacyPayload = {
           schemaVersion: 1 as const,
@@ -219,11 +223,39 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability mi
 
       await runMigrations(databaseUrl);
       const db = createDatabase(databaseUrl);
+      let callbackOccurredAt: Date | undefined;
       try {
-        await expect(stagePlatformEvent(db, workspaceId, decisionId, currentEvent)).resolves.toBeUndefined();
+        await expect(persistDecisionWithEvent(db, workspaceId, {
+          decision: {
+            repositoryId,
+            deliveryId: "phase-upgrade-delivery",
+            routingKey: "phase-upgrade-routing",
+            changeRequestId: "phase-change-request",
+            pullNumber: 17,
+            headSha: "phase-head",
+            mode: "shadow",
+            action: "request_human_review",
+            actionStatus: "pending",
+            riskScore: 50,
+            selectedReviewers: ["@user-c79a42"],
+            details: {},
+            effectiveConfigHash: "phase-hash",
+            inheritanceMode: "legacy",
+          },
+          event: ({ occurredAt }) => {
+            callbackOccurredAt = occurredAt;
+            return { ...currentEvent, occurredAt: occurredAt.toISOString() };
+          },
+        })).resolves.toEqual({
+          decisionId,
+          actionStatus: "succeeded",
+          actionError: null,
+          actionAppliedAt: new Date("2026-10-01T08:30:00.000Z"),
+        });
       } finally {
         await db.destroy();
       }
+      expect(callbackOccurredAt).toEqual(new Date("2026-10-01T08:00:00.000Z"));
 
       const verification = new pg.Pool({ connectionString: databaseUrl });
       try {
@@ -257,9 +289,14 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability mi
           last_error: "sink unavailable",
         }]);
         await expect(verification.query(
-          "select change_request_id from routing_decisions where id = $1",
+          "select change_request_id, action_status, action_applied_at, created_at from routing_decisions where id = $1",
           [decisionId],
-        )).resolves.toMatchObject({ rows: [{ change_request_id: "phase-change-request" }] });
+        )).resolves.toMatchObject({ rows: [{
+          change_request_id: "phase-change-request",
+          action_status: "succeeded",
+          action_applied_at: new Date("2026-10-01T08:30:00.000Z"),
+          created_at: new Date("2026-10-01T07:00:00.000Z"),
+        }] });
       } finally {
         await verification.end();
       }

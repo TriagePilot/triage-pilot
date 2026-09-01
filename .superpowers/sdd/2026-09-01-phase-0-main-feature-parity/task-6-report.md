@@ -2,7 +2,7 @@
 
 ## Final status
 
-Task 6 and its four review-fix rounds are implemented in the local `commercial-saas-phase-0` worktree. The implementation is provider-neutral, workspace-bound, transactionally stages current events, and keeps historical replay fail-closed. Historical migrations `0001` through `0006` are unchanged. Migration `0007_workspace_reviewer_availability.sql` is intentionally extended by Task 6 to add durable provider change-request identity to routing decisions.
+Task 6 and its five review-fix rounds are implemented in the local `commercial-saas-phase-0` worktree. The implementation is provider-neutral, workspace-bound, transactionally stages current events, and keeps historical replay fail-closed. Historical migrations `0001` through `0006` are unchanged. Migration `0007_workspace_reviewer_availability.sql` is intentionally extended by Task 6 to add durable provider change-request identity to routing decisions.
 
 No push, pull request, tag, publication, dependency change, commercial/tenant API, or persistent database migration was performed.
 
@@ -50,7 +50,9 @@ Fresh replacement persistence locks the absence and routing decision with `FOR U
 
 History insertion, optional cohort replacement, and reviewer-replacement outbox staging are atomic. A forced outbox failure rolls back both history and cohort changes. A controlled concurrent test observes final persistence blocked on the exact revision transaction ID and then rejected after the competing revision commits.
 
-`persistDecisionWithEvent` first applies the routing-key upsert, then reads and locks the effective persisted decision row. This matters for terminal retries because succeeded fields and the first-write `created_at` are preserved rather than replaced by the new calculation. The event factory receives a `PersistedDecisionEventContext` whose `occurredAt` is that locked durable timestamp; the application uses it for both valid and invalid-configuration events rather than sampling its clock again. Before staging, the callback event must match the effective row’s decision ID, workspace, provider, external repository ID, provider change-request ID, routing key, mode, action, risk score, selected actors, effective configuration hash, and canonical occurrence time. Missing/blank runtime change-request IDs and any event mismatch reject the transaction. Existing outbox exact-retry conflict checks still compare the complete event, including `occurredAt`, as the final event-ID/payload guard.
+`persistDecisionWithEvent` first applies the routing-key upsert, then reads and locks the effective persisted decision row. This matters for terminal retries because succeeded fields and the first-write `created_at` are preserved rather than replaced by the new calculation. Occurrence-time resolution then follows durable source precedence: if exactly one routing event is already bound to the effective workspace and decision source, its validated persisted `occurred_at` is canonical; if no source-bound event exists, the locked decision `created_at` is canonical for first publication. Multiple source-bound events or malformed source metadata/payload fail closed. The lookup never trusts a caller-proposed event ID.
+
+The event factory receives this canonical time through `PersistedDecisionEventContext.occurredAt`; the application uses it for both valid and invalid-configuration events rather than sampling its clock again. Before staging, the callback event must match the effective row’s decision ID, workspace, provider, external repository ID, provider change-request ID, routing key, mode, action, risk score, selected actors, effective configuration hash, and canonical occurrence time. Missing/blank runtime change-request IDs and any event mismatch reject the transaction. Existing outbox exact-retry conflict checks still compare the complete event, including `occurredAt`, as the final event-ID/payload guard.
 
 ## Historical replacement replay
 
@@ -126,6 +128,23 @@ Final round-4 verification:
 - root `pnpm test:integration`: 10 files, 82 tests passed;
 - application, DB, and worker checks: passed;
 - affected package rebuilds: passed;
+- `git diff --check`: passed;
+- historical migrations `0001` through `0006` remain unchanged;
+- post-run inspection found zero `triagepilot_test_%` databases.
+
+### Fix round 5
+
+The current-Phase upgrade regression was changed before production code to seed a terminal routing decision at 07:00 with its already source-bound legacy event at 08:00. After migration through `0007`, a retry through `persistDecisionWithEvent` failed RED with `platform event id conflicts with a different persisted event` because the callback received 07:00. A separate ambiguity RED proved that two events bound to the same workspace/decision source were previously ignored and the retry incorrectly resolved.
+
+The resolver now locks routing events by durable workspace and decision source before invoking the callback. One validated event supplies its persisted occurrence time; no event falls back to the locked decision creation time; more than one event fails closed. Stored source metadata and payload identity are validated against the effective decision, while `stagePlatformEvent` retains strict full event equality.
+
+The migrated retry is now idempotent with one unchanged persisted event, receives 08:00 from the persisted source, and preserves the terminal `succeeded` state, original action-applied timestamp, and 07:00 decision creation time. Fresh delayed retries still use the first decision timestamp, and forged occurrence times still roll back.
+
+Final round-5 verification:
+
+- upgrade + outbox + decisions + real worker runtime + application routing: 5 files, 48 tests passed;
+- root `pnpm test:integration`: 10 files, 83 tests passed;
+- `pnpm check`: passed;
 - `git diff --check`: passed;
 - historical migrations `0001` through `0006` remain unchanged;
 - post-run inspection found zero `triagepilot_test_%` databases.

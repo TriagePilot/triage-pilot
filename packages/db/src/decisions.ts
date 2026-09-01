@@ -129,11 +129,56 @@ export async function persistDecisionWithEvent(
       .where("routing_decisions.id", "=", persisted.decisionId)
       .forUpdate("routing_decisions")
       .executeTakeFirstOrThrow();
-    const event = input.event({ ...persisted, occurredAt: effective.created_at });
-    assertDecisionEventMatches(effective, event);
+    const occurredAt = await resolveDecisionEventOccurredAt(trx, effective);
+    const event = input.event({ ...persisted, occurredAt });
+    assertDecisionEventMatches(effective, event, occurredAt);
     await stagePlatformEvent(trx, workspaceId, persisted.decisionId, event);
     return persisted;
   });
+}
+
+async function resolveDecisionEventOccurredAt(
+  db: Transaction<Database>,
+  decision: EffectiveDecisionEventSource,
+): Promise<Date> {
+  const existing = await db
+    .selectFrom("decision_outbox")
+    .select([
+      "decision_id",
+      "reviewer_replacement_id",
+      "event_id",
+      "event_type",
+      "schema_version",
+      "payload",
+      "occurred_at",
+    ])
+    .where("workspace_id", "=", decision.workspace_id)
+    .where("decision_id", "=", decision.id)
+    .forUpdate()
+    .execute();
+  if (existing.length === 0) return decision.created_at;
+  if (existing.length !== 1) {
+    throw new DecisionValidationError("ambiguous persisted routing events for decision source");
+  }
+
+  const stored = existing[0];
+  const payload = stored?.payload as Partial<DecisionEventV1> | null;
+  if (
+    stored === undefined
+    || payload === null
+    || typeof payload !== "object"
+    || stored.decision_id !== decision.id
+    || stored.reviewer_replacement_id !== null
+    || stored.event_type !== "routing_decision"
+    || stored.schema_version !== 1
+    || payload.eventId !== stored.event_id
+    || payload.eventType !== stored.event_type
+    || payload.schemaVersion !== stored.schema_version
+  ) {
+    throw new DecisionValidationError("persisted routing event does not match decision source");
+  }
+  assertDecisionEventMatches(decision, payload as DecisionEventV1, stored.occurred_at);
+  return stored.occurred_at;
 }
 
 async function persistDecisionRecord(
@@ -225,22 +270,25 @@ function validateChangeRequestId(value: unknown): asserts value is string {
   }
 }
 
+interface EffectiveDecisionEventSource {
+  id: string;
+  workspace_id: string;
+  change_request_id: string | null;
+  routing_key: string;
+  mode: RepositoryMode;
+  action: string;
+  risk_score: number;
+  selected_reviewers: unknown;
+  effective_config_hash: string;
+  created_at: Date;
+  provider: ProviderKind;
+  external_repository_id: string;
+}
+
 function assertDecisionEventMatches(
-  decision: {
-    id: string;
-    workspace_id: string;
-    change_request_id: string | null;
-    routing_key: string;
-    mode: RepositoryMode;
-    action: string;
-    risk_score: number;
-    selected_reviewers: unknown;
-    effective_config_hash: string;
-    created_at: Date;
-    provider: ProviderKind;
-    external_repository_id: string;
-  },
+  decision: EffectiveDecisionEventSource,
   event: DecisionEventV1,
+  occurredAt: Date,
 ): void {
   const selectedActors = parseStrictActorList(decision.selected_reviewers);
   if (
@@ -258,7 +306,7 @@ function assertDecisionEventMatches(
     || selectedActors === null
     || !isDeepStrictEqual(event.selectedActors, selectedActors)
     || event.effectiveConfigurationHash !== decision.effective_config_hash
-    || event.occurredAt !== decision.created_at.toISOString()
+    || event.occurredAt !== occurredAt.toISOString()
   ) throw new DecisionValidationError("routing decision event does not match persisted decision");
 }
 

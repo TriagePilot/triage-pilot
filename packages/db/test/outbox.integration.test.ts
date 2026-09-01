@@ -357,6 +357,57 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
     });
   });
 
+  it("rejects ambiguous routing events already bound to the same decision source", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const repositoryId = await seedRepository(db, workspaceId, "101");
+      const persisted = await persistDecisionWithEvent(db, workspaceId, {
+        decision: decisionInput(repositoryId, "delivery-ambiguous"),
+        event: ({ decisionId, occurredAt }) => decisionEvent({
+          workspaceId,
+          decisionId,
+          repositoryId: "101",
+          deliveryId: "delivery-ambiguous",
+          occurredAt: occurredAt.toISOString(),
+        }),
+      });
+      const stored = await db.selectFrom("decision_outbox")
+        .select(["payload", "occurred_at"])
+        .where("decision_id", "=", persisted.decisionId)
+        .executeTakeFirstOrThrow();
+      const duplicateEvent = {
+        ...(stored.payload as DecisionEventV1),
+        eventId: `decision:${persisted.decisionId}:duplicate:v1`,
+      };
+      await db.insertInto("decision_outbox").values({
+        workspace_id: workspaceId,
+        decision_id: persisted.decisionId,
+        reviewer_replacement_id: null,
+        event_id: duplicateEvent.eventId,
+        event_type: "routing_decision",
+        schema_version: 1,
+        payload: duplicateEvent,
+        occurred_at: stored.occurred_at,
+        available_at: stored.occurred_at,
+      }).execute();
+
+      await expect(persistDecisionWithEvent(db, workspaceId, {
+        decision: decisionInput(repositoryId, "delivery-ambiguous"),
+        event: ({ decisionId, occurredAt }) => decisionEvent({
+          workspaceId,
+          decisionId,
+          repositoryId: "101",
+          deliveryId: "delivery-ambiguous",
+          occurredAt: occurredAt.toISOString(),
+        }),
+      })).rejects.toThrow("ambiguous persisted routing events");
+      await expect(db.selectFrom("decision_outbox")
+        .select("id")
+        .where("decision_id", "=", persisted.decisionId)
+        .execute()).resolves.toHaveLength(2);
+    });
+  });
+
   it("rolls back a duplicate decision when its event id has a different payload", async () => {
     await withPostgresTestDatabase(async (db) => {
       const workspaceId = await ensureLocalWorkspace(db);
@@ -369,7 +420,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
       await expect(persistDecisionWithEvent(db, workspaceId, {
         decision: { ...decisionInput(repositoryId, "delivery-1"), riskScore: 35 },
         event: ({ decisionId, occurredAt }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", riskScore: 35, occurredAt: occurredAt.toISOString() }),
-      })).rejects.toThrow("platform event id conflicts with a different persisted event");
+      })).rejects.toThrow("routing decision event does not match persisted decision");
       await expect(db.selectFrom("routing_decisions")
         .innerJoin("decision_outbox", "decision_outbox.decision_id", "routing_decisions.id")
         .select(["routing_decisions.risk_score", "decision_outbox.payload"])
