@@ -30,7 +30,7 @@ describe("processRoutingJob", () => {
         actionError: null,
         actionAppliedAt: null,
       };
-      event(persisted);
+      event({ ...persisted, occurredAt: new Date("2026-08-27T09:59:00.000Z") });
       return persisted;
     });
     const ports: RoutingApplicationPorts = {

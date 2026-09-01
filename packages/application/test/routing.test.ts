@@ -57,6 +57,7 @@ function effectiveConfiguration(source: string): EffectiveConfigurationResult {
 }
 
 function buildPorts(configuration = effectiveConfiguration("version: 1\nmode: shadow\n")): RoutingApplicationPorts {
+  const persistedOccurredAt = new Date("2026-08-27T09:59:00.000Z");
   return {
     resolveConfiguration: vi.fn(async () => configuration),
     provider: {
@@ -82,7 +83,7 @@ function buildPorts(configuration = effectiveConfiguration("version: 1\nmode: sh
           actionError: null,
           actionAppliedAt: null,
         };
-        event(persisted);
+        event({ ...persisted, occurredAt: persistedOccurredAt });
         return persisted;
       }),
       markActionSucceeded: vi.fn(async () => {}),
@@ -96,17 +97,20 @@ function buildPorts(configuration = effectiveConfiguration("version: 1\nmode: sh
 describe("processChangeRequest", () => {
   it("persists each routing decision and its event through one atomic application port", async () => {
     const baseline = buildPorts();
+    const persistedOccurredAt = new Date("2026-08-27T09:58:00.000Z");
     const persistWithEvent = vi.fn(async (input: DecisionInput, event: (persisted: {
       decisionId: string;
       actionStatus: "not_applied" | "pending" | "succeeded" | "failed";
       actionError: string | null;
       actionAppliedAt: Date | null;
+      occurredAt: Date;
     }) => unknown) => {
       const persisted = {
         decisionId: "decision-atomic",
         actionStatus: input.actionStatus,
         actionError: null,
         actionAppliedAt: null,
+        occurredAt: persistedOccurredAt,
       };
       expect(event(persisted)).toMatchObject({
         schemaVersion: 1,
@@ -114,6 +118,7 @@ describe("processChangeRequest", () => {
         decisionId: "decision-atomic",
         workspaceId: "ws-a",
         provider: "gitlab",
+        occurredAt: persistedOccurredAt.toISOString(),
       });
       return persisted;
     });
@@ -137,6 +142,7 @@ describe("processChangeRequest", () => {
 
   it("persists invalid configuration and its event through the atomic port", async () => {
     const ports = buildPorts(effectiveConfiguration("version: 1\nmode: observe\n"));
+    const persistedOccurredAt = new Date("2026-08-27T09:57:00.000Z");
     let stagedEvent: unknown;
     vi.mocked(ports.decisions.persistWithEvent).mockImplementationOnce(async (input, event) => {
       const persisted = {
@@ -145,7 +151,7 @@ describe("processChangeRequest", () => {
         actionError: null,
         actionAppliedAt: null,
       };
-      stagedEvent = event(persisted);
+      stagedEvent = event({ ...persisted, occurredAt: persistedOccurredAt });
       return persisted;
     });
 
@@ -170,6 +176,7 @@ describe("processChangeRequest", () => {
       eventType: "routing_decision",
       decisionId: "decision-invalid",
       action: "configuration_failure",
+      occurredAt: persistedOccurredAt.toISOString(),
     });
     expect(ports.provider.fetchChangeRequestMetadata).not.toHaveBeenCalled();
     expect(ports.provider.applyActions).not.toHaveBeenCalled();

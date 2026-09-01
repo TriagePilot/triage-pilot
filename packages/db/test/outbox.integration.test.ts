@@ -29,7 +29,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
 
       await expect(persistDecisionWithEvent(db, workspaceId, {
         decision: missingChangeRequestId as unknown as ReturnType<typeof decisionInput>,
-        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+        event: ({ decisionId, occurredAt }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", occurredAt: occurredAt.toISOString() }),
       })).rejects.toThrow("changeRequestId must be a non-empty provider identifier");
       await expect(persistDecision(db, workspaceId, {
         ...decisionInput(repositoryId, "delivery-blank"),
@@ -48,7 +48,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
 
       const persisted = await persistDecisionWithEvent(db, workspaceId, {
         decision: decisionInput(repositoryId, "delivery-1"),
-        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+        event: ({ decisionId, occurredAt }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", occurredAt: occurredAt.toISOString() }),
       });
 
       await expect(
@@ -86,7 +86,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
       const repositoryId = await seedRepository(db, workspaceId, "101");
       const persisted = await persistDecisionWithEvent(db, workspaceId, {
         decision: decisionInput(repositoryId, "delivery-1"),
-        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+        event: ({ decisionId, occurredAt }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", occurredAt: occurredAt.toISOString() }),
       });
       const source = await seedReviewerReplacement(db, workspaceId, persisted.decisionId);
       const event = replacementEvent({
@@ -120,7 +120,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
       const repositoryId = await seedRepository(db, workspaceId, "101");
       const persisted = await persistDecisionWithEvent(db, workspaceId, {
         decision: decisionInput(repositoryId, "delivery-1"),
-        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+        event: ({ decisionId, occurredAt }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", occurredAt: occurredAt.toISOString() }),
       });
       const source = await seedReviewerReplacement(db, workspaceId, persisted.decisionId);
       const event = replacementEvent({ workspaceId, ...source });
@@ -156,11 +156,11 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
       const repositoryId = await seedRepository(db, workspaceId, "101");
       const firstDecision = await persistDecisionWithEvent(db, workspaceId, {
         decision: decisionInput(repositoryId, "delivery-1"),
-        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+        event: ({ decisionId, occurredAt }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", occurredAt: occurredAt.toISOString() }),
       });
       const secondDecision = await persistDecisionWithEvent(db, workspaceId, {
         decision: decisionInput(repositoryId, "delivery-2"),
-        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", deliveryId: "delivery-2" }),
+        event: ({ decisionId, occurredAt }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", deliveryId: "delivery-2", occurredAt: occurredAt.toISOString() }),
       });
       const firstSource = await seedReviewerReplacement(db, workspaceId, firstDecision.decisionId, "first");
       const secondSource = await seedReviewerReplacement(db, workspaceId, secondDecision.decisionId, "second");
@@ -192,7 +192,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
       const repositoryId = await seedRepository(db, workspaceId, "101");
       const persisted = await persistDecisionWithEvent(db, workspaceId, {
         decision: decisionInput(repositoryId, "delivery-1"),
-        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+        event: ({ decisionId, occurredAt }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", occurredAt: occurredAt.toISOString() }),
       });
       const source = await seedReviewerReplacement(db, workspaceId, persisted.decisionId);
       const common = {
@@ -237,7 +237,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
       await expect(
         persistDecisionWithEvent(db, workspaceId, {
           decision: decisionInput(repositoryId, "delivery-1"),
-          event: ({ decisionId }) => decisionEvent({ workspaceId: otherWorkspaceId, decisionId, repositoryId: "101" }),
+          event: ({ decisionId, occurredAt }) => decisionEvent({ workspaceId: otherWorkspaceId, decisionId, repositoryId: "101", occurredAt: occurredAt.toISOString() }),
         }),
       ).rejects.toThrow("routing decision event does not match persisted decision");
       await expect(db.selectFrom("routing_decisions").select("id").execute()).resolves.toHaveLength(0);
@@ -248,6 +248,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
   it.each([
     ["repository", { repositoryId: "forged-repository" }],
     ["change request", { changeRequestId: "forged-change-request" }],
+    ["timestamp", { occurredAt: "2025-01-01T00:00:00.000Z" }],
   ] as const)("rejects a %s identity mismatch between the decision and its event", async (_name, mismatch) => {
     await withPostgresTestDatabase(async (db) => {
       const workspaceId = await ensureLocalWorkspace(db);
@@ -255,8 +256,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
 
       await expect(persistDecisionWithEvent(db, workspaceId, {
         decision: decisionInput(repositoryId, "delivery-1"),
-        event: ({ decisionId }) => ({
-          ...decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+        event: ({ decisionId, occurredAt }) => ({
+          ...decisionEvent({ workspaceId, decisionId, repositoryId: "101", occurredAt: occurredAt.toISOString() }),
           ...mismatch,
         }),
       })).rejects.toThrow("routing decision event does not match persisted decision");
@@ -271,7 +272,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
       const repositoryId = await seedRepository(db, workspaceId, "101");
       const first = await persistDecisionWithEvent(db, workspaceId, {
         decision: decisionInput(repositoryId, "delivery-1"),
-        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+        event: ({ decisionId, occurredAt }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", occurredAt: occurredAt.toISOString() }),
       });
       await markActionSucceeded(db, workspaceId, first.decisionId, new Date("2026-08-26T10:01:00.000Z"));
       const changedInput = {
@@ -282,15 +283,15 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
 
       await expect(persistDecisionWithEvent(db, workspaceId, {
         decision: changedInput,
-        event: ({ decisionId }) => ({
-          ...decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+        event: ({ decisionId, occurredAt }) => ({
+          ...decisionEvent({ workspaceId, decisionId, repositoryId: "101", occurredAt: occurredAt.toISOString() }),
           changeRequestId: changedInput.changeRequestId,
           riskScore: changedInput.riskScore,
         }),
       })).rejects.toThrow("routing decision event does not match persisted decision");
       await expect(persistDecisionWithEvent(db, workspaceId, {
         decision: changedInput,
-        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+        event: ({ decisionId, occurredAt }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", occurredAt: occurredAt.toISOString() }),
       })).resolves.toEqual(expect.objectContaining({ decisionId: first.decisionId, actionStatus: "succeeded" }));
       await expect(db.selectFrom("routing_decisions")
         .select(["change_request_id", "risk_score"])
@@ -307,15 +308,52 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
 
       const first = await persistDecisionWithEvent(db, workspaceId, {
         decision: decisionInput(repositoryId, "delivery-1"),
-        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+        event: ({ decisionId, occurredAt }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", occurredAt: occurredAt.toISOString() }),
       });
       const retried = await persistDecisionWithEvent(db, workspaceId, {
         decision: decisionInput(repositoryId, "delivery-1"),
-        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+        event: ({ decisionId, occurredAt }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", occurredAt: occurredAt.toISOString() }),
       });
 
       expect(retried.decisionId).toBe(first.decisionId);
       await expect(db.selectFrom("decision_outbox").select("id").execute()).resolves.toHaveLength(1);
+    });
+  });
+
+  it("reuses the locked first-write occurrence time for delayed exact retries", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const repositoryId = await seedRepository(db, workspaceId, "101");
+      const observedOccurrenceTimes: Date[] = [];
+      const persist = () => persistDecisionWithEvent(db, workspaceId, {
+        decision: decisionInput(repositoryId, "delivery-delayed"),
+        event: ({ decisionId, occurredAt }) => {
+          observedOccurrenceTimes.push(occurredAt);
+          return decisionEvent({
+            workspaceId,
+            decisionId,
+            repositoryId: "101",
+            deliveryId: "delivery-delayed",
+            occurredAt: occurredAt.toISOString(),
+          });
+        },
+      });
+
+      const first = await persist();
+      const retried = await persist();
+
+      expect(retried.decisionId).toBe(first.decisionId);
+      expect(observedOccurrenceTimes).toHaveLength(2);
+      expect(observedOccurrenceTimes[1]).toEqual(observedOccurrenceTimes[0]);
+      await expect(db.selectFrom("routing_decisions")
+        .innerJoin("decision_outbox", "decision_outbox.decision_id", "routing_decisions.id")
+        .select(["routing_decisions.created_at", "decision_outbox.occurred_at", "decision_outbox.payload"])
+        .where("routing_decisions.id", "=", first.decisionId)
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+        created_at: observedOccurrenceTimes[0],
+        occurred_at: observedOccurrenceTimes[0],
+        payload: expect.objectContaining({ occurredAt: observedOccurrenceTimes[0]?.toISOString() }),
+      });
     });
   });
 
@@ -325,12 +363,12 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
       const repositoryId = await seedRepository(db, workspaceId, "101");
       const persisted = await persistDecisionWithEvent(db, workspaceId, {
         decision: decisionInput(repositoryId, "delivery-1"),
-        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+        event: ({ decisionId, occurredAt }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", occurredAt: occurredAt.toISOString() }),
       });
 
       await expect(persistDecisionWithEvent(db, workspaceId, {
         decision: { ...decisionInput(repositoryId, "delivery-1"), riskScore: 35 },
-        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", riskScore: 35 }),
+        event: ({ decisionId, occurredAt }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", riskScore: 35, occurredAt: occurredAt.toISOString() }),
       })).rejects.toThrow("platform event id conflicts with a different persisted event");
       await expect(db.selectFrom("routing_decisions")
         .innerJoin("decision_outbox", "decision_outbox.decision_id", "routing_decisions.id")
@@ -352,20 +390,21 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
 
       const first = await persistDecisionWithEvent(db, firstWorkspaceId, {
         decision: decisionInput(firstRepositoryId, "delivery-1"),
-        event: ({ decisionId }) => decisionEvent({ workspaceId: firstWorkspaceId, decisionId, repositoryId: "101" }),
+        event: ({ decisionId, occurredAt }) => decisionEvent({ workspaceId: firstWorkspaceId, decisionId, repositoryId: "101", occurredAt: occurredAt.toISOString() }),
       });
       await persistDecisionWithEvent(db, secondWorkspaceId, {
         decision: decisionInput(secondRepositoryId, "delivery-2"),
-        event: ({ decisionId }) => decisionEvent({
+        event: ({ decisionId, occurredAt }) => decisionEvent({
           workspaceId: secondWorkspaceId,
           decisionId,
           repositoryId: "202",
           deliveryId: "delivery-2",
+          occurredAt: occurredAt.toISOString(),
         }),
       });
 
       await expect(
-        claimPlatformEvents({ db, workspaceId: firstWorkspaceId, limit: 10, now: new Date("2026-08-26T10:00:00.000Z") }),
+        claimPlatformEvents({ db, workspaceId: firstWorkspaceId, limit: 10, now: new Date("2099-08-26T10:00:00.000Z") }),
       ).resolves.toEqual([
         expect.objectContaining({
           workspaceId: firstWorkspaceId,
@@ -382,7 +421,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
       const repositoryId = await seedRepository(db, workspaceId, "101");
       const persisted = await persistDecisionWithEvent(db, workspaceId, {
         decision: decisionInput(repositoryId, "delivery-1"),
-        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+        event: ({ decisionId, occurredAt }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", occurredAt: occurredAt.toISOString() }),
       });
       const repository = createPlatformOutboxRepository(db, workspaceId);
       const failingSink: PlatformEventSink = {
@@ -396,7 +435,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
           repository,
           sink: failingSink,
           limit: 10,
-          now: new Date("2026-08-26T10:00:00.000Z"),
+          now: new Date("2099-08-26T10:00:00.000Z"),
         }),
       ).rejects.toThrow("sink unavailable");
       await expect(repository.listUnpublished()).resolves.toEqual([
@@ -413,7 +452,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
         repository,
         sink: healthySink,
         limit: 10,
-        now: new Date("2026-08-26T10:00:05.000Z"),
+        now: new Date("2099-08-26T10:00:05.000Z"),
       });
 
       expect(healthySink.emit).toHaveBeenCalledWith(expect.objectContaining({
@@ -430,7 +469,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
       const repositoryId = await seedRepository(db, workspaceId, "101");
       await persistDecisionWithEvent(db, workspaceId, {
         decision: decisionInput(repositoryId, "delivery-1"),
-        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+        event: ({ decisionId, occurredAt }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", occurredAt: occurredAt.toISOString() }),
       });
       const repository = createPlatformOutboxRepository(db, workspaceId);
       let releaseFirstSink: (() => void) | undefined;
@@ -444,7 +483,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
         repository,
         sink: firstSink,
         limit: 10,
-        now: new Date("2026-08-26T10:00:00.000Z"),
+        now: new Date("2099-08-26T10:00:00.000Z"),
       });
 
       await vi.waitFor(() => expect(firstSink.emit).toHaveBeenCalledOnce());
@@ -452,7 +491,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
         repository,
         sink: secondSink,
         limit: 10,
-        now: new Date("2026-08-26T10:00:06.000Z"),
+        now: new Date("2099-08-26T10:00:06.000Z"),
       })).resolves.toEqual({ published: 0 });
       expect(secondSink.emit).not.toHaveBeenCalled();
 
@@ -460,7 +499,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
       expect(leased).toEqual(expect.objectContaining({ attemptCount: 1, publishedAt: null }));
       const secondClaim = (await repository.claim({
         limit: 10,
-        now: new Date("2026-08-26T10:15:01.000Z"),
+        now: new Date("2099-08-26T10:15:01.000Z"),
       }))[0];
       expect(secondClaim).toBeDefined();
       if (secondClaim === undefined) throw new Error("expected expired lease to be claimable");
@@ -470,12 +509,12 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
         id: secondClaim.id,
         attemptCount: 1,
         error: new Error("stale failure"),
-        now: new Date("2026-08-26T10:15:02.000Z"),
+        now: new Date("2099-08-26T10:15:02.000Z"),
       });
       await repository.markPublished({
         id: secondClaim.id,
         attemptCount: 1,
-        now: new Date("2026-08-26T10:15:03.000Z"),
+        now: new Date("2099-08-26T10:15:03.000Z"),
       });
       await expect(repository.listUnpublished()).resolves.toEqual([
         expect.objectContaining({
@@ -499,7 +538,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
         id: secondClaim.id,
         attemptCount: 2,
         error: new Error("current failure"),
-        now: new Date("2026-08-26T10:15:04.000Z"),
+        now: new Date("2099-08-26T10:15:04.000Z"),
       });
       await expect(repository.listUnpublished()).resolves.toEqual([
         expect.objectContaining({
@@ -536,12 +575,13 @@ function decisionEvent(input: {
   repositoryId: string;
   deliveryId?: string;
   riskScore?: number;
+  occurredAt?: string;
 }): DecisionEventV1 {
   return {
     schemaVersion: 1,
     eventType: "routing_decision",
     eventId: `decision:${input.decisionId}:v1`,
-    occurredAt: "2026-08-26T09:59:00.000Z",
+    occurredAt: input.occurredAt ?? "2026-08-26T09:59:00.000Z",
     workspaceId: input.workspaceId,
     provider: "github",
     decisionId: input.decisionId,

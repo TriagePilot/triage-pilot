@@ -2,7 +2,7 @@
 
 ## Final status
 
-Task 6 and its three review-fix rounds are implemented in the local `commercial-saas-phase-0` worktree. The implementation is provider-neutral, workspace-bound, transactionally stages current events, and keeps historical replay fail-closed. Historical migrations `0001` through `0006` are unchanged. Migration `0007_workspace_reviewer_availability.sql` is intentionally extended by Task 6 to add durable provider change-request identity to routing decisions.
+Task 6 and its four review-fix rounds are implemented in the local `commercial-saas-phase-0` worktree. The implementation is provider-neutral, workspace-bound, transactionally stages current events, and keeps historical replay fail-closed. Historical migrations `0001` through `0006` are unchanged. Migration `0007_workspace_reviewer_availability.sql` is intentionally extended by Task 6 to add durable provider change-request identity to routing decisions.
 
 No push, pull request, tag, publication, dependency change, commercial/tenant API, or persistent database migration was performed.
 
@@ -50,7 +50,7 @@ Fresh replacement persistence locks the absence and routing decision with `FOR U
 
 History insertion, optional cohort replacement, and reviewer-replacement outbox staging are atomic. A forced outbox failure rolls back both history and cohort changes. A controlled concurrent test observes final persistence blocked on the exact revision transaction ID and then rejected after the competing revision commits.
 
-`persistDecisionWithEvent` first applies the routing-key upsert, then reads and locks the effective persisted decision row. This matters for terminal retries because succeeded fields are preserved rather than replaced by the new calculation. Before staging, the callback event must match the effective row’s decision ID, workspace, provider, external repository ID, provider change-request ID, routing key, mode, action, risk score, selected actors, and effective configuration hash. Missing/blank runtime change-request IDs and any event mismatch reject the transaction. Existing outbox exact-retry conflict checks remain the final event-ID/payload guard.
+`persistDecisionWithEvent` first applies the routing-key upsert, then reads and locks the effective persisted decision row. This matters for terminal retries because succeeded fields and the first-write `created_at` are preserved rather than replaced by the new calculation. The event factory receives a `PersistedDecisionEventContext` whose `occurredAt` is that locked durable timestamp; the application uses it for both valid and invalid-configuration events rather than sampling its clock again. Before staging, the callback event must match the effective row’s decision ID, workspace, provider, external repository ID, provider change-request ID, routing key, mode, action, risk score, selected actors, effective configuration hash, and canonical occurrence time. Missing/blank runtime change-request IDs and any event mismatch reject the transaction. Existing outbox exact-retry conflict checks still compare the complete event, including `occurredAt`, as the final event-ID/payload guard.
 
 ## Historical replacement replay
 
@@ -111,15 +111,36 @@ Final round-3 verification:
 - historical migrations `0001` through `0006` remain unchanged;
 - post-run inspection found zero `triagepilot_test_%` databases.
 
+### Fix round 4
+
+The application regressions were written first with a persistence-supplied timestamp deliberately different from the application clock. The focused RED exited 1 with two failures: both valid and invalid routing events used the fresh clock value instead of the durable event-context value.
+
+The minimal contract change adds `PersistedDecisionEventContext` only to the event-factory callback; the returned `PersistedDecision` API is unchanged. The DB reads `routing_decisions.created_at` from the locked effective row, supplies it to the callback, and transactionally rejects any event whose `occurredAt` differs. A provider-neutral DB regression proves two persistence attempts observe the same first-write timestamp and produce one exact event. A negative regression proves a forged timestamp rolls back the decision.
+
+The application-through-worker-through-real-DB invalid-configuration regression advances the injected clock by 15 minutes between attempts. It proves one decision, one outbox row, an unchanged `occurred_at`, payload time equal to the decision’s first `created_at`, the canonical `invalid` hash, and zero provider operations. This demonstrates delayed retry safety without weakening full outbox comparison.
+
+Final round-4 verification:
+
+- application routing + worker processor/runner: 3 files, 40 tests passed;
+- DB outbox + worker runtime integration: 2 files, 20 tests passed;
+- root `pnpm test:integration`: 10 files, 82 tests passed;
+- application, DB, and worker checks: passed;
+- affected package rebuilds: passed;
+- `git diff --check`: passed;
+- historical migrations `0001` through `0006` remain unchanged;
+- post-run inspection found zero `triagepilot_test_%` databases.
+
 All PostgreSQL integration runs used the UUID-named disposable database helper. The persistent `triagepilot` database was not migrated or mutated.
 
 ## Files
 
 - `packages/db/src/availability.ts`: workspace repository, revision/lock validation, replay-safe history, and replacement event staging.
 - `packages/db/src/decisions.ts`: runtime decision validation, effective-row event binding, explicit diagnostic JSON serialization, candidate discovery, and immutable actor-pool parsing.
+- `packages/application/src/routing.ts`: durable persistence-supplied routing-event occurrence time for valid and invalid decisions.
 - `packages/db/src/kysely.ts`: nullable upgrade-safe `change_request_id` table typing.
 - `packages/db/migrations/0007_workspace_reviewer_availability.sql`: durable change-request column and trustworthy Phase-event backfill.
 - `apps/worker/src/runtime-services.ts`: exact application change-request identity and canonical invalid-configuration hash composition.
+- Application, worker processor/runner/runtime, and DB outbox tests: durable event-context contract, delayed retry, exact occurrence-time binding, and forged-time rollback coverage.
 - `package.json`: availability suite included in root integration.
 - DB availability, decisions, outbox, schema, upgrade, and isolation tests: persistence, migration, replay, rollback, identity, concurrency, and scope coverage.
 

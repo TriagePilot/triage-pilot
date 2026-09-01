@@ -45,6 +45,10 @@ export interface PersistedDecision {
   actionAppliedAt: Date | null;
 }
 
+export interface PersistedDecisionEventContext extends PersistedDecision {
+  occurredAt: Date;
+}
+
 export class DecisionValidationError extends Error {}
 
 export interface HumanReviewPolicyDecision {
@@ -97,7 +101,7 @@ export async function persistDecisionWithEvent(
   workspaceId: WorkspaceId,
   input: {
     decision: DecisionInput;
-    event(persisted: PersistedDecision): DecisionEventV1;
+    event(persisted: PersistedDecisionEventContext): DecisionEventV1;
   },
 ): Promise<PersistedDecision> {
   return await db.transaction().execute(async (trx) => {
@@ -117,6 +121,7 @@ export async function persistDecisionWithEvent(
         "routing_decisions.risk_score",
         "routing_decisions.selected_reviewers",
         "routing_decisions.effective_config_hash",
+        "routing_decisions.created_at",
         "repositories.provider",
         "repositories.external_repository_id",
       ])
@@ -124,7 +129,7 @@ export async function persistDecisionWithEvent(
       .where("routing_decisions.id", "=", persisted.decisionId)
       .forUpdate("routing_decisions")
       .executeTakeFirstOrThrow();
-    const event = input.event(persisted);
+    const event = input.event({ ...persisted, occurredAt: effective.created_at });
     assertDecisionEventMatches(effective, event);
     await stagePlatformEvent(trx, workspaceId, persisted.decisionId, event);
     return persisted;
@@ -231,6 +236,7 @@ function assertDecisionEventMatches(
     risk_score: number;
     selected_reviewers: unknown;
     effective_config_hash: string;
+    created_at: Date;
     provider: ProviderKind;
     external_repository_id: string;
   },
@@ -252,6 +258,7 @@ function assertDecisionEventMatches(
     || selectedActors === null
     || !isDeepStrictEqual(event.selectedActors, selectedActors)
     || event.effectiveConfigurationHash !== decision.effective_config_hash
+    || event.occurredAt !== decision.created_at.toISOString()
   ) throw new DecisionValidationError("routing decision event does not match persisted decision");
 }
 

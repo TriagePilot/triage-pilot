@@ -26,6 +26,7 @@ export {
   type DecisionInput,
   type HumanReviewPolicyDecision,
   type PersistedDecision,
+  type PersistedDecisionEventContext,
   type ReviewerReplacementCandidateDecision,
 } from "./decisions.js";
 export {

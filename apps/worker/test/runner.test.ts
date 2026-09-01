@@ -416,7 +416,7 @@ describe("runWorkerOnce", () => {
             actionError: null,
             actionAppliedAt: null,
           };
-          event(persisted);
+          event({ ...persisted, occurredAt: new Date("2026-08-18T09:59:00.000Z") });
           return persisted;
         }),
         markActionSucceeded: vi.fn(async () => {}),

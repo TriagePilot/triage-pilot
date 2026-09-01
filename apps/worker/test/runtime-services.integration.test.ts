@@ -52,6 +52,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
       const providerRequest = vi.fn(async () => {
         throw new Error("invalid configuration must not perform provider reads or writes after loading configuration");
       });
+      let currentTime = new Date("2026-08-18T12:02:00.000Z");
       const services = createWorkerRoutingServiceFactory({
         db,
         github: {
@@ -69,10 +70,22 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
             };
           },
         }),
-        clock: { now: () => new Date("2026-08-18T12:02:00.000Z") },
+        clock: { now: () => currentTime },
       })(scopedMessage);
 
       await expect(processRoutingJob(scopedMessage, services)).resolves.toBeUndefined();
+      const firstDecision = await db.selectFrom("routing_decisions")
+        .select(["id", "created_at"])
+        .executeTakeFirstOrThrow();
+      const firstEvent = await db.selectFrom("decision_outbox")
+        .select(["event_id", "occurred_at", "payload"])
+        .executeTakeFirstOrThrow();
+      expect(firstEvent.occurred_at).toEqual(firstDecision.created_at);
+      expect(firstEvent.payload).toEqual(expect.objectContaining({
+        occurredAt: firstDecision.created_at.toISOString(),
+      }));
+
+      currentTime = new Date("2026-08-18T12:17:00.000Z");
       await expect(processRoutingJob(scopedMessage, services)).resolves.toBeUndefined();
 
       await expect(db.selectFrom("routing_decisions")
@@ -84,10 +97,13 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
         effective_config_hash: "invalid",
       }]);
       await expect(db.selectFrom("decision_outbox")
-        .select(["event_type", "payload"])
+        .select(["event_id", "event_type", "occurred_at", "payload"])
         .execute()).resolves.toEqual([{
+        event_id: firstEvent.event_id,
         event_type: "routing_decision",
+        occurred_at: firstEvent.occurred_at,
         payload: expect.objectContaining({
+          occurredAt: firstDecision.created_at.toISOString(),
           repositoryId: "101",
           changeRequestId: "7",
           action: "configuration_failure",
@@ -230,11 +246,11 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
           configDiagnostics: [],
           configSources: {},
         },
-        ({ decisionId }) => ({
+        ({ decisionId, occurredAt }) => ({
           schemaVersion: 1,
           eventType: "routing_decision",
           eventId: `decision:${decisionId}:v1`,
-          occurredAt: "2026-08-18T12:02:00.000Z",
+          occurredAt: occurredAt.toISOString(),
           workspaceId,
           provider: "github",
           decisionId,
