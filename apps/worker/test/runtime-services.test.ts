@@ -4,6 +4,7 @@ import type { HumanReviewPolicyDecision } from "@triagepilot/db";
 
 import {
   createWorkerHumanReviewPolicyServiceFactory,
+  createWorkerReviewerAvailabilityServiceFactory,
   createWorkerRoutingServiceFactory,
 } from "../src/runtime-services";
 import { PermanentJobError } from "../src/errors";
@@ -38,6 +39,74 @@ const policyMessage = {
     number: 7,
   },
 };
+
+const availabilityMessage = {
+  kind: "activate_reviewer_absence" as const,
+  workspaceId: "ws_local",
+  provider: "github" as const,
+  providerConnectionId: "99",
+  absenceId: "absence-1",
+  absenceRevision: 2,
+};
+
+describe("worker reviewer availability runtime scope", () => {
+  it("rejects a wrong workspace before database, adapter, or credential composition", async () => {
+    const database = knownRepositoryDatabase();
+    const selectFrom = vi.spyOn(database, "selectFrom");
+    const getCredential = vi.fn(async () => { throw new Error("credentials must not be read"); });
+    const createAdapter = vi.fn(() => { throw new Error("adapter must not be composed"); });
+    const services = createWorkerReviewerAvailabilityServiceFactory({
+      db: database as never,
+      credentialProvider: { getCredential },
+      createAdapter,
+    })(availabilityMessage);
+
+    await expect(services.provider.inspectChangeRequest({
+      workspaceId: "ws-other",
+      providerConnectionId: "99",
+      repository: { provider: "github", externalId: "101", owner: "acme", name: "api" },
+      changeRequestId: "7",
+      changeRequestNumber: 7,
+    })).rejects.toThrow("reviewer availability target scope does not match claimed job");
+
+    expect(selectFrom).not.toHaveBeenCalled();
+    expect(getCredential).not.toHaveBeenCalled();
+    expect(createAdapter).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unsupported claimed provider before database or credential access", () => {
+    const database = knownRepositoryDatabase();
+    const selectFrom = vi.spyOn(database, "selectFrom");
+    const getCredential = vi.fn(async () => { throw new Error("credentials must not be read"); });
+
+    expect(() => createWorkerReviewerAvailabilityServiceFactory({
+      db: database as never,
+      credentialProvider: { getCredential },
+    })({ ...availabilityMessage, provider: "gitlab" })).toThrow(
+      "reviewer availability provider is not configured: gitlab",
+    );
+    expect(selectFrom).not.toHaveBeenCalled();
+    expect(getCredential).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed claimed scope before database, adapter, or credential composition", () => {
+    const database = knownRepositoryDatabase();
+    const selectFrom = vi.spyOn(database, "selectFrom");
+    const getCredential = vi.fn(async () => { throw new Error("credentials must not be read"); });
+    const createAdapter = vi.fn(() => { throw new Error("adapter must not be composed"); });
+
+    expect(() => createWorkerReviewerAvailabilityServiceFactory({
+      db: database as never,
+      credentialProvider: { getCredential },
+      createAdapter,
+    })({ ...availabilityMessage, absenceId: " " })).toThrow(
+      "reviewer absence activation job scope is malformed",
+    );
+    expect(selectFrom).not.toHaveBeenCalled();
+    expect(getCredential).not.toHaveBeenCalled();
+    expect(createAdapter).not.toHaveBeenCalled();
+  });
+});
 
 describe("worker routing GitHub reads", () => {
   it("exposes a provider-neutral availability port without provider reads", async () => {

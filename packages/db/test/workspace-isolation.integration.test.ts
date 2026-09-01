@@ -164,25 +164,39 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace persistence is
         started_at: new Date("2026-10-01T08:00:00.000Z"),
         completed_at: new Date("2026-10-01T08:00:01.000Z"),
       };
-      await db.insertInto("reviewer_replacements").values(replacement).execute();
-      await expect(db.insertInto("reviewer_replacements").values(replacement).execute()).rejects.toMatchObject({
+      const intent = await db.insertInto("reviewer_mutation_intents").values({
+        workspace_id: workspaceA,
+        provider: "github",
+        provider_connection_id: connectionA,
+        absence_id: absenceA.id,
+        absence_revision: 1,
+        decision_id: decisionA.decisionId,
+        repository_id: "201",
+        change_request_id: "change:availability-a",
+        expected_head_revision: "head-1",
+        unavailable_actor_id: "@user-4e5c21",
+        replacement_actor_id: "@user-2f83b9",
+      }).returning("id").executeTakeFirstOrThrow();
+      const linkedReplacement = { ...replacement, mutation_intent_id: intent.id };
+      await db.insertInto("reviewer_replacements").values(linkedReplacement).execute();
+      await expect(db.insertInto("reviewer_replacements").values(linkedReplacement).execute()).rejects.toMatchObject({
         constraint: "reviewer_replacements_scoped_source_key",
       });
 
       await expect(db.insertInto("reviewer_replacements").values({
-        ...replacement,
+        ...linkedReplacement,
         absence_id: absenceB.id,
       }).execute()).rejects.toMatchObject({
         constraint: "reviewer_replacements_scoped_absence_fkey",
       });
       await expect(db.insertInto("reviewer_replacements").values({
-        ...replacement,
+        ...linkedReplacement,
         absence_id: absenceASecondary.id,
       }).execute()).rejects.toMatchObject({
         constraint: "reviewer_replacements_scoped_absence_fkey",
       });
       await expect(db.insertInto("reviewer_replacements").values({
-        ...replacement,
+        ...linkedReplacement,
         decision_id: decisionB.decisionId,
       }).execute()).rejects.toMatchObject({
         constraint: "reviewer_replacements_workspace_decision_fkey",

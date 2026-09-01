@@ -14,9 +14,72 @@ import { withPostgresTestDatabase } from "./postgres";
 const now = new Date("2026-09-01T12:00:00.000Z");
 const unavailableActor = "Actor:Unavailable/Case";
 const replacementActor = "9007199254740993";
+const alternateReplacementActor = "Actor:Alternate/73";
 const changeRequestId = "change:Request/A17";
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer availability", () => {
+  it("atomically creates or loads one immutable reviewer mutation intent", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "availability-mutation-intent");
+      await db.updateTable("routing_decisions")
+        .set({
+          details: {
+            ownership: {
+              preferredReviewers: [unavailableActor, replacementActor, alternateReplacementActor],
+              eligibleReviewers: [unavailableActor, replacementActor, alternateReplacementActor],
+            },
+            routing: { requestedReviewerCount: 1 },
+          },
+        })
+        .where("workspace_id", "=", fixture.scope.workspaceId)
+        .where("id", "=", fixture.decisionId)
+        .execute();
+      const common = {
+        workspaceId: fixture.scope.workspaceId,
+        provider: fixture.scope.provider,
+        providerConnectionId: fixture.scope.providerConnectionId,
+        absenceId: fixture.absence.id,
+        absenceRevision: fixture.absence.revision,
+        decisionId: fixture.decisionId,
+        repositoryId: fixture.externalRepositoryId,
+        changeRequestId,
+        expectedHeadRevision: "head-1",
+        unavailableActorId: unavailableActor,
+      };
+
+      const attempts = await Promise.allSettled([
+        fixture.availability.prepareMutationIntent({ ...common, replacementActorId: replacementActor }),
+        fixture.availability.prepareMutationIntent({ ...common, replacementActorId: alternateReplacementActor }),
+      ]);
+      const prepared = attempts.filter((attempt) => attempt.status === "fulfilled");
+      const rejected = attempts.filter((attempt) => attempt.status === "rejected");
+
+      expect(prepared).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      const winner = prepared[0]!.value;
+      expect(winner.id.trim()).not.toBe("");
+      await expect(fixture.availability.loadMutationIntent(common)).resolves.toEqual(winner);
+      await expect(fixture.availability.prepareMutationIntent({
+        ...common,
+        replacementActorId: winner.replacementActorId,
+      })).resolves.toEqual(winner);
+      await expect(fixture.availability.prepareMutationIntent({
+        ...common,
+        expectedHeadRevision: "different-head",
+        replacementActorId: winner.replacementActorId,
+      })).rejects.toBeInstanceOf(ReviewerAvailabilityValidationError);
+
+      const other = await seedReplacementFixture(db, "availability-mutation-intent-other");
+      await expect(other.availability.loadMutationIntent({
+        workspaceId: other.scope.workspaceId,
+        providerConnectionId: fixture.scope.providerConnectionId,
+        absenceId: fixture.absence.id,
+        absenceRevision: fixture.absence.revision,
+        decisionId: fixture.decisionId,
+      })).resolves.toBeNull();
+    });
+  });
+
   it("persists an explicit IANA timezone for only the bound workspace", async () => {
     await withPostgresTestDatabase(async (db) => {
       const first = await seedWorkspace(db, "availability-settings-a", "github", "connection-a");
@@ -273,6 +336,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer avail
           decisionId: fixture.decisionId,
           unavailableActorId: unavailableActor,
           replacementActorId: replacementActor,
+          mutationIntentId: fixture.mutationIntentId,
           outcome: "replaced",
           state: "finalizer_pending",
           lastError: null,
@@ -313,7 +377,11 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer avail
         absenceId: fixture.absence.id,
         absenceRevision: fixture.absence.revision,
       })).resolves.toEqual([
-        expect.objectContaining({ id: first.replacement!.id, state: "finalizer_pending" }),
+        expect.objectContaining({
+          id: first.replacement!.id,
+          state: "finalizer_pending",
+          mutationIntentId: fixture.mutationIntentId,
+        }),
       ]);
 
       const completed = await fixture.availability.updateReplacementState({
@@ -332,6 +400,56 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer avail
       await expect(fixture.availability.listReplacementHistory(fixture.absence.id)).resolves.toEqual([
         expect.objectContaining({ id: first.replacement!.id, state: "completed", lastError: null }),
       ]);
+    });
+  });
+
+  it("fails closed when replacement history does not match the durable intent actor", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "availability-intent-linkage");
+      await db.updateTable("routing_decisions")
+        .set({
+          details: {
+            ownership: {
+              preferredReviewers: [unavailableActor, replacementActor, alternateReplacementActor],
+              eligibleReviewers: [unavailableActor, replacementActor, alternateReplacementActor],
+            },
+            routing: { requestedReviewerCount: 1 },
+          },
+        })
+        .where("workspace_id", "=", fixture.scope.workspaceId)
+        .where("id", "=", fixture.decisionId)
+        .execute();
+      const input = replacementInput(fixture);
+
+      await expect(fixture.availability.persistReplacement({
+        ...input,
+        replacementActorId: alternateReplacementActor,
+        event: { ...input.event, replacementActor: alternateReplacementActor },
+      })).rejects.toBeInstanceOf(ReviewerAvailabilityValidationError);
+
+      await expect(db.selectFrom("reviewer_replacements").select("id").execute()).resolves.toEqual([]);
+      await expect(readSelectedActors(db, fixture.decisionId)).resolves.toEqual([unavailableActor]);
+    });
+  });
+
+  it("persists provider-effect history from durable intent after connection suspension", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "availability-suspended-recovery");
+      await db.updateTable("provider_connections")
+        .set({ status: "suspended" })
+        .where("workspace_id", "=", fixture.scope.workspaceId)
+        .where("id", "=", fixture.scope.providerConnectionId)
+        .execute();
+
+      await expect(fixture.availability.persistReplacement(replacementInput(fixture))).resolves.toMatchObject({
+        inserted: true,
+        activationCurrent: true,
+        replacement: {
+          outcome: "replaced",
+          mutationIntentId: fixture.mutationIntentId,
+          state: "finalizer_pending",
+        },
+      });
     });
   });
 
@@ -377,7 +495,11 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer avail
           absenceId: fixture.absence.id,
           absenceRevision: 1,
         })).resolves.toEqual([
-          expect.objectContaining({ id: persisted.replacement!.id, state: "finalizer_pending" }),
+          expect.objectContaining({
+            id: persisted.replacement!.id,
+            state: "finalizer_pending",
+            mutationIntentId: fixture.mutationIntentId,
+          }),
         ]);
         await expect(fixture.availability.updateReplacementState({
           replacementId: persisted.replacement!.id,
@@ -470,6 +592,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer avail
         decision_id: input.decisionId,
         unavailable_actor_id: input.unavailableActorId,
         replacement_actor_id: input.replacementActorId,
+        mutation_intent_id: input.mutationIntentId,
         outcome: input.outcome,
         reason: input.reason,
         state: input.state,
@@ -632,12 +755,26 @@ async function seedReplacementFixture(
       routing: { requestedReviewerCount: 1 },
     },
   });
+  const mutationIntent = await availability.prepareMutationIntent({
+    workspaceId: scope.workspaceId,
+    provider: scope.provider,
+    providerConnectionId: scope.providerConnectionId,
+    absenceId: absence.id,
+    absenceRevision: absence.revision,
+    decisionId: decision.decisionId,
+    repositoryId: `${externalKey}-repository`,
+    changeRequestId,
+    expectedHeadRevision: "head-1",
+    unavailableActorId: unavailableActor,
+    replacementActorId: replacementActor,
+  });
   return {
     db,
     scope,
     availability,
     absence,
     decisionId: decision.decisionId,
+    mutationIntentId: mutationIntent.id,
     externalRepositoryId: `${externalKey}-repository`,
   };
 }
@@ -669,6 +806,7 @@ function replacementInput(fixture: Awaited<ReturnType<typeof seedReplacementFixt
     expectedHeadRevision: "head-1",
     unavailableActorId: unavailableActor,
     replacementActorId: replacementActor,
+    mutationIntentId: fixture.mutationIntentId,
     outcome: "replaced" as const,
     reason: "scheduled absence",
     state: "finalizer_pending" as const,

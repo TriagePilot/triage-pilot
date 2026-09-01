@@ -20,6 +20,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         "provider_connections",
         "repositories",
         "reviewer_absences",
+        "reviewer_mutation_intents",
         "reviewer_replacements",
         "routing_decisions",
         "schema_migrations",
@@ -112,6 +113,27 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         "provider_connection_id",
         "state",
         "last_error",
+        "mutation_intent_id",
+      ]);
+      const mutationIntents = await sql<{ column_name: string }>`
+        select column_name from information_schema.columns
+        where table_name = 'reviewer_mutation_intents'
+        order by ordinal_position
+      `.execute(db);
+      expect(mutationIntents.rows.map((row) => row.column_name)).toEqual([
+        "id",
+        "workspace_id",
+        "provider",
+        "provider_connection_id",
+        "absence_id",
+        "absence_revision",
+        "decision_id",
+        "repository_id",
+        "change_request_id",
+        "expected_head_revision",
+        "unavailable_actor_id",
+        "replacement_actor_id",
+        "created_at",
       ]);
       const migrations = await sql<{ name: string }>`select name from schema_migrations order by name`.execute(db);
       expect(migrations.rows).toEqual([
@@ -123,6 +145,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         { name: "0005_workspace_scope.sql" },
         { name: "0006_decision_outbox.sql" },
         { name: "0007_workspace_reviewer_availability.sql" },
+        { name: "0008_reviewer_mutation_intents.sql" },
       ]);
     });
   });

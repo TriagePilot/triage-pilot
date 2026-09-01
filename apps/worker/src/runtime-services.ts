@@ -12,6 +12,7 @@ import {
   type CredentialProvider,
   type PlatformEventSink,
   type HumanReviewPolicyJobPayload,
+  type RepositoryRef,
   type ScoreComponent,
 } from "@triagepilot/contracts";
 import {
@@ -31,11 +32,20 @@ import {
   type ChangedFileMetadata,
   type ReviewMetadata,
 } from "@triagepilot/core";
-import type { ReviewPolicyApplicationPorts, RoutingApplicationPorts } from "@triagepilot/application";
+import {
+  assertReviewerReplacementFinalizerRecord,
+  parseReviewerMutationIntentId,
+  type ReviewPolicyApplicationPorts,
+  type ReviewerAvailabilityPorts,
+  type ReviewerMutationIntent,
+  type ReviewerReplacementFinalizerRecord,
+  type RoutingApplicationPorts,
+} from "@triagepilot/application";
 
 import type { RoutingJobMessage, RoutingJobServices } from "./processor";
 import { classifyWorkerError, PermanentJobError } from "./errors";
-import type { HumanReviewPolicyServices } from "./review-policy-processor";
+import { processHumanReviewPolicyJob, type HumanReviewPolicyServices } from "./review-policy-processor";
+import type { ReviewerAbsenceActivationJobMessage } from "./availability-processor";
 
 type Requester = Awaited<ReturnType<typeof createInstallationRequester>>;
 type DatabaseClient = ReturnType<typeof createDatabase>;
@@ -50,6 +60,7 @@ interface WorkerServiceFactoryInput {
   createAdapter?: AdapterFactory;
   createConfigurationSource?: ConfigurationSourceFactory;
   clock?: Clock;
+  allowInactiveProviderConnection?: boolean;
 }
 
 export function createNoopPlatformEventSink(): PlatformEventSink {
@@ -103,7 +114,11 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
     }
 
     async function knownRepository(): Promise<KnownRepository> {
-      knownRepositoryPromise ??= findKnownRepository(input.db, message);
+      knownRepositoryPromise ??= findKnownRepository(
+        input.db,
+        message,
+        !input.allowInactiveProviderConnection,
+      );
       return knownRepositoryPromise;
     }
 
@@ -455,6 +470,213 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
   };
 }
 
+export function createWorkerReviewerAvailabilityServiceFactory(input: WorkerServiceFactoryInput) {
+  const credentialProvider = input.credentialProvider ?? staticCredentialProvider(input.github);
+  const createAdapter = input.createAdapter ?? ((requester: Requester) => new GitHubAdapter(requester));
+  return (message: ReviewerAbsenceActivationJobMessage): ReviewerAvailabilityPorts => {
+    if (message.provider !== "github") {
+      throw new PermanentJobError(`reviewer availability provider is not configured: ${message.provider}`);
+    }
+    if (
+      message.workspaceId.trim().length === 0
+      || message.providerConnectionId.trim().length === 0
+      || message.absenceId.trim().length === 0
+      || !Number.isSafeInteger(message.absenceRevision)
+      || message.absenceRevision <= 0
+    ) throw new PermanentJobError("reviewer absence activation job scope is malformed");
+    const classifyAdapter = new GitHubAdapter({ request: async () => {
+      throw new Error("Reviewer replacement classifier does not perform provider requests");
+    } } as Requester);
+    const availability = createWorkspaceReviewerAvailability(input.db, message.workspaceId);
+    const requesterPromises = new Map<string, Promise<Requester>>();
+
+    function assertTargetScope(target: {
+      workspaceId: string;
+      providerConnectionId: string;
+      repository: RepositoryRef;
+    }): void {
+      if (
+        target.workspaceId !== message.workspaceId
+        || target.providerConnectionId !== message.providerConnectionId
+        || target.repository.provider !== message.provider
+      ) throw new PermanentJobError("reviewer availability target scope does not match claimed job");
+    }
+
+    async function requesterFor(target: {
+      workspaceId: string;
+      providerConnectionId: string;
+      repository: RepositoryRef;
+    }): Promise<Requester> {
+      assertTargetScope(target);
+      const key = target.repository.externalId;
+      let requester = requesterPromises.get(key);
+      if (requester === undefined) {
+        requester = (async () => {
+          const known = await findKnownRepository(input.db, {
+            workspaceId: message.workspaceId,
+            providerConnectionId: message.providerConnectionId,
+            changeRequest: { repository: target.repository },
+          });
+          const credentials = await credentialProvider.getCredential({
+            workspaceId: message.workspaceId,
+            providerConnectionId: message.providerConnectionId,
+          });
+          return await (input.createRequester ?? createInstallationRequester)({
+            appId: credentials.appId,
+            privateKey: credentials.privateKey,
+            installationId: toSafeInteger(known.externalConnectionId),
+          });
+        })();
+        requesterPromises.set(key, requester);
+      }
+      return await requester;
+    }
+
+    async function adapterFor(target: {
+      workspaceId: string;
+      providerConnectionId: string;
+      repository: RepositoryRef;
+    }): Promise<GitHubAdapter> {
+      return createAdapter(await requesterFor(target));
+    }
+
+    const services: ReviewerAvailabilityPorts = {
+      clock: input.clock ?? { now: () => new Date() },
+      availability: {
+        async listPendingFinalizers(finalizerInput) {
+          const records = await availability.listPendingFinalizers(finalizerInput);
+          return records.map(toApplicationFinalizerRecord);
+        },
+        async loadActivation(absenceId, revision) {
+          const activation = await availability.loadActivation(absenceId, revision);
+          if (activation === null) return null;
+          if (
+            activation.provider !== message.provider
+            || activation.providerConnectionId !== message.providerConnectionId
+          ) throw new PermanentJobError("reviewer absence activation scope does not match claimed job");
+          return {
+            ...activation,
+            candidates: activation.candidates.map((candidate) => ({
+              decisionId: candidate.decisionId,
+              provider: candidate.provider,
+              providerConnectionId: candidate.providerConnectionId,
+              repository: {
+                provider: candidate.provider,
+                externalId: candidate.repositoryId,
+                owner: candidate.owner,
+                name: candidate.repositoryName,
+              },
+              changeRequestId: candidate.changeRequestId,
+              changeRequestNumber: candidate.changeRequestNumber,
+              routedHeadRevision: candidate.routedHeadRevision,
+              mode: candidate.mode,
+              selectedActors: candidate.selectedActors,
+              originalPreferredActors: candidate.originalPreferredActors,
+              originalEligibleActors: candidate.originalEligibleActors,
+              requestedReviewerCount: candidate.requestedReviewerCount,
+              policyCheckState: candidate.policyCheckState,
+            })),
+          };
+        },
+        async loadMutationIntent(intentInput) {
+          assertAvailabilityScope(message, intentInput.workspaceId, intentInput.providerConnectionId);
+          const intent = await availability.loadMutationIntent(intentInput);
+          return intent === null ? null : toApplicationMutationIntent(intent);
+        },
+        async prepareMutationIntent(intentInput) {
+          assertAvailabilityScope(message, intentInput.workspaceId, intentInput.providerConnectionId);
+          if (intentInput.provider !== message.provider) {
+            throw new PermanentJobError("reviewer mutation intent provider does not match claimed job");
+          }
+          return toApplicationMutationIntent(await availability.prepareMutationIntent(intentInput));
+        },
+        async findActive(activeInput) {
+          assertAvailabilityScope(message, activeInput.workspaceId, activeInput.providerConnectionId);
+          return await availability.findActiveAbsences({
+            providerConnectionId: activeInput.providerConnectionId,
+            actors: activeInput.actors,
+            at: activeInput.at,
+          });
+        },
+        async persistReplacement(persistence) {
+          if (persistence.provider !== message.provider || persistence.providerConnectionId !== message.providerConnectionId) {
+            throw new PermanentJobError("reviewer replacement persistence scope does not match claimed job");
+          }
+          const persisted = await availability.persistReplacement({
+            ...persistence,
+            mutationIntentId: persistence.mutationIntentId,
+          });
+          return {
+            inserted: persisted.inserted,
+            activationCurrent: persisted.activationCurrent,
+            replacement: persisted.replacement === null
+              ? null
+              : { id: persisted.replacement.id, state: persisted.replacement.state },
+          };
+        },
+        async updateReplacementState(state) {
+          const updated = await availability.updateReplacementState(state);
+          return updated === null ? null : { id: updated.id, state: updated.state };
+        },
+      },
+      provider: {
+        async inspectChangeRequest(target) {
+          assertTargetScope(target);
+          const adapter = await adapterFor(target);
+          return await adapter.inspectReviewerReplacement({
+            pullRequest: {
+              owner: target.repository.owner,
+              repo: target.repository.name,
+              pullNumber: target.changeRequestNumber,
+            },
+          });
+        },
+        async reconcileReviewRequest(target) {
+          assertTargetScope(target);
+          const adapter = await adapterFor(target);
+          return await adapter.reconcileReviewerReplacement({
+            pullRequest: {
+              owner: target.repository.owner,
+              repo: target.repository.name,
+              pullNumber: target.changeRequestNumber,
+            },
+            unavailableActor: target.unavailableActor,
+            replacementActor: target.replacementActor,
+          });
+        },
+        classifyError(error) {
+          return classifyAdapter.classifyReviewerReplacementError(error);
+        },
+      },
+      async reviewerLoad(loadInput) {
+        assertAvailabilityScope(message, loadInput.workspaceId, message.providerConnectionId);
+        return Object.fromEntries(loadInput.actors.map((actor) => [actor, 0]));
+      },
+      finalizers: {
+        async run(finalizer) {
+          assertAvailabilityScope(message, finalizer.workspaceId, finalizer.providerConnectionId);
+          const policyMessage = await loadReviewerReplacementPolicyMessage(input.db, message, finalizer.decisionId);
+          const policyServices = createWorkerHumanReviewPolicyServiceFactory({
+            ...input,
+            credentialProvider,
+            createAdapter,
+            allowInactiveProviderConnection: true,
+          })(policyMessage);
+          if (finalizer.action === "reevaluate_policy") {
+            await processHumanReviewPolicyJob(policyMessage, policyServices);
+            return;
+          }
+          if (!policyServices.failPolicyCheck || finalizer.summary === null) {
+            throw new PermanentJobError("reviewer replacement policy failure finalizer is not configured");
+          }
+          await policyServices.failPolicyCheck(finalizer.summary, finalizer.decisionId);
+        },
+      },
+    };
+    return services;
+  };
+}
+
 function formatRoutingComment(input: {
   action: string;
   riskTier: string;
@@ -516,7 +738,11 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: WorkerService
     }
 
     async function knownRepository(): Promise<KnownRepository> {
-      knownRepositoryPromise ??= findKnownRepository(input.db, message);
+      knownRepositoryPromise ??= findKnownRepository(
+        input.db,
+        message,
+        !input.allowInactiveProviderConnection,
+      );
       return knownRepositoryPromise;
     }
 
@@ -789,9 +1015,119 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: WorkerService
   };
 }
 
+function assertAvailabilityScope(
+  message: ReviewerAbsenceActivationJobMessage,
+  workspaceId: string,
+  providerConnectionId: string,
+): void {
+  if (workspaceId !== message.workspaceId || providerConnectionId !== message.providerConnectionId) {
+    throw new PermanentJobError("reviewer availability target scope does not match claimed job");
+  }
+}
+
+function toApplicationMutationIntent(intent: {
+  id: string;
+  workspaceId: string;
+  provider: "github" | "gitlab" | "bitbucket";
+  providerConnectionId: string;
+  absenceId: string;
+  absenceRevision: number;
+  decisionId: string;
+  repositoryId: string;
+  changeRequestId: string;
+  expectedHeadRevision: string;
+  unavailableActorId: string;
+  replacementActorId: string;
+}): ReviewerMutationIntent {
+  return {
+    ...intent,
+    id: parseReviewerMutationIntentId(intent.id),
+  };
+}
+
+function toApplicationFinalizerRecord(record: {
+  id: string;
+  decisionId: string;
+  state: string;
+  outcome: string;
+  replacementActorId: string | null;
+  mutationIntentId: string | null;
+}): ReviewerReplacementFinalizerRecord {
+  const value: unknown = {
+    id: record.id,
+    decisionId: record.decisionId,
+    state: record.state,
+    outcome: record.outcome,
+    replacementActorId: record.replacementActorId,
+    mutationIntentId: record.mutationIntentId === null
+      ? null
+      : parseReviewerMutationIntentId(record.mutationIntentId),
+  };
+  assertReviewerReplacementFinalizerRecord(value);
+  return value;
+}
+
+async function loadReviewerReplacementPolicyMessage(
+  db: DatabaseClient,
+  message: ReviewerAbsenceActivationJobMessage,
+  decisionId: string,
+): Promise<HumanReviewPolicyJobPayload> {
+  const decision = await db
+    .selectFrom("routing_decisions")
+    .innerJoin("repositories", (join) => join
+      .onRef("repositories.workspace_id", "=", "routing_decisions.workspace_id")
+      .onRef("repositories.id", "=", "routing_decisions.repository_id"))
+    .innerJoin("provider_connections", (join) => join
+      .onRef("provider_connections.workspace_id", "=", "repositories.workspace_id")
+      .onRef("provider_connections.provider", "=", "repositories.provider")
+      .onRef("provider_connections.id", "=", "repositories.provider_connection_id"))
+    .select([
+      "routing_decisions.change_request_id as changeRequestId",
+      "routing_decisions.pull_number as changeRequestNumber",
+      "repositories.provider",
+      "repositories.external_repository_id as repositoryId",
+      "repositories.owner",
+      "repositories.name as repositoryName",
+    ])
+    .where("routing_decisions.workspace_id", "=", message.workspaceId)
+    .where("routing_decisions.id", "=", decisionId)
+    .where("repositories.provider", "=", message.provider)
+    .where("repositories.provider_connection_id", "=", message.providerConnectionId)
+    .executeTakeFirst();
+  if (
+    decision === undefined
+    || decision.changeRequestId === null
+    || decision.changeRequestId.trim().length === 0
+    || decision.changeRequestNumber === null
+    || !Number.isSafeInteger(decision.changeRequestNumber)
+    || decision.changeRequestNumber <= 0
+  ) throw new PermanentJobError("reviewer replacement policy finalizer source is unavailable");
+  return {
+    kind: "evaluate_human_review_policy",
+    deliveryId: `reviewer-replacement-finalizer:${decisionId}`,
+    workspaceId: message.workspaceId,
+    providerConnectionId: message.providerConnectionId,
+    changeRequest: {
+      repository: {
+        provider: decision.provider,
+        externalId: decision.repositoryId,
+        owner: decision.owner,
+        name: decision.repositoryName,
+      },
+      externalId: decision.changeRequestId,
+      number: decision.changeRequestNumber,
+    },
+  };
+}
+
 async function findKnownRepository(
   db: DatabaseClient,
-  message: Pick<RoutingJobMessage, "workspaceId" | "providerConnectionId" | "changeRequest"> | HumanReviewPolicyJobPayload,
+  message: {
+    workspaceId: string;
+    providerConnectionId: string;
+    changeRequest: { repository: RepositoryRef };
+  },
+  requireActive = true,
 ): Promise<KnownRepository> {
   const repository = await db
     .selectFrom("repositories")
@@ -806,11 +1142,13 @@ async function findKnownRepository(
     .where((eb) => eb.and([
       eb("repositories.provider", "=", message.changeRequest.repository.provider),
       eb("repositories.external_repository_id", "=", message.changeRequest.repository.externalId),
+      eb("repositories.owner", "=", message.changeRequest.repository.owner),
+      eb("repositories.name", "=", message.changeRequest.repository.name),
     ]))
     .where((eb) => eb.and([
       eb("provider_connections.id", "=", message.providerConnectionId),
       eb("provider_connections.provider", "=", message.changeRequest.repository.provider),
-      eb("provider_connections.status", "=", "active"),
+      ...(requireActive ? [eb("provider_connections.status", "=", "active")] : []),
     ]))
     .executeTakeFirst();
   if (!repository) {

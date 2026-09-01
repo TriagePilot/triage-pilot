@@ -1,12 +1,22 @@
 import type { JobClaimer, JobLease, JobRecord, JobTransitionResult, WorkspaceJobQueue } from "@triagepilot/db";
 import type { WorkspaceId } from "@triagepilot/contracts";
 import type { HumanReviewPolicyJobPayload } from "@triagepilot/contracts";
+import {
+  assertReviewerReplacementFinalizerRecovery,
+  parseReviewerMutationIntentId,
+  type ReviewerReplacementFinalizerRecovery,
+} from "@triagepilot/application";
 
 import type { RoutingJobMessage, RoutingJobServices } from "./processor";
 import type { HumanReviewPolicyServices } from "./review-policy-processor";
 import { classifyWorkerError, PermanentJobError, StaleJobLeaseError } from "./errors";
+import type {
+  ReviewerAbsenceActivationJobMessage,
+  ReviewerAvailabilityServices,
+} from "./availability-processor";
 
 const POLICY_CHECK_FINALIZATION_ATTEMPTS = 3;
+const REVIEWER_REPLACEMENT_RECOVERY_ATTEMPTS = 3;
 
 interface PolicyCheckFailureRecovery {
   jobError: string;
@@ -30,15 +40,32 @@ export interface WorkerRunnerInput {
     services: HumanReviewPolicyServices,
   ): Promise<void>;
   buildHumanReviewPolicyServices?(message: HumanReviewPolicyJobPayload): HumanReviewPolicyServices;
+  processReviewerAbsenceActivationJob?(
+    message: ReviewerAbsenceActivationJobMessage,
+    services: ReviewerAvailabilityServices,
+  ): Promise<ReviewerReplacementFinalizerRecovery | null>;
+  recoverReviewerReplacementFinalizer?(
+    recovery: ReviewerReplacementFinalizerRecovery,
+    services: ReviewerAvailabilityServices,
+  ): Promise<ReviewerReplacementFinalizerRecovery | null>;
+  markReviewerReplacementRecoveryExhausted?(
+    recovery: ReviewerReplacementFinalizerRecovery,
+    services: ReviewerAvailabilityServices,
+    error: string,
+  ): Promise<void>;
+  buildReviewerAvailabilityServices?(message: ReviewerAbsenceActivationJobMessage): ReviewerAvailabilityServices;
 }
 
 export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> {
   const job = await input.jobClaimer.claimNext(input.workerId, input.now);
   if (!job) return false;
-  const queue = input.workspaceQueue(job.workspaceId);
+  let queue: WorkspaceJobQueue | null = null;
+  const claimedQueue = () => queue ??= input.workspaceQueue(job.workspaceId);
   const lease = toJobLease(job);
   let routingServices: RoutingJobServices | null = null;
   let humanReviewPolicyServices: HumanReviewPolicyServices | null = null;
+  let reviewerAvailabilityServices: ReviewerAvailabilityServices | null = null;
+  let reviewerReplacementRecovery: ReviewerReplacementFinalizerRecovery | null = null;
 
   try {
     if (job.kind === "process_pull_request") {
@@ -48,7 +75,7 @@ export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> 
       if (recovery === null) {
         await input.processRoutingJob(message, routingServices);
       } else {
-        await recoverPolicyCheckFailure(queue, lease, routingServices, recovery);
+        await recoverPolicyCheckFailure(claimedQueue(), lease, routingServices, recovery);
         return true;
       }
     } else if (job.kind === "evaluate_human_review_policy") {
@@ -61,7 +88,53 @@ export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> 
       if (recovery === null) {
         await input.processHumanReviewPolicyJob(message, humanReviewPolicyServices);
       } else {
-        await recoverPolicyCheckFailure(queue, lease, humanReviewPolicyServices, recovery);
+        await recoverPolicyCheckFailure(claimedQueue(), lease, humanReviewPolicyServices, recovery);
+        return true;
+      }
+    } else if (job.kind === "activate_reviewer_absence") {
+      const message = parseReviewerAbsenceActivationJobPayload(job);
+      reviewerReplacementRecovery = parseReviewerReplacementFinalizerRecovery(job.payload, message);
+      if (!input.processReviewerAbsenceActivationJob || !input.buildReviewerAvailabilityServices) {
+        throw new PermanentJobError("reviewer absence activation processor is not configured");
+      }
+      reviewerAvailabilityServices = input.buildReviewerAvailabilityServices(message);
+      const nextRecovery = reviewerReplacementRecovery === null
+        ? await input.processReviewerAbsenceActivationJob(message, reviewerAvailabilityServices)
+        : input.recoverReviewerReplacementFinalizer
+          ? await input.recoverReviewerReplacementFinalizer(
+              reviewerReplacementRecovery,
+              reviewerAvailabilityServices,
+            )
+          : (() => { throw new PermanentJobError("reviewer replacement finalizer recovery is not configured"); })();
+      if (nextRecovery !== null) {
+        const exhausted = reviewerReplacementRecovery !== null && lease.attemptCount >= lease.maxAttempts;
+        if (exhausted) {
+          if (input.markReviewerReplacementRecoveryExhausted) {
+            await input.markReviewerReplacementRecoveryExhausted(
+              nextRecovery,
+              reviewerAvailabilityServices,
+              nextRecovery.lastError,
+            );
+          }
+          assertLeaseUpdated(
+            await claimedQueue().markFailed(lease, nextRecovery.lastError, new Date(), { retryable: false }),
+            lease,
+          );
+          return true;
+        }
+        const maxAttempts = reviewerReplacementRecovery === null
+          ? Math.max(lease.maxAttempts, lease.attemptCount + REVIEWER_REPLACEMENT_RECOVERY_ATTEMPTS)
+          : lease.maxAttempts;
+        assertLeaseUpdated(
+          await claimedQueue().markFailed(lease, nextRecovery.lastError, new Date(), {
+            retryable: true,
+            recovery: {
+              payload: reviewerReplacementRecoveryPayload(job.payload, message, nextRecovery),
+              maxAttempts,
+            },
+          }),
+          lease,
+        );
         return true;
       }
     } else {
@@ -86,7 +159,7 @@ export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> 
       const decisionId = humanReviewPolicyServices?.policyCheckFailureDecisionId?.();
       if (decisionId) recovery.decisionId = decisionId;
       assertLeaseUpdated(
-        await queue.markFailed(lease, classified.message, new Date(), {
+        await claimedQueue().markFailed(lease, classified.message, new Date(), {
           retryable: true,
           recovery: {
             payload: { ...(job.payload as object), policyCheckFailureRecovery: recovery },
@@ -97,8 +170,20 @@ export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> 
       );
       return true;
     }
+    if (
+      reviewerReplacementRecovery !== null
+      && reviewerAvailabilityServices !== null
+      && (!retryable || lease.attemptCount >= lease.maxAttempts)
+      && input.markReviewerReplacementRecoveryExhausted
+    ) {
+      await input.markReviewerReplacementRecoveryExhausted(
+        reviewerReplacementRecovery,
+        reviewerAvailabilityServices,
+        classified.message,
+      );
+    }
     assertLeaseUpdated(
-      await queue.markFailed(lease, classified.message, new Date(), {
+      await claimedQueue().markFailed(lease, classified.message, new Date(), {
         retryable,
       }),
       lease,
@@ -106,7 +191,7 @@ export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> 
     return true;
   }
 
-  assertLeaseUpdated(await queue.markSucceeded(lease, new Date()), lease);
+  assertLeaseUpdated(await claimedQueue().markSucceeded(lease, new Date()), lease);
   return true;
 }
 
@@ -180,6 +265,109 @@ function parseHumanReviewPolicyJobPayload(job: JobRecord): HumanReviewPolicyJobP
     throw new PermanentJobError("human-review policy job payload is malformed");
   }
   return payload;
+}
+
+function parseReviewerAbsenceActivationJobPayload(job: JobRecord): ReviewerAbsenceActivationJobMessage {
+  const payload = withClaimedScope(job);
+  if (
+    !isRecord(payload)
+    || payload.kind !== "activate_reviewer_absence"
+    || !isNonBlankString(payload.workspaceId)
+    || !isNonBlankString(payload.providerConnectionId)
+    || !isNonBlankString(payload.absenceId)
+    || !isPositiveInteger(payload.absenceRevision)
+    || "policyCheckFailureRecovery" in payload
+  ) throw new PermanentJobError("reviewer absence activation job payload is malformed");
+  return {
+    kind: "activate_reviewer_absence",
+    workspaceId: payload.workspaceId,
+    provider: job.provider,
+    providerConnectionId: payload.providerConnectionId,
+    absenceId: payload.absenceId,
+    absenceRevision: payload.absenceRevision,
+  };
+}
+
+function parseReviewerReplacementFinalizerRecovery(
+  payload: unknown,
+  message: ReviewerAbsenceActivationJobMessage,
+): ReviewerReplacementFinalizerRecovery | null {
+  if (!isRecord(payload) || !("reviewerReplacementFinalizerRecovery" in payload)) return null;
+  try {
+    const raw = payload.reviewerReplacementFinalizerRecovery;
+    if (!isRecord(raw)) throw new Error("recovery is not an object");
+    const persistence = raw.persistence === null
+      ? null
+      : rehydrateReplacementPersistence(raw.persistence);
+    const mutationIntentId = raw.mutationIntentId === null
+      ? null
+      : parseReviewerMutationIntentId(raw.mutationIntentId);
+    const value: unknown = {
+      ...raw,
+      mutationIntentId,
+      persistence: persistence === null
+        ? null
+        : {
+            ...persistence,
+            mutationIntentId: persistence.mutationIntentId === null
+              ? null
+              : parseReviewerMutationIntentId(persistence.mutationIntentId),
+          },
+    };
+    assertReviewerReplacementFinalizerRecovery(value);
+    if (
+      value.job.workspaceId !== message.workspaceId
+      || value.job.providerConnectionId !== message.providerConnectionId
+      || value.job.absenceId !== message.absenceId
+      || value.job.absenceRevision !== message.absenceRevision
+      || (value.persistence !== null && (
+        value.persistence.provider !== message.provider
+        || value.persistence.providerConnectionId !== message.providerConnectionId
+        || value.persistence.absenceId !== message.absenceId
+        || value.persistence.absenceRevision !== message.absenceRevision
+        || value.persistence.event.workspaceId !== message.workspaceId
+        || (value.finalizer !== null && value.finalizer.decisionId !== value.persistence.decisionId)
+      ))
+    ) throw new Error("recovery scope does not match the claimed job");
+    return value;
+  } catch {
+    throw new PermanentJobError("reviewer replacement finalizer recovery payload is malformed");
+  }
+}
+
+function rehydrateReplacementPersistence(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) throw new Error("recovery persistence is not an object");
+  return {
+    ...value,
+    startedAt: parseRecoveryDate(value.startedAt),
+    completedAt: parseRecoveryDate(value.completedAt),
+  };
+}
+
+function parseRecoveryDate(value: unknown): Date {
+  if (value instanceof Date && Number.isFinite(value.getTime())) return value;
+  if (typeof value !== "string") throw new Error("recovery timestamp is malformed");
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== value) {
+    throw new Error("recovery timestamp is malformed");
+  }
+  return parsed;
+}
+
+function reviewerReplacementRecoveryPayload(
+  payload: unknown,
+  message: ReviewerAbsenceActivationJobMessage,
+  recovery: ReviewerReplacementFinalizerRecovery,
+): Record<string, unknown> {
+  return {
+    ...(isRecord(payload) ? payload : {}),
+    kind: message.kind,
+    workspaceId: message.workspaceId,
+    providerConnectionId: message.providerConnectionId,
+    absenceId: message.absenceId,
+    absenceRevision: message.absenceRevision,
+    reviewerReplacementFinalizerRecovery: recovery,
+  };
 }
 
 function withClaimedScope(job: JobRecord): unknown {
@@ -265,6 +453,10 @@ function isNonBlankString(value: unknown): value is string {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
 function isChangeRequest(value: unknown, includeRevisions: boolean): boolean {

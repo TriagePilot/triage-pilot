@@ -20,6 +20,7 @@ import {
 import type {
   Database,
   ReviewerAbsencesTable,
+  ReviewerMutationIntentsTable,
   ReviewerReplacementsTable,
 } from "./kysely.js";
 import { stagePlatformEvent } from "./outbox.js";
@@ -65,12 +66,34 @@ export interface ReviewerReplacement {
   decisionId: string;
   unavailableActorId: string;
   replacementActorId: string | null;
+  mutationIntentId: string | null;
   outcome: ReviewerReplacementOutcome;
   reason: string;
   state: ReviewerReplacementState;
   lastError: string | null;
   startedAt: Date;
   completedAt: Date;
+}
+
+export interface ReviewerMutationIntentKey {
+  workspaceId: WorkspaceId;
+  providerConnectionId: ProviderConnectionId;
+  absenceId: string;
+  absenceRevision: number;
+  decisionId: string;
+}
+
+export interface PrepareReviewerMutationIntentInput extends ReviewerMutationIntentKey {
+  provider: ProviderKind;
+  repositoryId: string;
+  changeRequestId: string;
+  expectedHeadRevision: string;
+  unavailableActorId: string;
+  replacementActorId: string;
+}
+
+export interface ReviewerMutationIntent extends PrepareReviewerMutationIntentInput {
+  id: string;
 }
 
 export interface ReviewerAbsenceActivation {
@@ -115,6 +138,7 @@ export interface PersistReviewerReplacementInput {
   expectedHeadRevision: string;
   unavailableActorId: string;
   replacementActorId: string | null;
+  mutationIntentId: string | null;
   outcome: ReviewerReplacementOutcome;
   reason: string;
   state: ReviewerReplacementState;
@@ -144,6 +168,8 @@ export interface WorkspaceReviewerAvailability {
     at: Date;
   }): Promise<ReviewerAbsenceWindow[]>;
   loadActivation(absenceId: string, revision: number): Promise<ReviewerAbsenceActivation | null>;
+  loadMutationIntent(input: ReviewerMutationIntentKey): Promise<ReviewerMutationIntent | null>;
+  prepareMutationIntent(input: PrepareReviewerMutationIntentInput): Promise<ReviewerMutationIntent>;
   listPendingFinalizers(input: { absenceId: string; absenceRevision: number }): Promise<ReviewerReplacement[]>;
   listReplacementHistory(absenceId?: string): Promise<ReviewerReplacement[]>;
   persistReplacement(input: PersistReviewerReplacementInput): Promise<PersistReviewerReplacementResult>;
@@ -361,6 +387,94 @@ export function createWorkspaceReviewerAvailability(
       };
     },
 
+    async loadMutationIntent(input) {
+      validateMutationIntentKey(input, workspaceId);
+      const row = await mutationIntentQuery(db, workspaceId, input).executeTakeFirst();
+      return row === undefined ? null : toMutationIntent(row);
+    },
+
+    async prepareMutationIntent(input) {
+      validateMutationIntentInput(input, workspaceId);
+      return await db.transaction().execute(async (trx) => {
+        await requireActiveConnection(trx, workspaceId, input.providerConnectionId, input.provider);
+        const source = await trx
+          .selectFrom("reviewer_absences")
+          .innerJoin("routing_decisions", (join) => join
+            .on("routing_decisions.workspace_id", "=", workspaceId)
+            .on("routing_decisions.id", "=", input.decisionId))
+          .innerJoin("repositories", (join) => join
+            .onRef("repositories.workspace_id", "=", "routing_decisions.workspace_id")
+            .onRef("repositories.id", "=", "routing_decisions.repository_id"))
+          .select([
+            "reviewer_absences.revision as absenceRevision",
+            "reviewer_absences.status as absenceStatus",
+            "reviewer_absences.external_actor_id as unavailableActorId",
+            "routing_decisions.change_request_id as changeRequestId",
+            "routing_decisions.head_sha as expectedHeadRevision",
+            "routing_decisions.selected_reviewers as selectedActors",
+            "routing_decisions.details as decisionDetails",
+            "repositories.provider",
+            "repositories.provider_connection_id as providerConnectionId",
+            "repositories.external_repository_id as repositoryId",
+          ])
+          .where("reviewer_absences.workspace_id", "=", workspaceId)
+          .where("reviewer_absences.provider", "=", input.provider)
+          .where("reviewer_absences.provider_connection_id", "=", input.providerConnectionId)
+          .where("reviewer_absences.id", "=", input.absenceId)
+          .forUpdate(["reviewer_absences", "routing_decisions"])
+          .executeTakeFirst();
+        const selectedActors = parseStrictActorList(source?.selectedActors);
+        const original = parseOriginalReviewerPool(source?.decisionDetails);
+        if (
+          source === undefined
+          || source.absenceRevision !== input.absenceRevision
+          || source.absenceStatus !== "scheduled"
+          || source.unavailableActorId !== input.unavailableActorId
+          || source.provider !== input.provider
+          || source.providerConnectionId !== input.providerConnectionId
+          || source.repositoryId !== input.repositoryId
+          || source.changeRequestId !== input.changeRequestId
+          || source.expectedHeadRevision !== input.expectedHeadRevision
+          || selectedActors === null
+          || original === null
+          || !selectedActors.includes(input.unavailableActorId)
+          || selectedActors.includes(input.replacementActorId)
+          || !original.eligibleActors.includes(input.replacementActorId)
+          || input.replacementActorId === input.unavailableActorId
+        ) throw new ReviewerAvailabilityValidationError("Reviewer mutation intent source is not current");
+
+        const inserted = await trx
+          .insertInto("reviewer_mutation_intents")
+          .values({
+            workspace_id: workspaceId,
+            provider: input.provider,
+            provider_connection_id: input.providerConnectionId,
+            absence_id: input.absenceId,
+            absence_revision: input.absenceRevision,
+            decision_id: input.decisionId,
+            repository_id: input.repositoryId,
+            change_request_id: input.changeRequestId,
+            expected_head_revision: input.expectedHeadRevision,
+            unavailable_actor_id: input.unavailableActorId,
+            replacement_actor_id: input.replacementActorId,
+          })
+          .onConflict((conflict) => conflict.columns([
+            "workspace_id",
+            "provider_connection_id",
+            "absence_id",
+            "absence_revision",
+            "decision_id",
+          ]).doNothing())
+          .returningAll()
+          .executeTakeFirst();
+        const row = inserted ?? await mutationIntentQuery(trx, workspaceId, input)
+          .forUpdate()
+          .executeTakeFirstOrThrow();
+        assertMutationIntentMatches(row, input);
+        return toMutationIntent(row);
+      });
+    },
+
     async listPendingFinalizers(input) {
       validateExpectedRevision(input.absenceRevision);
       return await listReplacementHistory(
@@ -415,7 +529,9 @@ export function createWorkspaceReviewerAvailability(
           return { inserted: false, activationCurrent: true, replacement: toReplacement(existing) };
         }
 
-        await requireActiveConnection(trx, workspaceId, input.providerConnectionId, input.provider);
+        if (input.mutationIntentId === null) {
+          await requireActiveConnection(trx, workspaceId, input.providerConnectionId, input.provider);
+        }
         if (
           absence.revision !== input.absenceRevision
           || absence.external_actor_id !== input.unavailableActorId
@@ -459,6 +575,8 @@ export function createWorkspaceReviewerAvailability(
           || decision.external_repository_id !== input.event.repositoryId
           || decision.change_request_id !== input.event.changeRequestId
         ) return staleReplacementResult();
+
+        await assertReplacementMutationIntent(trx, workspaceId, input);
 
         if (replacesCohort(input.outcome)) {
           if (
@@ -504,6 +622,7 @@ export function createWorkspaceReviewerAvailability(
             decision_id: input.decisionId,
             unavailable_actor_id: input.unavailableActorId,
             replacement_actor_id: input.replacementActorId,
+            mutation_intent_id: input.mutationIntentId,
             outcome: input.outcome,
             reason: input.reason,
             state: input.state,
@@ -744,6 +863,11 @@ function validateReplacementInput(input: PersistReviewerReplacementInput, worksp
     || replacementActorId !== input.replacementActorId
   ) throw new ReviewerAvailabilityValidationError("Replacement actor identifiers must not be empty");
   if (
+    (input.mutationIntentId !== null && !isNonBlank(input.mutationIntentId))
+    || (input.outcome === "replaced" && input.mutationIntentId === null)
+    || (input.outcome === "simulated_replacement" && input.mutationIntentId !== null)
+  ) throw new ReviewerAvailabilityValidationError("Replacement mutation intent identifier is malformed");
+  if (
     input.event.workspaceId !== workspaceId
     || input.event.provider !== input.provider
     || input.event.providerConnectionId !== input.providerConnectionId
@@ -813,6 +937,7 @@ function assertReplacementRetryMatches(
   if (
     existing.unavailable_actor_id !== input.unavailableActorId
     || existing.replacement_actor_id !== input.replacementActorId
+    || existing.mutation_intent_id !== input.mutationIntentId
     || existing.outcome !== input.outcome
     || existing.reason !== input.reason
     || existing.started_at.getTime() !== input.startedAt.getTime()
@@ -889,6 +1014,7 @@ function toReplacement(row: Selectable<ReviewerReplacementsTable>): ReviewerRepl
     decisionId: row.decision_id,
     unavailableActorId: row.unavailable_actor_id,
     replacementActorId: row.replacement_actor_id,
+    mutationIntentId: row.mutation_intent_id,
     outcome: row.outcome,
     reason: row.reason,
     state: row.state,
@@ -896,4 +1022,111 @@ function toReplacement(row: Selectable<ReviewerReplacementsTable>): ReviewerRepl
     startedAt: row.started_at,
     completedAt: row.completed_at,
   };
+}
+
+function validateMutationIntentKey(input: ReviewerMutationIntentKey, workspaceId: WorkspaceId): void {
+  validateExpectedRevision(input.absenceRevision);
+  if (
+    input.workspaceId !== workspaceId
+    || !isNonBlank(input.providerConnectionId)
+    || !isNonBlank(input.absenceId)
+    || !isNonBlank(input.decisionId)
+  ) throw new ReviewerAvailabilityValidationError("Reviewer mutation intent key is malformed");
+}
+
+function validateMutationIntentInput(input: PrepareReviewerMutationIntentInput, workspaceId: WorkspaceId): void {
+  validateMutationIntentKey(input, workspaceId);
+  if (
+    !isNonBlank(input.repositoryId)
+    || !isNonBlank(input.changeRequestId)
+    || !isNonBlank(input.expectedHeadRevision)
+    || !isNonBlank(input.unavailableActorId)
+    || !isNonBlank(input.replacementActorId)
+  ) throw new ReviewerAvailabilityValidationError("Reviewer mutation intent is malformed");
+}
+
+function mutationIntentQuery(
+  db: DatabaseExecutor,
+  workspaceId: WorkspaceId,
+  input: ReviewerMutationIntentKey,
+) {
+  return db.selectFrom("reviewer_mutation_intents")
+    .selectAll()
+    .where("workspace_id", "=", workspaceId)
+    .where("provider_connection_id", "=", input.providerConnectionId)
+    .where("absence_id", "=", input.absenceId)
+    .where("absence_revision", "=", input.absenceRevision)
+    .where("decision_id", "=", input.decisionId);
+}
+
+function assertMutationIntentMatches(
+  row: Selectable<ReviewerMutationIntentsTable>,
+  input: PrepareReviewerMutationIntentInput,
+): void {
+  if (
+    row.workspace_id !== input.workspaceId
+    || row.provider !== input.provider
+    || row.provider_connection_id !== input.providerConnectionId
+    || row.absence_id !== input.absenceId
+    || row.absence_revision !== input.absenceRevision
+    || row.decision_id !== input.decisionId
+    || row.repository_id !== input.repositoryId
+    || row.change_request_id !== input.changeRequestId
+    || row.expected_head_revision !== input.expectedHeadRevision
+    || row.unavailable_actor_id !== input.unavailableActorId
+    || row.replacement_actor_id !== input.replacementActorId
+  ) throw new ReviewerAvailabilityValidationError("Preparation conflicts with persisted reviewer mutation intent");
+}
+
+async function assertReplacementMutationIntent(
+  trx: Transaction<Database>,
+  workspaceId: WorkspaceId,
+  input: PersistReviewerReplacementInput,
+): Promise<void> {
+  if (input.mutationIntentId === null) return;
+  const row = await mutationIntentQuery(trx, workspaceId, { ...input, workspaceId })
+    .where("id", "=", input.mutationIntentId)
+    .executeTakeFirst();
+  if (row === undefined) {
+    throw new ReviewerAvailabilityValidationError("Replacement mutation intent linkage is unavailable");
+  }
+  assertMutationIntentMatches(row, {
+    workspaceId,
+    provider: input.provider,
+    providerConnectionId: input.providerConnectionId,
+    absenceId: input.absenceId,
+    absenceRevision: input.absenceRevision,
+    decisionId: input.decisionId,
+    repositoryId: input.event.repositoryId,
+    changeRequestId: input.event.changeRequestId,
+    expectedHeadRevision: input.expectedHeadRevision,
+    unavailableActorId: input.unavailableActorId,
+    replacementActorId: input.outcome === "replaced"
+      ? input.replacementActorId!
+      : row.replacement_actor_id,
+  });
+}
+
+function toMutationIntent(row: Selectable<ReviewerMutationIntentsTable>): ReviewerMutationIntent {
+  if (!isNonBlank(row.id)) {
+    throw new ReviewerAvailabilityValidationError("Persisted reviewer mutation intent ID is malformed");
+  }
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    provider: row.provider,
+    providerConnectionId: row.provider_connection_id,
+    absenceId: row.absence_id,
+    absenceRevision: row.absence_revision,
+    decisionId: row.decision_id,
+    repositoryId: row.repository_id,
+    changeRequestId: row.change_request_id,
+    expectedHeadRevision: row.expected_head_revision,
+    unavailableActorId: row.unavailable_actor_id,
+    replacementActorId: row.replacement_actor_id,
+  };
+}
+
+function isNonBlank(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }

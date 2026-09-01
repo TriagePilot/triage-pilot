@@ -753,6 +753,19 @@ async function seedReviewerReplacement(
     start_at: new Date("2026-08-26T09:00:00.000Z"),
     end_at: new Date("2026-08-26T11:00:00.000Z"),
   }).returning("id").executeTakeFirstOrThrow();
+  const intent = await db.insertInto("reviewer_mutation_intents").values({
+    workspace_id: workspaceId,
+    provider: "github",
+    provider_connection_id: connection.id,
+    absence_id: absence.id,
+    absence_revision: 1,
+    decision_id: decisionId,
+    repository_id: "101",
+    change_request_id: "cr-7",
+    expected_head_revision: "head-1",
+    unavailable_actor_id: `@user-f2a19c-${suffix}`,
+    replacement_actor_id: "@user-4c8d31",
+  }).returning("id").executeTakeFirstOrThrow();
   const replacement = await db.insertInto("reviewer_replacements").values({
     workspace_id: workspaceId,
     provider: "github",
@@ -762,6 +775,7 @@ async function seedReviewerReplacement(
     decision_id: decisionId,
     unavailable_actor_id: `@user-f2a19c-${suffix}`,
     replacement_actor_id: "@user-4c8d31",
+    mutation_intent_id: intent.id,
     outcome: "replaced",
     reason: "scheduled absence",
     started_at: new Date("2026-08-26T10:00:00.000Z"),

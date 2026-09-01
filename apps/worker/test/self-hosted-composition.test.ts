@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildRoutingKey } from "@triagepilot/contracts";
-import { runMigrations } from "@triagepilot/db";
+import { createWorkspaceReviewerAvailability, runMigrations } from "@triagepilot/db";
 
 import { createSelfHostedWorkerComposition } from "../src/composition/self-hosted";
 import { processRoutingJob } from "../src/processor";
@@ -121,6 +121,81 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("self-hosted worker compo
         repository_config_path: ".triagepilot.yml",
       });
       expect(requester.mock.calls.map(([route]) => route).filter((route) => route.startsWith("POST "))).toEqual([]);
+
+      await composition.close();
+    });
+  });
+
+  it("dispatches a claimed reviewer absence activation without provider access when no candidate exists", async () => {
+    await withPostgresTestDatabaseUrl(async (databaseUrl) => {
+      await runMigrations(databaseUrl);
+      const createRequester = vi.fn(async () => {
+        throw new Error("activation without candidates must not compose GitHub access");
+      });
+      const clock = { now: () => new Date("2026-09-01T12:00:00.000Z") };
+      const composition = await createSelfHostedWorkerComposition(workerEnv(databaseUrl), {
+        createRequester,
+        clock,
+      });
+      const { providerConnectionId } = await insertKnownRepository(composition);
+      const absence = await createWorkspaceReviewerAvailability(composition.db, composition.workspaceId)
+        .scheduleAbsence({
+          provider: "github",
+          providerConnectionId,
+          externalActorId: "@user-d82a5f",
+          startAt: new Date("2026-09-01T11:00:00.000Z"),
+          endAt: new Date("2026-09-01T13:00:00.000Z"),
+          now: new Date("2026-09-01T10:00:00.000Z"),
+        });
+      const queued = await composition.db.selectFrom("jobs")
+        .select("id as jobId")
+        .where("kind", "=", "activate_reviewer_absence")
+        .where("payload", "@>", { absenceId: absence.id })
+        .executeTakeFirstOrThrow();
+
+      await expect(composition.runOnce(clock.now())).resolves.toBe(true);
+      await expect(composition.db.selectFrom("jobs")
+        .select(["status", "last_error"])
+        .where("id", "=", queued.jobId)
+        .executeTakeFirstOrThrow()).resolves.toEqual({ status: "succeeded", last_error: null });
+      expect(createRequester).not.toHaveBeenCalled();
+
+      await composition.close();
+    });
+  });
+
+  it("rejects malformed activation scope before composing provider access", async () => {
+    await withPostgresTestDatabaseUrl(async (databaseUrl) => {
+      await runMigrations(databaseUrl);
+      const createRequester = vi.fn(async () => {
+        throw new Error("malformed scope must not compose GitHub access");
+      });
+      const composition = await createSelfHostedWorkerComposition(workerEnv(databaseUrl), { createRequester });
+      const { providerConnectionId } = await insertKnownRepository(composition);
+      const queued = await composition.localRepositories.jobs.enqueue({
+        provider: "github",
+        providerConnectionId,
+        kind: "activate_reviewer_absence",
+        payload: {
+          kind: "activate_reviewer_absence",
+          workspaceId: "spoofed-workspace",
+          providerConnectionId: "spoofed-connection",
+          absenceId: " ",
+          absenceRevision: 1,
+        },
+        idempotencyKey: "malformed-activation",
+        runAt: new Date("2026-09-01T12:00:00.000Z"),
+      });
+
+      await expect(composition.runOnce(new Date("2026-09-01T12:00:00.000Z"))).resolves.toBe(true);
+      await expect(composition.db.selectFrom("jobs")
+        .select(["status", "last_error"])
+        .where("id", "=", queued.jobId)
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+        status: "failed",
+        last_error: "reviewer absence activation job payload is malformed",
+      });
+      expect(createRequester).not.toHaveBeenCalled();
 
       await composition.close();
     });

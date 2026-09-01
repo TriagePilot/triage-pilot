@@ -30,10 +30,18 @@ import type { RoutingJobMessage, RoutingJobServices } from "../processor";
 import { processRoutingJob } from "../processor";
 import { processHumanReviewPolicyJob } from "../review-policy-processor";
 import type { HumanReviewPolicyServices } from "../review-policy-processor";
+import {
+  markReviewerReplacementRecoveryExhausted,
+  processReviewerAbsenceActivationJob,
+  recoverReviewerReplacementFinalizer,
+  type ReviewerAbsenceActivationJobMessage,
+  type ReviewerAvailabilityServices,
+} from "../availability-processor";
 import { runWorkerOnce } from "../runner";
 import {
   createNoopPlatformEventSink,
   createWorkerHumanReviewPolicyServiceFactory,
+  createWorkerReviewerAvailabilityServiceFactory,
   createWorkerRoutingServiceFactory,
 } from "../runtime-services";
 
@@ -63,6 +71,7 @@ export interface SelfHostedWorkerComposition {
   configuration: SelfHostedConfigurationProbe;
   buildRoutingServices(message: RoutingJobMessage): RoutingJobServices;
   buildHumanReviewPolicyServices(message: Parameters<typeof processHumanReviewPolicyJob>[0]): HumanReviewPolicyServices;
+  buildReviewerAvailabilityServices(message: ReviewerAbsenceActivationJobMessage): ReviewerAvailabilityServices;
   runOnce(now: Date): Promise<boolean>;
   runStartup(now: Date): ReturnType<typeof runWorkerStartup>;
   runMaintenance(state: Awaited<ReturnType<typeof runWorkerStartup>>, now: Date): ReturnType<typeof runWorkerMaintenance>;
@@ -97,6 +106,13 @@ export async function createSelfHostedWorkerComposition(
     createRequester,
     createAdapter: (requester) => new GitHubAdapter(requester),
   });
+  const buildReviewerAvailabilityServices = createWorkerReviewerAvailabilityServiceFactory({
+    db,
+    credentialProvider,
+    createRequester,
+    createAdapter: (requester) => new GitHubAdapter(requester),
+    clock,
+  });
   const maintenanceServices = {
     async recoverStaleJobs(now: Date) {
       await localRepositories.recoverStaleJobs(now);
@@ -120,6 +136,7 @@ export async function createSelfHostedWorkerComposition(
     configuration: createSelfHostedConfigurationProbe(workspaceId),
     buildRoutingServices,
     buildHumanReviewPolicyServices,
+    buildReviewerAvailabilityServices,
     runOnce(now) {
       return runWorkerOnce({
         jobClaimer,
@@ -130,6 +147,10 @@ export async function createSelfHostedWorkerComposition(
         buildRoutingServices,
         processHumanReviewPolicyJob,
         buildHumanReviewPolicyServices,
+        processReviewerAbsenceActivationJob,
+        recoverReviewerReplacementFinalizer,
+        markReviewerReplacementRecoveryExhausted,
+        buildReviewerAvailabilityServices,
       });
     },
     runStartup(now) {

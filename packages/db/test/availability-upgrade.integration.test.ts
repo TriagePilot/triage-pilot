@@ -18,6 +18,7 @@ const FINAL_MIGRATIONS = [
   "0005_workspace_scope.sql",
   "0006_decision_outbox.sql",
   "0007_workspace_reviewer_availability.sql",
+  "0008_reviewer_mutation_intents.sql",
 ];
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability migration histories", () => {
@@ -122,7 +123,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability mi
           select replacements.id, replacements.workspace_id, replacements.provider,
                  replacements.provider_connection_id, replacements.absence_id,
                  replacements.decision_id, replacements.unavailable_actor_id,
-                 replacements.replacement_actor_id, replacements.state, replacements.last_error
+                 replacements.replacement_actor_id, replacements.mutation_intent_id,
+                 replacements.state, replacements.last_error
           from reviewer_replacements replacements
           where replacements.id = $1
         `, [replacementId])).resolves.toMatchObject({
@@ -132,6 +134,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability mi
             decision_id: decisionId,
             unavailable_actor_id: "@user-8d3a10",
             replacement_actor_id: "@user-72c9ef",
+            mutation_intent_id: null,
             provider: "github",
             state: "completed",
             last_error: null,

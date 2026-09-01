@@ -144,12 +144,29 @@ export interface ReviewerReplacementsTable {
   decision_id: string;
   unavailable_actor_id: string;
   replacement_actor_id: NullableString;
+  mutation_intent_id: NullableString;
   outcome: ReviewerReplacementOutcome;
   reason: string;
   state: Generated<string>;
   last_error: NullableString;
   started_at: Timestamp;
   completed_at: Timestamp;
+}
+
+export interface ReviewerMutationIntentsTable {
+  id: Generated<string>;
+  workspace_id: string;
+  provider: ProviderKind;
+  provider_connection_id: string;
+  absence_id: string;
+  absence_revision: number;
+  decision_id: string;
+  repository_id: string;
+  change_request_id: string;
+  expected_head_revision: string;
+  unavailable_actor_id: string;
+  replacement_actor_id: string;
+  created_at: Timestamp;
 }
 
 export interface DecisionOutboxTable {
@@ -183,6 +200,7 @@ export interface Database {
   routing_decisions: RoutingDecisionsTable;
   workspace_operational_settings: WorkspaceOperationalSettingsTable;
   reviewer_absences: ReviewerAbsencesTable;
+  reviewer_mutation_intents: ReviewerMutationIntentsTable;
   reviewer_replacements: ReviewerReplacementsTable;
   decision_outbox: DecisionOutboxTable;
   worker_heartbeat: WorkerHeartbeatTable;

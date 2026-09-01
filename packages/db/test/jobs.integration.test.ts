@@ -185,6 +185,57 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL job operation
     });
   });
 
+  it("retains bounded activation recovery and rejects its obsolete stale lease", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const { workspaceId, providerConnectionId, queue, claimer } = await createJobTestContext(db);
+      const claimedAt = new Date("2026-09-01T12:00:00.000Z");
+      const activationPayload = {
+        kind: "activate_reviewer_absence",
+        workspaceId,
+        providerConnectionId,
+        absenceId: "00000000-0000-4000-8000-000000000101",
+        absenceRevision: 1,
+      };
+      const recoveryPayload = {
+        ...activationPayload,
+        reviewerReplacementFinalizerRecovery: { fixture: "durable-finalizer-recovery" },
+      };
+      const { jobId } = await queue.enqueue({
+        provider: "github",
+        providerConnectionId,
+        kind: "activate_reviewer_absence",
+        payload: activationPayload,
+        idempotencyKey: "activation:bounded-recovery",
+        runAt: claimedAt,
+        maxAttempts: 1,
+      });
+      const obsolete = toLease(await claimer.claimNext("worker-old", claimedAt));
+      await expect(queue.markFailed(obsolete, "finalizer unavailable", claimedAt, {
+        retryable: true,
+        recovery: { payload: recoveryPayload, maxAttempts: 4 },
+      })).resolves.toEqual({ updated: true });
+
+      const retryAt = new Date("2026-09-01T12:00:05.000Z");
+      const current = toLease(await claimer.claimNext("worker-new", retryAt));
+      await expect(queue.markFailed(obsolete, "late stale failure", retryAt, { retryable: false }))
+        .resolves.toEqual({ updated: false, reason: "stale_lease" });
+      await expect(db.selectFrom("jobs")
+        .select(["id", "kind", "status", "payload", "attempt_count", "max_attempts", "locked_by", "last_error"])
+        .where("id", "=", jobId)
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+        id: jobId,
+        kind: "activate_reviewer_absence",
+        status: "running",
+        payload: recoveryPayload,
+        attempt_count: 2,
+        max_attempts: 4,
+        locked_by: "worker-new",
+        last_error: "finalizer unavailable",
+      });
+      await expect(queue.markSucceeded(current, retryAt)).resolves.toEqual({ updated: true });
+    });
+  });
+
   it("recovers stale running jobs and clears their locks", async () => {
     await withPostgresTestDatabase(async (db) => {
       const { workspaceId, providerConnectionId, queue, claimer } = await createJobTestContext(db);

@@ -35,11 +35,13 @@ describe("buildNextRunAt", () => {
   it("accepts routing and human-review policy evaluation jobs", () => {
     const kind: JobKind = "process_pull_request";
     const policyKind: JobKind = "evaluate_human_review_policy";
+    const availabilityKind: JobKind = "activate_reviewer_absence";
     // @ts-expect-error scheduler job kinds are outside the worker queue contract
     const removedKind: JobKind = "run_sla_checks";
 
     expect(kind).toBe("process_pull_request");
     expect(policyKind).toBe("evaluate_human_review_policy");
+    expect(availabilityKind).toBe("activate_reviewer_absence");
     expect(removedKind).toBe("run_sla_checks");
   });
 });
