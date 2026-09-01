@@ -1,8 +1,9 @@
 import { readFile } from "node:fs/promises";
+import type { DecisionEventV1 } from "@triagepilot/contracts";
 import pg from "pg";
 import { describe, expect, it } from "vitest";
 
-import { runMigrations } from "../src";
+import { createDatabase, runMigrations, stagePlatformEvent } from "../src";
 import { withPostgresTestDatabaseUrl } from "./postgres";
 
 const PRE_WORKSPACE_MIGRATIONS = [
@@ -138,7 +139,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability mi
     });
   }, 20_000);
 
-  it("upgrades the current Phase history and backfills existing decision events", async () => {
+  it("normalizes a legacy Phase event so the equivalent current event remains idempotent", async () => {
     await withPostgresTestDatabaseUrl(async (databaseUrl) => {
       await applyMigrationHistory(databaseUrl, [
         ...PRE_WORKSPACE_MIGRATIONS,
@@ -148,6 +149,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability mi
       const setup = new pg.Pool({ connectionString: databaseUrl });
       let workspaceId: string;
       let decisionId: string;
+      let currentEvent: DecisionEventV1;
       try {
         const workspace = await setup.query<{ id: string }>(
           "select id from workspaces where external_key = 'self-hosted'",
@@ -178,38 +180,78 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability mi
           returning id
         `, [workspaceId, repository.rows[0]?.id]);
         decisionId = requiredId(decision.rows[0]?.id);
+        const legacyPayload = {
+          schemaVersion: 1 as const,
+          occurredAt: "2026-10-01T08:00:00.000Z",
+          workspaceId,
+          provider: "github" as const,
+          decisionId,
+          repositoryId: "phase-repository",
+          changeRequestId: "phase-change-request",
+          routingKey: "phase-upgrade-routing",
+          mode: "shadow" as const,
+          action: "request_human_review" as const,
+          riskScore: 50,
+          selectedActors: ["@user-c79a42"],
+          effectiveConfigurationHash: "phase-hash",
+        };
+        currentEvent = {
+          ...legacyPayload,
+          eventType: "routing_decision",
+          eventId: `decision:${decisionId}:v1`,
+        };
         await setup.query(`
           insert into decision_outbox (
-            workspace_id, decision_id, schema_version, payload, occurred_at, available_at
-          ) values ($1, $2, 1, $3::jsonb, '2026-10-01T08:00:00Z', '2026-10-01T08:00:00Z')
-        `, [workspaceId, decisionId, JSON.stringify({
-          schemaVersion: 1,
-          eventType: "routing_decision",
-          eventId: "phase-upgrade-event-v1",
-          workspaceId,
-          decisionId,
-        })]);
+            workspace_id, decision_id, schema_version, payload, occurred_at,
+            available_at, attempt_count, last_error
+          ) values (
+            $1, $2, 1, $3::jsonb, '2026-10-01T08:00:00Z',
+            '2026-10-01T08:05:00Z', 2, 'sink unavailable'
+          )
+        `, [workspaceId, decisionId, JSON.stringify(legacyPayload)]);
       } finally {
         await setup.end();
       }
 
       await runMigrations(databaseUrl);
+      const db = createDatabase(databaseUrl);
+      try {
+        await expect(stagePlatformEvent(db, workspaceId, decisionId, currentEvent)).resolves.toBeUndefined();
+      } finally {
+        await db.destroy();
+      }
 
       const verification = new pg.Pool({ connectionString: databaseUrl });
       try {
         await expect(appliedMigrations(verification)).resolves.toEqual(FINAL_MIGRATIONS);
-        await expect(verification.query(`
-          select workspace_id, event_id, event_type, decision_id, reviewer_replacement_id
+        const outbox = await verification.query<{
+          workspace_id: string;
+          event_id: string;
+          event_type: string;
+          decision_id: string;
+          reviewer_replacement_id: string | null;
+          payload: DecisionEventV1;
+          available_at: Date;
+          published_at: Date | null;
+          attempt_count: number;
+          last_error: string | null;
+        }>(`
+          select workspace_id, event_id, event_type, decision_id, reviewer_replacement_id,
+                 payload, available_at, published_at, attempt_count, last_error
           from decision_outbox
-        `)).resolves.toMatchObject({
-          rows: [{
-            workspace_id: workspaceId,
-            event_id: "phase-upgrade-event-v1",
-            event_type: "routing_decision",
-            decision_id: decisionId,
-            reviewer_replacement_id: null,
-          }],
-        });
+        `);
+        expect(outbox.rows).toEqual([{
+          workspace_id: workspaceId,
+          event_id: currentEvent.eventId,
+          event_type: "routing_decision",
+          decision_id: decisionId,
+          reviewer_replacement_id: null,
+          payload: currentEvent,
+          available_at: new Date("2026-10-01T08:05:00.000Z"),
+          published_at: null,
+          attempt_count: 2,
+          last_error: "sink unavailable",
+        }]);
       } finally {
         await verification.end();
       }

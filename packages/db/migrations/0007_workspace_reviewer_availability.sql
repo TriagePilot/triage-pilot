@@ -141,7 +141,14 @@ set event_id = coalesce(
       payload ->> 'eventId',
       'decision:' || decision_id::text || ':v' || schema_version::text
     ),
-    event_type = coalesce(payload ->> 'eventType', 'routing_decision');
+    event_type = coalesce(payload ->> 'eventType', 'routing_decision'),
+    payload = payload || jsonb_build_object(
+      'eventId', coalesce(
+        payload ->> 'eventId',
+        'decision:' || decision_id::text || ':v' || schema_version::text
+      ),
+      'eventType', coalesce(payload ->> 'eventType', 'routing_decision')
+    );
 
 alter table decision_outbox alter column event_id set not null;
 alter table decision_outbox alter column event_type set not null;
