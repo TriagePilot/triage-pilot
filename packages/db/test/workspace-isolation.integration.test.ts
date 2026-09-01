@@ -2,7 +2,14 @@ import { sql } from "kysely";
 import { describe, expect, it } from "vitest";
 import type { ProviderKind, WorkspaceId } from "@triagepilot/contracts";
 
-import { createJobClaimer, createWorkspaceRepositories, ensureLocalWorkspace } from "../src";
+import {
+  ProviderConnectionUnavailableError,
+  ReviewerAbsenceRevisionError,
+  createJobClaimer,
+  createWorkspaceRepositories,
+  createWorkspaceReviewerAvailability,
+  ensureLocalWorkspace,
+} from "../src";
 import { withPostgresTestDatabase } from "./postgres";
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace persistence isolation", () => {
@@ -180,6 +187,63 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace persistence is
       }).execute()).rejects.toMatchObject({
         constraint: "reviewer_replacements_workspace_decision_fkey",
       });
+    });
+  });
+
+  it("binds availability repository reads and mutations to workspace and active provider connection", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceA = await ensureLocalWorkspace(db);
+      const workspaceB = await createWorkspace(db, "availability-workspace-b");
+      const connectionA = await seedConnectionAndRepository(db, workspaceA, "github", "availability-a", "availability-repo-a", "api-a");
+      const connectionB = await seedConnectionAndRepository(db, workspaceB, "gitlab", "availability-b", "availability-repo-b", "api-b");
+      const availabilityA = createWorkspaceReviewerAvailability(db, workspaceA);
+      const availabilityB = createWorkspaceReviewerAvailability(db, workspaceB);
+      const startAt = new Date("2026-10-01T08:00:00.000Z");
+      const endAt = new Date("2026-10-01T12:00:00.000Z");
+      const now = new Date("2026-09-01T12:00:00.000Z");
+
+      const absenceA = await availabilityA.scheduleAbsence({
+        provider: "github",
+        providerConnectionId: connectionA,
+        externalActorId: "@user-isolated",
+        startAt,
+        endAt,
+        now,
+      });
+      await expect(availabilityB.listAbsences()).resolves.toEqual([]);
+      await expect(availabilityB.loadActivation(absenceA.id, absenceA.revision)).resolves.toBeNull();
+      await expect(availabilityB.cancelAbsence({
+        provider: "gitlab",
+        providerConnectionId: connectionB,
+        absenceId: absenceA.id,
+        expectedRevision: absenceA.revision,
+        now,
+      })).rejects.toBeInstanceOf(ReviewerAbsenceRevisionError);
+      await expect(availabilityA.scheduleAbsence({
+        provider: "gitlab",
+        providerConnectionId: connectionB,
+        externalActorId: "@user-cross-workspace",
+        startAt,
+        endAt,
+        now,
+      })).rejects.toBeInstanceOf(ProviderConnectionUnavailableError);
+
+      const absenceB = await availabilityB.scheduleAbsence({
+        provider: "gitlab",
+        providerConnectionId: connectionB,
+        externalActorId: "@user-isolated",
+        startAt,
+        endAt,
+        now,
+      });
+      await expect(availabilityA.findActiveAbsences({
+        providerConnectionId: connectionA,
+        actors: ["@user-isolated"],
+        at: startAt,
+      })).resolves.toEqual([{ externalActorId: "@user-isolated", startAt, endAt }]);
+      await expect(availabilityB.listAbsences()).resolves.toEqual([
+        expect.objectContaining({ id: absenceB.id, provider: "gitlab", workspaceId: workspaceB }),
+      ]);
     });
   });
 

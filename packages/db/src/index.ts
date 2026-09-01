@@ -15,6 +15,7 @@ export {
 } from "./jobs.js";
 export { createDatabase } from "./database.js";
 export {
+  findReviewerReplacementCandidates,
   markActionFailed,
   markActionSucceeded,
   findLatestHumanReviewPolicyDecision,
@@ -25,7 +26,27 @@ export {
   type DecisionInput,
   type HumanReviewPolicyDecision,
   type PersistedDecision,
+  type ReviewerReplacementCandidateDecision,
 } from "./decisions.js";
+export {
+  ProviderConnectionUnavailableError,
+  ReviewerAbsenceConflictError,
+  ReviewerAbsenceRevisionError,
+  ReviewerAvailabilityValidationError,
+  createWorkspaceReviewerAvailability,
+  type CancelAbsenceInput,
+  type PersistReviewerReplacementInput,
+  type PersistReviewerReplacementResult,
+  type ReviewerAbsence,
+  type ReviewerAbsenceActivation,
+  type ReviewerAbsenceWindow,
+  type ReviewerReplacement,
+  type ReviewerReplacementState,
+  type ReviseAbsenceInput,
+  type ScheduleAbsenceInput,
+  type WorkspaceOperationalSettings,
+  type WorkspaceReviewerAvailability,
+} from "./availability.js";
 export {
   claimPlatformEvents,
   createPlatformOutboxRepository,

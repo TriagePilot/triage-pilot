@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  findReviewerReplacementCandidates,
   findLatestHumanReviewPolicyDecision,
   ensureLocalWorkspace,
   markActionFailed,
@@ -392,6 +393,174 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       await expect(
         findLatestHumanReviewPolicyDecision(db, await ensureLocalWorkspace(db), { repositoryId, pullNumber: 7 }),
       ).resolves.toBeNull();
+    });
+  });
+
+  it("discovers only latest scoped cohorts and derives immutable replacement inputs from decision details", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const repositoryId = await seedRepository(db);
+      const repository = await db.selectFrom("repositories")
+        .select(["provider", "provider_connection_id", "external_repository_id"])
+        .where("workspace_id", "=", workspaceId)
+        .where("id", "=", repositoryId)
+        .executeTakeFirstOrThrow();
+      const common = {
+        workspace_id: workspaceId,
+        repository_id: repositoryId,
+        mode: "enforce" as const,
+        action: "request_human_review",
+        action_status: "pending" as const,
+        risk_score: 50,
+        no_human_reason: null,
+        organization_config_version: null,
+        repository_config_path: null,
+        repository_config_revision: null,
+        effective_config_hash: "candidate-config",
+        inheritance_mode: "legacy" as const,
+        config_diagnostics: [],
+        config_sources: {},
+      };
+      await db.insertInto("routing_decisions").values([
+        {
+          ...common,
+          id: "00000000-0000-0000-0000-000000000061",
+          delivery_id: "candidate-old",
+          routing_key: "candidate-old",
+          pull_number: 7,
+          head_sha: "head-old",
+          selected_reviewer: "@user-absent",
+          selected_reviewers: JSON.stringify(["@user-absent"]),
+          details: {
+            ownership: { preferredReviewers: ["@user-old"], eligibleReviewers: ["@user-absent", "@user-old"] },
+            routing: { requestedReviewerCount: 1 },
+          },
+          created_at: new Date("2026-09-01T10:00:00.000Z"),
+        },
+        {
+          ...common,
+          id: "00000000-0000-0000-0000-000000000062",
+          delivery_id: "candidate-current",
+          routing_key: "candidate-current",
+          pull_number: 7,
+          head_sha: "head-current",
+          selected_reviewer: "@user-absent",
+          selected_reviewers: JSON.stringify([" @USER-ABSENT ", "@user-existing"]),
+          details: {
+            ownership: {
+              preferredReviewers: [" @USER-ABSENT ", "@user-preferred"],
+              eligibleReviewers: ["@user-absent", "@user-preferred", "@user-fallback"],
+            },
+            routing: { requestedReviewerCount: 2 },
+          },
+          policy_check_run_id: "42",
+          policy_check_state: "in_progress" as const,
+          created_at: new Date("2026-09-01T11:00:00.000Z"),
+        },
+        {
+          ...common,
+          id: "00000000-0000-0000-0000-000000000063",
+          delivery_id: "candidate-legacy",
+          routing_key: "candidate-legacy",
+          pull_number: 8,
+          head_sha: "head-legacy",
+          selected_reviewer: "@user-absent",
+          selected_reviewers: JSON.stringify(["@user-absent"]),
+          details: {
+            ownership: { eligibleReviewers: ["@user-absent", "@user-legacy"] },
+            routing: { requestedReviewerCount: 1 },
+          },
+          created_at: new Date("2026-09-01T11:10:00.000Z"),
+        },
+        {
+          ...common,
+          id: "00000000-0000-0000-0000-000000000064",
+          delivery_id: "candidate-superseded",
+          routing_key: "candidate-superseded",
+          pull_number: 9,
+          head_sha: "head-superseded",
+          selected_reviewer: "@user-absent",
+          selected_reviewers: JSON.stringify(["@user-absent"]),
+          details: {
+            ownership: { eligibleReviewers: ["@user-absent", "@user-spare"] },
+            routing: { requestedReviewerCount: 1 },
+          },
+          created_at: new Date("2026-09-01T11:20:00.000Z"),
+        },
+        {
+          ...common,
+          id: "00000000-0000-0000-0000-000000000065",
+          delivery_id: "candidate-superseding",
+          routing_key: "candidate-superseding",
+          pull_number: 9,
+          head_sha: "head-superseding",
+          selected_reviewer: "@user-current",
+          selected_reviewers: JSON.stringify(["@user-current"]),
+          details: {
+            ownership: { eligibleReviewers: ["@user-absent", "@user-current"] },
+            routing: { requestedReviewerCount: 1 },
+          },
+          created_at: new Date("2026-09-01T11:30:00.000Z"),
+        },
+        {
+          ...common,
+          id: "00000000-0000-0000-0000-000000000066",
+          delivery_id: "candidate-malformed",
+          routing_key: "candidate-malformed",
+          pull_number: 10,
+          head_sha: "head-malformed",
+          selected_reviewer: "@user-absent",
+          selected_reviewers: JSON.stringify(["@user-absent"]),
+          details: {
+            ownership: { eligibleReviewers: "@user-absent" },
+            routing: { requestedReviewerCount: 2 },
+          },
+          created_at: new Date("2026-09-01T11:40:00.000Z"),
+        },
+      ]).execute();
+
+      await expect(findReviewerReplacementCandidates(db, workspaceId, {
+        provider: repository.provider,
+        providerConnectionId: repository.provider_connection_id,
+        unavailableActorId: " @USER-ABSENT ",
+      })).resolves.toEqual([
+        {
+          decisionId: "00000000-0000-0000-0000-000000000062",
+          provider: "github",
+          providerConnectionId: repository.provider_connection_id,
+          repositoryRecordId: repositoryId,
+          repositoryId: repository.external_repository_id,
+          owner: "acme",
+          repositoryName: "api",
+          changeRequestNumber: 7,
+          routedHeadRevision: "head-current",
+          mode: "enforce",
+          selectedActors: ["@user-absent", "@user-existing"],
+          originalPreferredActors: ["@user-absent", "@user-preferred"],
+          originalEligibleActors: ["@user-absent", "@user-preferred", "@user-fallback"],
+          requestedReviewerCount: 2,
+          policyCheckRunId: "42",
+          policyCheckState: "in_progress",
+        },
+        {
+          decisionId: "00000000-0000-0000-0000-000000000063",
+          provider: "github",
+          providerConnectionId: repository.provider_connection_id,
+          repositoryRecordId: repositoryId,
+          repositoryId: repository.external_repository_id,
+          owner: "acme",
+          repositoryName: "api",
+          changeRequestNumber: 8,
+          routedHeadRevision: "head-legacy",
+          mode: "enforce",
+          selectedActors: ["@user-absent"],
+          originalPreferredActors: ["@user-absent", "@user-legacy"],
+          originalEligibleActors: ["@user-absent", "@user-legacy"],
+          requestedReviewerCount: 1,
+          policyCheckRunId: null,
+          policyCheckState: "not_started",
+        },
+      ]);
     });
   });
 });

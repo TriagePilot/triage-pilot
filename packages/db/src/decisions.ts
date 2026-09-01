@@ -1,6 +1,15 @@
 import { createHash } from "node:crypto";
 import { sql, type Kysely, type Transaction } from "kysely";
-import { legacyRoutingKey, type ActionStatus, type DecisionEventV1, type RepositoryMode, type RoutingAction, type WorkspaceId } from "@triagepilot/contracts";
+import {
+  legacyRoutingKey,
+  type ActionStatus,
+  type DecisionEventV1,
+  type ProviderConnectionId,
+  type ProviderKind,
+  type RepositoryMode,
+  type RoutingAction,
+  type WorkspaceId,
+} from "@triagepilot/contracts";
 
 import type { Database } from "./kysely.js";
 import { stagePlatformEvent } from "./outbox.js";
@@ -46,6 +55,25 @@ export interface HumanReviewPolicyDecision {
   requiredApprovalCount?: number;
   policyCheckRunId: string | null;
   policyCheckState: "not_started" | "in_progress" | "success" | "failure";
+}
+
+export interface ReviewerReplacementCandidateDecision {
+  decisionId: string;
+  provider: ProviderKind;
+  providerConnectionId: ProviderConnectionId;
+  repositoryRecordId: string;
+  repositoryId: string;
+  owner: string;
+  repositoryName: string;
+  changeRequestNumber: number;
+  routedHeadRevision: string;
+  mode: RepositoryMode;
+  selectedActors: string[];
+  originalPreferredActors: string[];
+  originalEligibleActors: string[];
+  requestedReviewerCount: 1 | 2;
+  policyCheckRunId: string | null;
+  policyCheckState: HumanReviewPolicyDecision["policyCheckState"];
 }
 
 type PolicyCheckState = Exclude<HumanReviewPolicyDecision["policyCheckState"], "not_started">;
@@ -222,6 +250,97 @@ export async function findLatestHumanReviewPolicyDecision(
   };
 }
 
+export async function findReviewerReplacementCandidates(
+  db: DatabaseExecutor,
+  workspaceId: WorkspaceId,
+  input: {
+    provider: ProviderKind;
+    providerConnectionId: ProviderConnectionId;
+    unavailableActorId: string;
+  },
+): Promise<ReviewerReplacementCandidateDecision[]> {
+  const unavailableActorId = normalizeExternalActorId(input.unavailableActorId);
+  if (unavailableActorId === null) return [];
+
+  const latestDecisions = db
+    .selectFrom("routing_decisions")
+    .selectAll()
+    .where("workspace_id", "=", workspaceId)
+    .where("repository_id", "is not", null)
+    .distinctOn(["repository_id", "pull_number"])
+    .orderBy("repository_id")
+    .orderBy("pull_number")
+    .orderBy("created_at", "desc")
+    .orderBy("id", "desc");
+  const rows = await db
+    .with("latest_decisions", () => latestDecisions)
+    .selectFrom("latest_decisions")
+    .innerJoin("repositories", (join) => join
+      .onRef("repositories.workspace_id", "=", "latest_decisions.workspace_id")
+      .onRef("repositories.id", "=", "latest_decisions.repository_id"))
+    .innerJoin("provider_connections", (join) => join
+      .onRef("provider_connections.workspace_id", "=", "repositories.workspace_id")
+      .onRef("provider_connections.provider", "=", "repositories.provider")
+      .onRef("provider_connections.id", "=", "repositories.provider_connection_id"))
+    .select([
+      "latest_decisions.id as decisionId",
+      "repositories.provider",
+      "repositories.provider_connection_id as providerConnectionId",
+      "repositories.id as repositoryRecordId",
+      "repositories.external_repository_id as repositoryId",
+      "repositories.owner",
+      "repositories.name as repositoryName",
+      "latest_decisions.pull_number as changeRequestNumber",
+      "latest_decisions.head_sha as routedHeadRevision",
+      "latest_decisions.mode",
+      "latest_decisions.selected_reviewers as selectedActors",
+      "latest_decisions.details",
+      "latest_decisions.policy_check_run_id as policyCheckRunId",
+      "latest_decisions.policy_check_state as policyCheckState",
+    ])
+    .where("latest_decisions.workspace_id", "=", workspaceId)
+    .where("repositories.provider", "=", input.provider)
+    .where("repositories.provider_connection_id", "=", input.providerConnectionId)
+    .where("provider_connections.status", "=", "active")
+    .where("latest_decisions.action", "=", "request_human_review")
+    .where("latest_decisions.head_sha", "is not", null)
+    .orderBy("repositories.external_repository_id", "asc")
+    .orderBy("latest_decisions.pull_number", "asc")
+    .orderBy("latest_decisions.id", "asc")
+    .execute();
+
+  return rows.flatMap((row) => {
+    const selectedActors = parseStrictActorList(row.selectedActors);
+    const original = parseOriginalReviewerPool(row.details);
+    if (
+      row.changeRequestNumber === null
+      || row.routedHeadRevision === null
+      || selectedActors === null
+      || !selectedActors.includes(unavailableActorId)
+      || original === null
+    ) return [];
+
+    return [{
+      decisionId: row.decisionId,
+      provider: row.provider,
+      providerConnectionId: row.providerConnectionId,
+      repositoryRecordId: row.repositoryRecordId,
+      repositoryId: row.repositoryId,
+      owner: row.owner,
+      repositoryName: row.repositoryName,
+      changeRequestNumber: row.changeRequestNumber,
+      routedHeadRevision: row.routedHeadRevision,
+      mode: row.mode,
+      selectedActors,
+      originalPreferredActors: original.preferredActors,
+      originalEligibleActors: original.eligibleActors,
+      requestedReviewerCount: original.requestedReviewerCount,
+      policyCheckRunId: row.policyCheckRunId,
+      policyCheckState: row.policyCheckState,
+    }];
+  });
+}
+
 function parseRequiredApprovalCount(details: unknown, selectedReviewers: string[]): number {
   if (
     typeof details === "object" &&
@@ -257,11 +376,55 @@ function parseSelectedReviewers(value: unknown): string[] {
   return Array.isArray(reviewers) ? reviewers.filter((reviewer): reviewer is string => typeof reviewer === "string") : [];
 }
 
+export function parseStrictActorList(value: unknown): string[] | null {
+  const actors = typeof value === "string" ? parseJsonArray(value) : value;
+  if (!Array.isArray(actors) || !actors.every((actor) => typeof actor === "string")) return null;
+  const normalized = actors.map(normalizeExternalActorId);
+  if (normalized.some((actor) => actor === null)) return null;
+  return [...new Set(normalized as string[])];
+}
+
+export function parseOriginalReviewerPool(details: unknown): {
+  eligibleActors: string[];
+  preferredActors: string[];
+  requestedReviewerCount: 1 | 2;
+} | null {
+  if (
+    typeof details !== "object"
+    || details === null
+    || !("ownership" in details)
+    || typeof details.ownership !== "object"
+    || details.ownership === null
+    || !("eligibleReviewers" in details.ownership)
+    || !("routing" in details)
+    || typeof details.routing !== "object"
+    || details.routing === null
+    || !("requestedReviewerCount" in details.routing)
+  ) return null;
+
+  const eligibleActors = parseStrictActorList(details.ownership.eligibleReviewers);
+  const preferredActors = "preferredReviewers" in details.ownership
+    ? parseStrictActorList(details.ownership.preferredReviewers)
+    : eligibleActors;
+  const requestedReviewerCount = details.routing.requestedReviewerCount;
+  if (
+    eligibleActors === null
+    || preferredActors === null
+    || (requestedReviewerCount !== 1 && requestedReviewerCount !== 2)
+  ) return null;
+  return { eligibleActors, preferredActors, requestedReviewerCount };
+}
+
+export function normalizeExternalActorId(value: string): string | null {
+  const normalized = `@${value.trim().toLowerCase().replace(/^@/, "")}`;
+  return /^@[a-z0-9_.-]+$/.test(normalized) ? normalized : null;
+}
+
 function parseJsonArray(value: string): unknown {
   try {
     return JSON.parse(value) as unknown;
   } catch {
-    return [];
+    return undefined;
   }
 }
 
