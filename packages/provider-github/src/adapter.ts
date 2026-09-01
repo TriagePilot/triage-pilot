@@ -85,6 +85,7 @@ export interface GitHubReviewerReplacementState {
     actor: string;
     actorType: "human" | "bot";
     state: string;
+    commitId: string | null;
     submittedAt: string | null;
   }>;
 }
@@ -144,8 +145,9 @@ export class GitHubAdapter {
     const requestedActors = await this.listRequestedReviewers(input);
     const reviews = (await this.listReviewerReplacementReviews(input)).map((review) => ({
       actor: normalizeGitHubActor(review.userLogin),
-      actorType: review.userType?.toLowerCase() === "bot" ? "bot" as const : "human" as const,
+      actorType: review.userType === "Bot" ? "bot" as const : "human" as const,
       state: review.state.toLowerCase(),
+      commitId: review.commitId,
       submittedAt: review.submittedAt,
     }));
     return { state, currentHeadRevision, authorActor, requestedActors, reviews };
@@ -613,7 +615,7 @@ function readPullRequestReview(value: unknown, strict: boolean): PullRequestRevi
     strict
     && (
       typeof value.user.type !== "string"
-      || value.user.type.trim().length === 0
+      || (value.user.type !== "User" && value.user.type !== "Bot")
       || !("commit_id" in value)
       || !("submitted_at" in value)
       || (typeof value.commit_id !== "string" && value.commit_id !== null)

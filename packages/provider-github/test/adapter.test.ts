@@ -33,6 +33,7 @@ describe("GitHubAdapter", () => {
         actor: "@user-c91e46",
         actorType: "human",
         state: "approved",
+        commitId: "older-head",
         submittedAt: "2026-08-31T09:00:00.000Z",
       }],
     });
@@ -42,6 +43,34 @@ describe("GitHubAdapter", () => {
       "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
       "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
     ]);
+  });
+
+  it("maps exact GitHub Bot reviews as non-human replacement-policy reviews", async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: { state: "open", head: { sha: "head-1" }, user: { login: "user-a91f5c" } },
+      })
+      .mockResolvedValueOnce({ data: { users: [], teams: [] } })
+      .mockResolvedValueOnce({
+        data: [{
+          user: { login: "automation-d71c42", type: "Bot" },
+          state: "APPROVED",
+          commit_id: "head-1",
+          submitted_at: null,
+        }],
+      });
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await expect(adapter.inspectReviewerReplacement({
+      pullRequest: { owner: "acme", repo: "api", pullNumber: 7 },
+    })).resolves.toMatchObject({
+      reviews: [{
+        actor: "@automation-d71c42",
+        actorType: "bot",
+        commitId: "head-1",
+      }],
+    });
   });
 
   it("performs an idempotent replacement no-op when provider state is already reconciled", async () => {
@@ -520,6 +549,9 @@ describe("GitHubAdapter", () => {
     ["missing commit", [{ user: { login: "user-b4e82d", type: "User" }, state: "APPROVED", submitted_at: null }]],
     ["blank commit", [{ user: { login: "user-b4e82d", type: "User" }, state: "APPROVED", commit_id: " ", submitted_at: null }]],
     ["invalid submission", [{ user: { login: "user-b4e82d", type: "User" }, state: "APPROVED", commit_id: null, submitted_at: 42 }]],
+    ["Mannequin user type", [{ user: { login: "user-b4e82d", type: "Mannequin" }, state: "APPROVED", commit_id: "head-1", submitted_at: null }]],
+    ["case-changed user type", [{ user: { login: "user-b4e82d", type: "user" }, state: "APPROVED", commit_id: "head-1", submitted_at: null }]],
+    ["future user type", [{ user: { login: "user-b4e82d", type: "FutureType" }, state: "APPROVED", commit_id: "head-1", submitted_at: null }]],
   ])("fails closed on a %s in replacement reviews", async (_name, data) => {
     const request = vi.fn(async (route: string) => {
       if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {

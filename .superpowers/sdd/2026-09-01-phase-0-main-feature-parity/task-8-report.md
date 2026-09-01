@@ -148,3 +148,37 @@ This fix round is committed separately with subject:
 ```text
 fix: persist reviewer mutation intent before writes
 ```
+
+## Fix round 3: durable intent revalidation
+
+### RED and GREEN
+
+The focused RED run failed 12 tests: seven application cases for required finalizer linkage, intent loading before policy shortcuts, unconditional source/actor validation, changed replacement absence, current-head replacement approval, and non-mutating persistence behavior; five GitHub cases for commit provenance plus exact `User`/`Bot` typing and rejection of unsupported user types.
+
+The focused application/provider suites now pass 92/92 tests. The affected core/application/provider suites pass 167/167. Task 6 availability/outbox PostgreSQL contracts pass 38/38 with zero disposable databases remaining. Repository gates pass: `pnpm check`, `pnpm test` (587 passed, 101 expected integration skips), `pnpm build`, `docker build .`, package-boundary checks, `git diff --check`, and both Git history and working-directory Gitleaks scans. The standalone public-boundary diagnostic continues to report only the unchanged Task 6 artifact baseline and no Task 8 report finding.
+
+### Intent validation and final eligibility
+
+Every enforce candidate loads an existing intent before policy-state or provider-state shortcuts. A loaded record is immediately validated against the complete immutable source identity and eligible actor pool. An invalid ID/source/actor becomes a linked `permanent_failure` without any provider inspection or mutation; no later provider-state transition can expose an unvalidated intent.
+
+Before any reviewer mutation, the application re-inspects the current request and then queries active absences for only the exact intended actor at the captured activation instant. It does not recompute load or select a different actor. If that actor became absent, the application persists a linked terminal `permanent_failure` with zero provider effects. If that actor has an active human approval on the current head, a satisfied approval count retains `skipped_policy_satisfied`; otherwise the application persists a linked terminal failure and never requests an already-approved actor. Persistence failure on either zero-effect terminal path surfaces as an ordinary job retry and cannot produce a provider-effect recovery payload.
+
+The same final eligibility check applies to an intent loaded after process death and to a newly prepared intent. `prepareMutationIntent` still completes before DELETE/POST, and the extracted prepare-and-validate helper makes both planning paths use the same authoritative validation.
+
+### Required provenance linkage for Task 9
+
+`mutationIntentId` is now an explicit required `string | null` on replacement persistence, pending-finalizer records, activation results, and recovery payloads. Existing intent IDs are retained through policy success/failure, closed/head/provider terminal outcomes, finalizer replay, and every recovery phase. Reviewer-mutation outcomes carry the non-null prepared intent ID; outcomes without an intent explicitly carry null.
+
+Task 9 must implement the durable intent port and store this required field. Intent retention remains unchanged: keep the immutable record through terminal replacement-history persistence and finalizer recovery, then allow only later retention cleanup. Task 9 must not infer provenance from requested reviewers or dispatch activation before intent storage is composed.
+
+### Strict GitHub review identity
+
+Replacement inspection now maps only the exact GitHub type `User` to a human and exact `Bot` to a bot, and carries the review commit identity into provider-neutral application metadata. `Mannequin`, case-changed values, unknown values, and future values are permanent malformed protocol state. They cannot be counted as human approvals. The established generic review-reading path remains unchanged.
+
+### Fix commit
+
+This fix round is committed separately with subject:
+
+```text
+fix: revalidate durable reviewer intent
+```

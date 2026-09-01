@@ -52,7 +52,11 @@ export interface ReviewerReplacementProviderState {
   currentHeadRevision: string;
   authorActor: ExternalActorId;
   requestedActors: ExternalActorId[];
-  reviews: ReviewMetadata[];
+  reviews: ReviewerReplacementReviewMetadata[];
+}
+
+export interface ReviewerReplacementReviewMetadata extends ReviewMetadata {
+  commitId: string | null;
 }
 
 export type ReviewerReplacementState = "finalizer_pending" | "completed" | "permanent_failure";
@@ -102,7 +106,7 @@ export interface ReviewerReplacementFinalizerRecord {
   id: string;
   decisionId: string;
   replacementActorId?: ExternalActorId | null;
-  mutationIntentId?: string | null;
+  mutationIntentId: string | null;
   outcome: ReviewerReplacementOutcome;
   state: "finalizer_pending";
 }
@@ -251,7 +255,7 @@ export async function activateReviewerAbsence(
       decisionId: record.decisionId,
       outcome: record.outcome,
       replacementActor: record.replacementActorId ?? null,
-      mutationIntentId: record.mutationIntentId ?? null,
+      mutationIntentId: record.mutationIntentId,
       finalized: true,
     });
   }
@@ -315,40 +319,51 @@ async function readCandidatePlan(
   mutationIntent: ReviewerMutationIntent | null;
   revalidateProvider: boolean;
 }> {
+  const mutationIntent = candidate.mode === "enforce"
+    ? await ports.availability.loadMutationIntent(mutationIntentKey(job, candidate))
+    : null;
+  if (mutationIntent !== null) {
+    const mismatch = mutationIntentMismatch(job, activation, candidate, mutationIntent);
+    if (mismatch !== null) {
+      return {
+        plan: permanentFailurePlan(mismatch, mutationIntent.id),
+        selection: null,
+        mutationIntent,
+        revalidateProvider: false,
+      };
+    }
+  }
   if (candidate.policyCheckState === "failure") {
     return {
-      plan: terminalPlan(
+      plan: withMutationIntent(terminalPlan(
         "permanent_failure",
         "Human-review policy is already in a terminal failure state.",
-      ),
+      ), mutationIntent),
       selection: null,
-      mutationIntent: null,
+      mutationIntent,
       revalidateProvider: false,
     };
   }
   if (candidate.policyCheckState === "success") {
     return {
-      plan: terminalPlan(
+      plan: withMutationIntent(terminalPlan(
         "skipped_policy_satisfied",
         "Required human approval count is already satisfied.",
-      ),
+      ), mutationIntent),
       selection: null,
-      mutationIntent: null,
+      mutationIntent,
       revalidateProvider: false,
     };
   }
   const inspected = await inspectProviderState(job, candidate, ports);
   if (inspected.state === null) {
     return {
-      plan: permanentFailurePlan(inspected.permanentError),
+      plan: permanentFailurePlan(inspected.permanentError, mutationIntent?.id ?? null),
       selection: null,
-      mutationIntent: null,
+      mutationIntent,
       revalidateProvider: false,
     };
   }
-  const mutationIntent = candidate.mode === "enforce"
-    ? await ports.availability.loadMutationIntent(mutationIntentKey(job, candidate))
-    : null;
   const initialTerminal = terminalProviderPlan(activation, candidate, inspected.state, candidate.mode === "enforce");
   if (initialTerminal !== null) {
     return {
@@ -357,17 +372,6 @@ async function readCandidatePlan(
       mutationIntent,
       revalidateProvider: true,
     };
-  }
-  if (mutationIntent !== null) {
-    const mismatch = mutationIntentMismatch(job, activation, candidate, mutationIntent);
-    if (mismatch !== null) {
-      return {
-        plan: permanentFailurePlan(mismatch, mutationIntent.id),
-        selection: null,
-        mutationIntent,
-        revalidateProvider: true,
-      };
-    }
   }
   const planned = await planFromProviderState(
     job,
@@ -405,13 +409,15 @@ async function applyCandidatePlan(
     && read.plan.providerIntent === "prepare"
     && read.plan.replacementActor !== null
   ) {
-    intent = await ports.availability.prepareMutationIntent(
-      mutationIntentInput(job, activation, candidate, read.plan.replacementActor),
+    const prepared = await prepareValidatedMutationIntent(
+      job,
+      activation,
+      candidate,
+      read.plan.replacementActor,
+      ports,
     );
-    const mismatch = mutationIntentMismatch(job, activation, candidate, intent);
-    if (mismatch !== null) {
-      return { plan: permanentFailurePlan(mismatch, intent.id), providerEffectsApplied: false };
-    }
+    if (prepared.failure !== null) return { plan: prepared.failure, providerEffectsApplied: false };
+    intent = prepared.intent;
   }
 
   let inspected = await inspectProviderState(job, candidate, ports);
@@ -437,13 +443,15 @@ async function applyCandidatePlan(
     || planned.plan.replacementActor === null
   ) return { plan: planned.plan, providerEffectsApplied: false };
   if (planned.plan.providerIntent === "prepare") {
-    intent = await ports.availability.prepareMutationIntent(
-      mutationIntentInput(job, activation, candidate, planned.plan.replacementActor),
+    const prepared = await prepareValidatedMutationIntent(
+      job,
+      activation,
+      candidate,
+      planned.plan.replacementActor,
+      ports,
     );
-    const mismatch = mutationIntentMismatch(job, activation, candidate, intent);
-    if (mismatch !== null) {
-      return { plan: permanentFailurePlan(mismatch, intent.id), providerEffectsApplied: false };
-    }
+    if (prepared.failure !== null) return { plan: prepared.failure, providerEffectsApplied: false };
+    intent = prepared.intent;
     inspected = await inspectProviderState(job, candidate, ports);
     if (inspected.state === null) {
       return { plan: permanentFailurePlan(inspected.permanentError, intent.id), providerEffectsApplied: false };
@@ -463,6 +471,17 @@ async function applyCandidatePlan(
     }
   }
   if (intent === null) throw new Error("Durable reviewer mutation intent is required before provider mutation");
+  const ineligibleIntentPlan = await durableIntentIneligibilityPlan(
+    job,
+    candidate,
+    inspected.state,
+    intent,
+    startedAt,
+    ports,
+  );
+  if (ineligibleIntentPlan !== null) {
+    return { plan: ineligibleIntentPlan, providerEffectsApplied: false };
+  }
   const intentPlan = durableIntentPlan(activation, candidate, intent);
   try {
     await ports.provider.reconcileReviewRequest({
@@ -498,7 +517,16 @@ async function finalizeCandidatePlan(
   } catch (error) {
     if (!providerEffectsApplied) throw error;
     return {
-      recovery: recovery(job, "persist_replacement", plan.finalizer, null, true, persistence, errorMessage(error)),
+      recovery: recovery(
+        job,
+        "persist_replacement",
+        plan.finalizer,
+        null,
+        true,
+        persistence,
+        errorMessage(error),
+        plan.mutationIntentId,
+      ),
     };
   }
   if (!persisted.activationCurrent || persisted.replacement === null) {
@@ -512,6 +540,7 @@ async function finalizeCandidatePlan(
           true,
           persistence,
           "Final replacement persistence rejected stale state.",
+          plan.mutationIntentId,
         ),
       };
     }
@@ -536,6 +565,7 @@ async function finalizeCandidatePlan(
         providerEffectsApplied,
         persistence,
         errorMessage(error),
+        plan.mutationIntentId,
       ),
     };
   }
@@ -557,6 +587,7 @@ async function finalizeCandidatePlan(
           providerEffectsApplied,
           persistence,
           "Finalizer completion state was not persisted.",
+          plan.mutationIntentId,
         ),
       };
     }
@@ -570,6 +601,7 @@ async function finalizeCandidatePlan(
         providerEffectsApplied,
         persistence,
         errorMessage(error),
+        plan.mutationIntentId,
       ),
     };
   }
@@ -595,7 +627,7 @@ async function replayPendingFinalizer(
         record.outcome === "replaced",
         null,
         errorMessage(error),
-        record.mutationIntentId ?? null,
+        record.mutationIntentId,
       ),
     };
   }
@@ -616,7 +648,7 @@ async function replayPendingFinalizer(
           record.outcome === "replaced",
           null,
           "Finalizer completion state was not persisted.",
-          record.mutationIntentId ?? null,
+          record.mutationIntentId,
         ),
       };
     }
@@ -630,7 +662,7 @@ async function replayPendingFinalizer(
         record.outcome === "replaced",
         null,
         errorMessage(error),
-        record.mutationIntentId ?? null,
+        record.mutationIntentId,
       ),
     };
   }
@@ -732,6 +764,57 @@ function mutationIntentMismatch(
   return sourceMatches && actorIsValid
     ? null
     : "Durable reviewer mutation intent does not match the immutable activation source.";
+}
+
+async function prepareValidatedMutationIntent(
+  job: ReviewerAbsenceActivationJobPayload,
+  activation: ReviewerAbsenceActivation,
+  candidate: ReviewerReplacementCandidateDecision,
+  replacementActorId: ExternalActorId,
+  ports: ReviewerAvailabilityPorts,
+): Promise<
+  | { intent: ReviewerMutationIntent; failure: null }
+  | { intent: ReviewerMutationIntent; failure: PlannedReplacement }
+> {
+  const intent = await ports.availability.prepareMutationIntent(
+    mutationIntentInput(job, activation, candidate, replacementActorId),
+  );
+  const mismatch = mutationIntentMismatch(job, activation, candidate, intent);
+  return mismatch === null
+    ? { intent, failure: null }
+    : { intent, failure: permanentFailurePlan(mismatch, intent.id) };
+}
+
+async function durableIntentIneligibilityPlan(
+  job: ReviewerAbsenceActivationJobPayload,
+  candidate: ReviewerReplacementCandidateDecision,
+  current: ReviewerReplacementProviderState,
+  intent: ReviewerMutationIntent,
+  at: Date,
+  ports: ReviewerAvailabilityPorts,
+): Promise<PlannedReplacement | null> {
+  const absences = await ports.availability.findActive({
+    workspaceId: job.workspaceId,
+    providerConnectionId: job.providerConnectionId,
+    actors: [intent.replacementActorId],
+    at,
+  });
+  if (absences.some((absence) => absence.externalActorId === intent.replacementActorId)) {
+    return permanentFailurePlan(
+      `Durable replacement actor ${intent.replacementActorId} is currently unavailable.`,
+      intent.id,
+    );
+  }
+  const currentHeadApprovals = activeApprovedReviewers(
+    current.reviews.filter((review) => review.commitId === current.currentHeadRevision),
+  );
+  if (currentHeadApprovals.includes(intent.replacementActorId)) {
+    return permanentFailurePlan(
+      `Durable replacement actor ${intent.replacementActorId} already approved the current head.`,
+      intent.id,
+    );
+  }
+  return null;
 }
 
 async function planFromProviderState(
@@ -861,6 +944,13 @@ function terminalPlan(outcome: ReviewerReplacementOutcome, reason: string): Plan
   };
 }
 
+function withMutationIntent(
+  plan: PlannedReplacement,
+  intent: ReviewerMutationIntent | null,
+): PlannedReplacement {
+  return intent === null ? plan : { ...plan, mutationIntentId: intent.id };
+}
+
 function permanentFailurePlan(reason: string, mutationIntentId: string | null = null): PlannedReplacement {
   return { ...terminalPlan("permanent_failure", reason), mutationIntentId };
 }
@@ -975,7 +1065,7 @@ function recovery(
   providerEffectsApplied: boolean,
   persistence: PersistReviewerReplacementInput | null,
   lastError: string,
-  mutationIntentId: string | null = persistence?.mutationIntentId ?? null,
+  mutationIntentId: string | null,
 ): ReviewerReplacementFinalizerRecovery {
   return {
     kind: "reviewer_replacement_finalizer",

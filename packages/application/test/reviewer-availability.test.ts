@@ -1,10 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 
 import {
   activateReviewerAbsence,
   type ReviewerAbsenceActivation,
   type ReviewerAvailabilityPorts,
   type ReviewerReplacementCandidateDecision,
+  type ReviewerReplacementFinalizerRecord,
   type ReviewerReplacementProviderState,
 } from "../src/reviewer-availability";
 
@@ -108,6 +109,11 @@ function buildPorts(overrides: Partial<ReviewerAvailabilityPorts> = {}): Reviewe
 }
 
 describe("activateReviewerAbsence", () => {
+  it("requires explicit mutation-intent linkage on pending finalizer records", () => {
+    expectTypeOf<ReviewerReplacementFinalizerRecord>()
+      .toMatchTypeOf<{ mutationIntentId: string | null }>();
+  });
+
   it("treats a stale or cancelled absence revision as a successful job-level no-op", async () => {
     const ports = buildPorts({
       availability: { loadActivation: vi.fn(async () => null) } as never,
@@ -284,6 +290,73 @@ describe("activateReviewerAbsence", () => {
       state: "permanent_failure",
       lastError: "Human-review policy is already in a terminal failure state.",
       replaceCohort: false,
+    }));
+  });
+
+  it.each([
+    ["success", "skipped_policy_satisfied"],
+    ["failure", "permanent_failure"],
+  ] as const)(
+    "loads and retains an existing durable intent before a %s policy shortcut",
+    async (policyCheckState, outcome) => {
+      const terminalCandidate = { ...candidate, policyCheckState };
+      const loadMutationIntent = vi.fn(async () => preparedIntent);
+      const ports = buildPorts({
+        availability: {
+          loadActivation: vi.fn(async () => ({ ...activation, candidates: [terminalCandidate] })),
+          loadMutationIntent,
+        } as never,
+      });
+
+      await expect(activateReviewerAbsence(job, ports)).resolves.toMatchObject({
+        status: "completed",
+        results: [{ outcome, mutationIntentId: preparedIntent.id }],
+      });
+
+      expect(loadMutationIntent).toHaveBeenCalledOnce();
+      expect(ports.provider.inspectChangeRequest).not.toHaveBeenCalled();
+      expect(ports.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+      expect(ports.availability.persistReplacement).toHaveBeenCalledWith(expect.objectContaining({
+        outcome,
+        mutationIntentId: preparedIntent.id,
+      }));
+    },
+  );
+
+  it.each([
+    ["wrong source", { ...preparedIntent, repositoryId: "repository-elsewhere" }],
+    ["invalid actor", { ...preparedIntent, replacementActorId: "@user-unknown" }],
+  ])("validates a loaded intent before a provider policy shortcut can change between reads: %s", async (_name, intent) => {
+    const inspectChangeRequest = vi.fn()
+      .mockResolvedValueOnce({
+        ...providerState,
+        reviews: [{
+          actor: "@user-5c9f21",
+          actorType: "human",
+          state: "approved",
+          commitId: candidate.routedHeadRevision,
+          submittedAt: "2026-09-01T10:00:00.500Z",
+        }],
+      })
+      .mockResolvedValueOnce(providerState);
+    const ports = buildPorts({
+      availability: {
+        loadMutationIntent: vi.fn(async () => intent),
+      } as never,
+      provider: { inspectChangeRequest } as never,
+    });
+
+    await expect(activateReviewerAbsence(job, ports)).resolves.toMatchObject({
+      status: "completed",
+      results: [{ outcome: "permanent_failure", mutationIntentId: intent.id }],
+    });
+
+    expect(ports.provider.inspectChangeRequest).not.toHaveBeenCalled();
+    expect(ports.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+    expect(ports.availability.persistReplacement).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "permanent_failure",
+      mutationIntentId: intent.id,
+      lastError: "Durable reviewer mutation intent does not match the immutable activation source.",
     }));
   });
 
@@ -542,16 +615,17 @@ describe("activateReviewerAbsence", () => {
     expect(ports.availability.persistReplacement).not.toHaveBeenCalled();
   });
 
-  it("fails closed when approval satisfies policy before applying a loaded durable intent", async () => {
+  it("uses the policy-satisfied path when the durable replacement actor approved the current head", async () => {
     const inspectChangeRequest = vi
       .fn()
       .mockResolvedValueOnce(providerState)
       .mockResolvedValueOnce({
         ...providerState,
         reviews: [{
-          actor: "@user-5c9f21",
+          actor: preparedIntent.replacementActorId,
           actorType: "human",
           state: "approved",
+          commitId: candidate.routedHeadRevision,
           submittedAt: "2026-09-01T10:00:00.500Z",
         }],
       });
@@ -574,6 +648,98 @@ describe("activateReviewerAbsence", () => {
     expect(ports.availability.persistReplacement).toHaveBeenCalledWith(expect.objectContaining({
       mutationIntentId: preparedIntent.id,
       outcome: "skipped_policy_satisfied",
+    }));
+  });
+
+  it("fails closed without provider writes when a durable replacement actor becomes absent", async () => {
+    const replacementAbsence = {
+      externalActorId: preparedIntent.replacementActorId,
+      startAt: activation.startAt,
+      endAt: activation.endAt,
+    };
+    const findActive = vi.fn(async () => [replacementAbsence]);
+    const ports = buildPorts({
+      availability: {
+        loadMutationIntent: vi.fn(async () => preparedIntent),
+        findActive,
+      } as never,
+    });
+
+    await expect(activateReviewerAbsence(job, ports)).resolves.toMatchObject({
+      status: "completed",
+      results: [{
+        outcome: "permanent_failure",
+        replacementActor: null,
+        mutationIntentId: preparedIntent.id,
+      }],
+    });
+
+    expect(findActive).toHaveBeenCalledWith({
+      workspaceId: job.workspaceId,
+      providerConnectionId: job.providerConnectionId,
+      actors: [preparedIntent.replacementActorId],
+      at: activationAt,
+    });
+    expect(ports.reviewerLoad).not.toHaveBeenCalled();
+    expect(ports.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+    expect(ports.availability.persistReplacement).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "permanent_failure",
+      replacementActorId: null,
+      mutationIntentId: preparedIntent.id,
+      lastError: `Durable replacement actor ${preparedIntent.replacementActorId} is currently unavailable.`,
+      state: "permanent_failure",
+    }));
+  });
+
+  it("does not manufacture provider-effect recovery when an ineligible durable intent cannot persist", async () => {
+    const ports = buildPorts({
+      availability: {
+        loadMutationIntent: vi.fn(async () => preparedIntent),
+        findActive: vi.fn(async () => [{
+          externalActorId: preparedIntent.replacementActorId,
+          startAt: activation.startAt,
+          endAt: activation.endAt,
+        }]),
+        persistReplacement: vi.fn(async () => {
+          throw new Error("database unavailable");
+        }),
+      } as never,
+    });
+
+    await expect(activateReviewerAbsence(job, ports)).rejects.toThrow("database unavailable");
+    expect(ports.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the durable replacement actor approved the current head but policy remains unsatisfied", async () => {
+    const twoApprovalCandidate = { ...candidate, requestedReviewerCount: 2 as const };
+    const inspectChangeRequest = vi.fn(async () => ({
+      ...providerState,
+      reviews: [{
+        actor: preparedIntent.replacementActorId,
+        actorType: "human" as const,
+        state: "approved",
+        commitId: candidate.routedHeadRevision,
+        submittedAt: "2026-09-01T10:00:00.500Z",
+      }],
+    }));
+    const ports = buildPorts({
+      availability: {
+        loadActivation: vi.fn(async () => ({ ...activation, candidates: [twoApprovalCandidate] })),
+        loadMutationIntent: vi.fn(async () => preparedIntent),
+      } as never,
+      provider: { inspectChangeRequest } as never,
+    });
+
+    await expect(activateReviewerAbsence(job, ports)).resolves.toMatchObject({
+      status: "completed",
+      results: [{ outcome: "permanent_failure", mutationIntentId: preparedIntent.id }],
+    });
+
+    expect(ports.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+    expect(ports.availability.persistReplacement).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "permanent_failure",
+      mutationIntentId: preparedIntent.id,
+      lastError: `Durable replacement actor ${preparedIntent.replacementActorId} already approved the current head.`,
     }));
   });
 
@@ -706,7 +872,12 @@ describe("activateReviewerAbsence", () => {
       replacementActor: "@user-c91e46",
     }));
     expect(prepareMutationIntent).toHaveBeenCalledOnce();
-    expect(retryFindActive).not.toHaveBeenCalled();
+    expect(retryFindActive).toHaveBeenCalledWith({
+      workspaceId: job.workspaceId,
+      providerConnectionId: job.providerConnectionId,
+      actors: [preparedIntent.replacementActorId],
+      at: activationAt,
+    });
     expect(retryLoad).not.toHaveBeenCalled();
     expect(retryPorts.availability.persistReplacement).toHaveBeenCalledWith(expect.objectContaining({
       replacementActorId: "@user-c91e46",
@@ -950,6 +1121,7 @@ describe("activateReviewerAbsence", () => {
         listPendingFinalizers: vi.fn(async () => [{
           id: "replacement-pending",
           decisionId: candidate.decisionId,
+          mutationIntentId: null,
           outcome: "replaced",
           state: "finalizer_pending",
         }]),
