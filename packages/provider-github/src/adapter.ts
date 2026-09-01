@@ -95,6 +95,7 @@ export interface ReviewerReplacementErrorClassification {
 }
 
 class GitHubReviewerReplacementProtocolError extends Error {}
+class GitHubReviewerReplacementInputError extends Error {}
 
 export async function createInstallationRequester(input: {
   appId: string;
@@ -141,7 +142,7 @@ export class GitHubAdapter {
       readReviewerReplacementString(response.data.user, "login", "GitHub pull request author"),
     );
     const requestedActors = await this.listRequestedReviewers(input);
-    const reviews = (await this.listPullRequestReviews(input)).map((review) => ({
+    const reviews = (await this.listReviewerReplacementReviews(input)).map((review) => ({
       actor: normalizeGitHubActor(review.userLogin),
       actorType: review.userType?.toLowerCase() === "bot" ? "bot" as const : "human" as const,
       state: review.state.toLowerCase(),
@@ -174,7 +175,7 @@ export class GitHubAdapter {
     const unavailableActor = normalizeGitHubIndividualActor(input.unavailableActor);
     const replacementActor = normalizeGitHubIndividualActor(input.replacementActor);
     if (unavailableActor === replacementActor) {
-      throw new Error("GitHub unavailable and replacement actors must differ");
+      throw new GitHubReviewerReplacementInputError("GitHub unavailable and replacement actors must differ");
     }
     const requestedBeforeRemoval = await this.listRequestedReviewers({ pullRequest: input.pullRequest });
     let changed = false;
@@ -201,9 +202,11 @@ export class GitHubAdapter {
   classifyReviewerReplacementError(error: unknown): ReviewerReplacementErrorClassification {
     const message = error instanceof Error ? error.message : readOptionalString(error, "message") ?? "provider failed";
     const status = readOptionalNumber(error, "status");
+    const retryableLimit = hasRetryableReviewerReplacementSignal(error, message);
     return {
-      kind: error instanceof GitHubReviewerReplacementProtocolError ||
-        (status !== null && [400, 401, 403, 404, 410, 422].includes(status))
+      kind: error instanceof GitHubReviewerReplacementProtocolError
+        || error instanceof GitHubReviewerReplacementInputError
+        || (status !== null && [400, 401, 403, 404, 410, 422].includes(status) && !retryableLimit)
         ? "permanent"
         : "retryable",
       message,
@@ -332,10 +335,28 @@ export class GitHubAdapter {
       });
       const records = Array.isArray(response.data) ? response.data : [];
       for (const record of records) {
-        const review = readPullRequestReview(record);
+        const review = readPullRequestReview(record, false);
         if (review !== undefined) reviews.push(review);
       }
       if (records.length < PAGE_SIZE) return reviews;
+    }
+  }
+
+  private async listReviewerReplacementReviews(
+    input: { pullRequest: PullRequestRef },
+  ): Promise<PullRequestReview[]> {
+    const reviews: PullRequestReview[] = [];
+    for (let page = 1; ; page += 1) {
+      const response = await this.octokit.request("GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews", {
+        ...toPullParams(input.pullRequest),
+        page,
+        per_page: PAGE_SIZE,
+      });
+      if (!Array.isArray(response.data)) {
+        throw new GitHubReviewerReplacementProtocolError("GitHub pull request reviews response is malformed");
+      }
+      for (const record of response.data) reviews.push(readPullRequestReview(record, true));
+      if (response.data.length < PAGE_SIZE) return reviews;
     }
   }
 
@@ -574,15 +595,34 @@ function completedHumanReviewPolicyCheckPayload(input: { state: "success" | "fai
   };
 }
 
-function readPullRequestReview(value: unknown): PullRequestReview | undefined {
-  if (!isRecord(value) || !isRecord(value.user)) return undefined;
+function readPullRequestReview(value: unknown, strict: true): PullRequestReview;
+function readPullRequestReview(value: unknown, strict: false): PullRequestReview | undefined;
+function readPullRequestReview(value: unknown, strict: boolean): PullRequestReview | undefined {
   if (
-    typeof value.user.login !== "string" ||
-    value.user.login.trim().length === 0 ||
-    typeof value.state !== "string" ||
-    value.state.trim().length === 0
+    !isRecord(value)
+    || !isRecord(value.user)
+    || typeof value.user.login !== "string"
+    || typeof value.state !== "string"
+    || value.user.login.trim().length === 0
+    || value.state.trim().length === 0
   ) {
+    if (strict) throw new GitHubReviewerReplacementProtocolError("GitHub pull request review is malformed");
     return undefined;
+  }
+  if (
+    strict
+    && (
+      typeof value.user.type !== "string"
+      || value.user.type.trim().length === 0
+      || !("commit_id" in value)
+      || !("submitted_at" in value)
+      || (typeof value.commit_id !== "string" && value.commit_id !== null)
+      || (typeof value.submitted_at !== "string" && value.submitted_at !== null)
+      || (typeof value.commit_id === "string" && value.commit_id.trim().length === 0)
+      || (typeof value.submitted_at === "string" && value.submitted_at.trim().length === 0)
+    )
+  ) {
+    throw new GitHubReviewerReplacementProtocolError("GitHub pull request review is malformed");
   }
 
   return {
@@ -615,8 +655,15 @@ function normalizeGitHubActor(value: string): string {
 }
 
 function normalizeGitHubIndividualActor(value: string): string {
-  const actor = normalizeGitHubActor(value);
-  if (actor.includes("/")) throw new Error("GitHub reviewer actor must identify an individual user");
+  let actor: string;
+  try {
+    actor = normalizeGitHubActor(value);
+  } catch {
+    throw new GitHubReviewerReplacementInputError("GitHub reviewer actor login is unavailable");
+  }
+  if (actor.includes("/")) {
+    throw new GitHubReviewerReplacementInputError("GitHub reviewer actor must identify an individual user");
+  }
   return actor;
 }
 
@@ -630,6 +677,35 @@ function readOptionalString(value: unknown, key: string): string | null {
 
 function readOptionalNumber(value: unknown, key: string): number | null {
   return isRecord(value) && typeof value[key] === "number" ? value[key] : null;
+}
+
+function hasRetryableReviewerReplacementSignal(error: unknown, message: string): boolean {
+  const status = readOptionalNumber(error, "status");
+  if (status === 429) return true;
+  if (status !== 403 && status !== 422) return false;
+  const headers = isRecord(error) && isRecord(error.response) && isRecord(error.response.headers)
+    ? error.response.headers
+    : null;
+  const retryAfter = readHeader(headers, "retry-after");
+  const remaining = readHeader(headers, "x-ratelimit-remaining");
+  const normalizedMessage = message.toLowerCase();
+  return retryAfter !== null
+    || remaining === "0"
+    || normalizedMessage.includes("rate limit")
+    || normalizedMessage.includes("secondary limit")
+    || normalizedMessage.includes("abuse")
+    || normalizedMessage.includes("spam")
+    || normalizedMessage.includes("submitted too quickly");
+}
+
+function readHeader(headers: Record<string, unknown> | null, name: string): string | null {
+  if (headers === null) return null;
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === name && (typeof value === "string" || typeof value === "number")) {
+      return String(value).trim();
+    }
+  }
+  return null;
 }
 
 function hasBodyMarker(value: unknown, marker: string): boolean {

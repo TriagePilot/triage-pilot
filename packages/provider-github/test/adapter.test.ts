@@ -218,19 +218,44 @@ describe("GitHubAdapter", () => {
   });
 
   it.each([
-    [422, "permanent"],
-    [503, "retryable"],
-    [undefined, "retryable"],
-  ] as const)("maps GitHub status %s to a %s provider error", (status, kind) => {
+    [429, "Too many requests", undefined, "retryable"],
+    [403, "Forbidden", { "retry-after": "60" }, "retryable"],
+    [403, "API rate limit exceeded for installation", { "x-ratelimit-remaining": "0" }, "retryable"],
+    [403, "You have exceeded a secondary rate limit.", undefined, "retryable"],
+    [403, "Resource not accessible by integration", undefined, "permanent"],
+    [422, "Validation failed, or the endpoint has been spammed.", undefined, "retryable"],
+    [422, "Validation Failed", undefined, "permanent"],
+    [503, "provider failed", undefined, "retryable"],
+    [undefined, "network unavailable", undefined, "retryable"],
+  ] as const)("maps GitHub status %s, message '%s', and headers %j to a %s provider error", (status, message, headers, kind) => {
     const adapter = new GitHubAdapter({ request: vi.fn() } as never);
     const error = status === undefined
-      ? new Error("network unavailable")
-      : Object.assign(new Error("provider failed"), { status });
+      ? new Error(message)
+      : Object.assign(new Error(message), { status, response: { headers } });
 
     expect(adapter.classifyReviewerReplacementError(error)).toEqual({
       kind,
       message: error.message,
     });
+  });
+
+  it.each([
+    ["same actor", "@user-d82a5f", "@user-d82a5f", "GitHub unavailable and replacement actors must differ"],
+    ["team actor", "@user-d82a5f", "@acme/reviewers", "GitHub reviewer actor must identify an individual user"],
+  ] as const)("classifies deterministic %s replacement input as permanent", async (_name, unavailable, replacement, message) => {
+    const adapter = new GitHubAdapter({ request: vi.fn() } as never);
+    let caught: unknown;
+    try {
+      await adapter.reconcileReviewerReplacement({
+        pullRequest: { owner: "acme", repo: "api", pullNumber: 7 },
+        unavailableActor: unavailable,
+        replacementActor: replacement,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(adapter.classifyReviewerReplacementError(caught)).toEqual({ kind: "permanent", message });
   });
 
   it.each([
@@ -450,38 +475,25 @@ describe("GitHubAdapter", () => {
     );
   });
 
-  it("lists valid pull-request reviews across pages and ignores malformed records", async () => {
-    const firstPage: unknown[] = Array.from({ length: 100 }, () => null);
-    firstPage[0] = {
-      user: { login: "user-b4e82d", type: "User" },
-      state: "APPROVED",
+  it("lists valid pull-request reviews across pages", async () => {
+    const firstPage: unknown[] = Array.from({ length: 100 }, (_, index) => ({
+      user: { login: `user-${index}`, type: "User" },
+      state: "COMMENTED",
       commit_id: "head-1",
       submitted_at: "2026-08-21T09:00:00Z",
-    };
+    }));
     const request = vi
       .fn()
       .mockResolvedValueOnce({ data: firstPage })
       .mockResolvedValueOnce({
         data: [
           { user: { login: "user-7a3d9c", type: "Bot" }, state: "CHANGES_REQUESTED", commit_id: null, submitted_at: null },
-          { user: {}, state: "APPROVED" },
-          { user: { login: "   " }, state: "APPROVED" },
-          { user: { login: "user-f37a82" }, state: "   " },
         ],
       });
     const adapter = new GitHubAdapter({ request } as never);
 
     await expect(adapter.listPullRequestReviews({ pullRequest: { owner: "acme", repo: "app", pullNumber: 7 } })).resolves
-      .toEqual([
-        {
-          userLogin: "user-b4e82d",
-          userType: "User",
-          state: "APPROVED",
-          commitId: "head-1",
-          submittedAt: "2026-08-21T09:00:00Z",
-        },
-        { userLogin: "user-7a3d9c", userType: "Bot", state: "CHANGES_REQUESTED", commitId: null, submittedAt: null },
-      ]);
+      .toHaveLength(101);
 
     expect(request).toHaveBeenNthCalledWith(1, "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews", {
       owner: "acme",
@@ -497,6 +509,55 @@ describe("GitHubAdapter", () => {
       page: 2,
       per_page: 100,
     });
+  });
+
+  it.each([
+    ["non-array response", { reviews: [] }],
+    ["missing user", [{ state: "APPROVED", commit_id: "head-1", submitted_at: null }]],
+    ["missing actor", [{ user: { type: "User" }, state: "APPROVED", commit_id: "head-1", submitted_at: null }]],
+    ["missing user type", [{ user: { login: "user-b4e82d" }, state: "APPROVED", commit_id: "head-1", submitted_at: null }]],
+    ["missing state", [{ user: { login: "user-b4e82d", type: "User" }, commit_id: "head-1", submitted_at: null }]],
+    ["missing commit", [{ user: { login: "user-b4e82d", type: "User" }, state: "APPROVED", submitted_at: null }]],
+    ["blank commit", [{ user: { login: "user-b4e82d", type: "User" }, state: "APPROVED", commit_id: " ", submitted_at: null }]],
+    ["invalid submission", [{ user: { login: "user-b4e82d", type: "User" }, state: "APPROVED", commit_id: null, submitted_at: 42 }]],
+  ])("fails closed on a %s in replacement reviews", async (_name, data) => {
+    const request = vi.fn(async (route: string) => {
+      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
+        return { data: { state: "open", head: { sha: "head-1" }, user: { login: "user-a91f5c" } } };
+      }
+      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers") {
+        return { data: { users: [{ login: "user-d82a5f" }], teams: [] } };
+      }
+      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") return { data };
+      throw new Error(`unexpected route ${route}`);
+    });
+    const adapter = new GitHubAdapter({ request } as never);
+    let caught: unknown;
+    try {
+      await adapter.inspectReviewerReplacement({ pullRequest: { owner: "acme", repo: "app", pullNumber: 7 } });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect(adapter.classifyReviewerReplacementError(caught)).toMatchObject({ kind: "permanent" });
+  });
+
+  it("does not turn a malformed approval review into an apparently safe replacement state", async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: { state: "open", head: { sha: "head-1" }, user: { login: "user-a91f5c" } },
+      })
+      .mockResolvedValueOnce({ data: { users: [{ login: "user-d82a5f" }], teams: [] } })
+      .mockResolvedValueOnce({
+        data: [{ user: { login: "user-c91e46" }, state: "APPROVED", commit_id: "head-1", submitted_at: null }],
+      });
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await expect(adapter.inspectReviewerReplacement({
+      pullRequest: { owner: "acme", repo: "api", pullNumber: 7 },
+    })).rejects.toThrow("GitHub pull request review is malformed");
   });
 
   it("creates an in-progress human-review policy check", async () => {

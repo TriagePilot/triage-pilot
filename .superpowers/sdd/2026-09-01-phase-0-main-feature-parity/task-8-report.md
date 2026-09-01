@@ -87,13 +87,13 @@ The review findings were reproduced test-first. The focused application/provider
 
 After the fix, the focused replacement suites pass 59/59 tests. The full application/provider and Task 5 core selection passes 111/111. Task 6 availability/outbox PostgreSQL contracts pass 38/38, including locked final-race and event-atomicity cases, with zero disposable test databases remaining.
 
-Repository gates passed: `pnpm check`, `pnpm test` (554 passed, 101 expected integration skips), `pnpm build`, `docker build .`, `pnpm check:package-boundary`, `git diff --check`, and Gitleaks (110 commits, no leaks). `pnpm check:public-boundary` retains the pre-existing diagnostic against the internal Task 6 report's words `commercial` and `saas`; it reports no new source boundary violation from this change.
+Repository gates passed: `pnpm check`, `pnpm test` (554 passed, 101 expected integration skips), `pnpm build`, `docker build .`, `pnpm check:package-boundary`, `git diff --check`, and Gitleaks (110 commits, no leaks). The public-boundary diagnostic retained only its pre-existing findings in the internal Task 6 report; it reported no source boundary violation from this change.
 
 ### Crash and recovery semantics
 
 Every non-terminal fresh candidate now has two provider reads. The second read occurs immediately before any mutation, persistence, or policy finalizer path, including `no_replacement_available`. A newly closed request, changed head, or arriving approval replaces the earlier plan and fails closed without stale mutation; an arriving satisfying approval maps to `skipped_policy_satisfied` plus policy reevaluation rather than policy failure.
 
-After DELETE and POST succeed but the process dies before persistence, a fresh job does not rely on the lost in-memory recovery payload. It inspects `requestedActors` and recognizes exactly one requested actor that belongs to the immutable original eligible pool but not the immutable original cohort, unavailable actor, current author, or approved set. It persists/finalizes that actor as the recovered replacement without re-reading mutable absence/load inputs or repeating provider effects. An original-cohort/manual request is never inferred as a replacement. If more than one actor could be the applied replacement, the job records `permanent_failure`; preferred membership is not used to guess because the historical absence/load inputs that determined whether preferred or fallback was selected are unavailable after process death. A single pre-existing eligible actor outside the original cohort remains intrinsically indistinguishable from the successfully POSTed actor; the contract deliberately requires immutable cohort snapshots and fails closed when provider state exposes multiple candidates.
+The first fix round attempted to recover a replacement from current requested-reviewer state. Fix round 2 supersedes and removes that inference because even one eligible manual request is indistinguishable from a prior application write without durable provenance.
 
 Provider effects followed by failed or stale final persistence still produce the Task 9 recovery contract. A permanent mutation error is treated conservatively as possibly partially applied; if terminal persistence also fails, recovery has phase `persist_replacement`, the exact permanent-failure persistence/event input, `providerEffectsApplied: true`, and a null policy finalizer. Task 9 must resume that persistence input and must not repeat provider mutation.
 
@@ -113,4 +113,38 @@ This fix round is committed separately with subject:
 
 ```text
 fix: make reviewer replacement crash safe
+```
+
+## Fix round 2: durable mutation intent
+
+### RED and GREEN
+
+The focused RED run failed 19 tests for the intended missing behavior: durable prepare/load ordering and serialization, fresh-process provenance, advisory requested reviewers, strict review parsing, throttling-aware classification, and permanent deterministic input errors. A subsequent terminal-state regression failed until a fresh retry loaded and serialized an existing intent even when its first provider read found the request closed. A blank-commit regression also failed before strict review validation was completed.
+
+The final focused application/provider suites pass 80/80 tests. The affected application/provider/Task 5 core selection passes 132/132, and the Task 6 availability/outbox PostgreSQL contracts pass 38/38 with zero disposable test databases remaining. `pnpm check`, `pnpm test` (575 passed, 101 expected integration skips), `pnpm build`, `docker build .`, package-boundary diagnostics, `git diff --check`, and Gitleaks (111 commits, no leaks) pass. The standalone public-boundary diagnostic reports only the unchanged Task 6 artifact baseline and no Task 8 report finding.
+
+### Intent lifecycle required for Task 9
+
+`ReviewerMutationIntentKey` is provider-neutral and keys an intent by workspace, provider connection, absence, absence revision, and routing decision. `PrepareReviewerMutationIntentInput` also binds provider kind, repository identity, durable change-request identity, routed head, unavailable actor, and the exact selected replacement actor. `prepareMutationIntent` is an atomic create-or-load operation: an existing record is immutable and authoritative, never overwritten by a later selection. `loadMutationIntent` is called before mutable absence/load selection on a fresh enforce attempt.
+
+For a new replacement, the application reads provider state, selects from immutable routing inputs, waits for `prepareMutationIntent` to complete, validates the returned source, then immediately re-inspects provider state before reconciliation. A failed prepare causes zero provider writes. If another attempt already prepared the key, the returned stored actor wins and is reconciled idempotently.
+
+After prepare, DELETE, POST, and process death, a fresh job loads the same intent and does not read changed load or absence inputs. It re-inspects current request/head/reviews immediately before applying the stored actor and fails closed on closed, changed-head, approved-unavailable, or satisfied-policy state. Current `requestedActors` never establish provenance. A manual eligible request with no intent goes through ordinary selection and prepare; it is never attributed to earlier application work.
+
+The intent ID is included in activation results, replacement persistence input, pending-finalizer records, and every recovery payload so Task 9 can serialize/resume the exact prerequisite. Storage must retain the immutable intent until terminal replacement history has been persisted. Activation processing does not delete it; any later deletion is retention cleanup and must not race an activation or finalizer retry. Task 9 must implement durable storage and worker composition before enabling dispatch.
+
+### Advisory requests and strict provider reads
+
+Replacement selection uses only the immutable routed cohort as `activeCohort`; provider requested reviewers remain advisory. A manually requested preferred actor therefore remains the preferred replacement, while GitHub reconciliation removes the unavailable reviewer, re-lists, and avoids a duplicate POST when that preferred actor is already requested.
+
+GitHub replacement inspection now rejects a non-array reviews response and any review missing a valid user, actor login, user type, state, commit field, or submission field. Explicit nullable commit/submission values remain valid. Malformed approvals cannot be silently dropped or treated as safe human-policy state. The stricter parser is scoped to replacement inspection; the established generic policy-review reader retains its existing tolerant contract.
+
+GitHub error classification keeps status/header/message interpretation inside the adapter. HTTP 429 is retryable. HTTP 403 is retryable for `Retry-After`, exhausted rate-limit headers, rate-limit messages, or secondary-limit messages; ordinary authorization/permission 403 remains permanent. HTTP 422 abuse, spam, secondary-limit, or retry hints are retryable, while deterministic validation remains permanent. Same-actor and team-actor replacement inputs use provider-owned permanent input errors. The application still consumes only `{ kind, message }`.
+
+### Fix commit
+
+This fix round is committed separately with subject:
+
+```text
+fix: persist reviewer mutation intent before writes
 ```
