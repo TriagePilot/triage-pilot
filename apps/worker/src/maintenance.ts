@@ -4,7 +4,7 @@ export interface WorkerMaintenanceServices {
   recoverStaleJobs(now: Date): Promise<void>;
   applyRetention(now: Date): Promise<void>;
   updateHeartbeat(now: Date): Promise<void>;
-  drainDecisionOutbox(now: Date): Promise<void>;
+  drainPlatformOutbox(now: Date): Promise<void>;
 }
 
 export interface WorkerMaintenanceState {
@@ -18,7 +18,7 @@ export async function runWorkerStartup(
   await services.recoverStaleJobs(now);
   await services.applyRetention(now);
   await services.updateHeartbeat(now);
-  await runDecisionOutboxDrain(services, now);
+  await runPlatformOutboxDrain(services, now);
   return { lastRetentionAt: now };
 }
 
@@ -29,20 +29,20 @@ export async function runWorkerMaintenance(
 ): Promise<WorkerMaintenanceState> {
   await services.recoverStaleJobs(now);
   await services.updateHeartbeat(now);
-  await runDecisionOutboxDrain(services, now);
+  await runPlatformOutboxDrain(services, now);
   if (now.getTime() - state.lastRetentionAt.getTime() < RETENTION_INTERVAL_MS) return state;
 
   await services.applyRetention(now);
   return { lastRetentionAt: now };
 }
 
-export async function runDecisionOutboxDrain(
-  services: Pick<WorkerMaintenanceServices, "drainDecisionOutbox">,
+export async function runPlatformOutboxDrain(
+  services: Pick<WorkerMaintenanceServices, "drainPlatformOutbox">,
   now: Date,
 ): Promise<void> {
   try {
-    await services.drainDecisionOutbox(now);
+    await services.drainPlatformOutbox(now);
   } catch {
-    // Decision analytics are retryable maintenance work and must not block routing.
+    // Platform event delivery is retryable maintenance work and must not block routing.
   }
 }

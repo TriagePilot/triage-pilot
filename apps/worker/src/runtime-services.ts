@@ -10,7 +10,7 @@ import {
   type Clock,
   type ConfigurationSource,
   type CredentialProvider,
-  type DecisionEventSink,
+  type PlatformEventSink,
   type HumanReviewPolicyJobPayload,
   type ScoreComponent,
 } from "@triagepilot/contracts";
@@ -51,7 +51,7 @@ interface WorkerServiceFactoryInput {
   clock?: Clock;
 }
 
-export function createNoopDecisionEventSink(): DecisionEventSink {
+export function createNoopPlatformEventSink(): PlatformEventSink {
   return { async emit() {} };
 }
 

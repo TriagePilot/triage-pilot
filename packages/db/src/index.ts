@@ -27,13 +27,13 @@ export {
   type PersistedDecision,
 } from "./decisions.js";
 export {
-  claimDecisionEvents,
-  createDecisionOutboxRepository,
-  markDecisionEventPublished,
-  publishDecisionOutbox,
-  stageDecisionEvent,
-  type DecisionOutboxRecord,
-  type DecisionOutboxRepository,
+  claimPlatformEvents,
+  createPlatformOutboxRepository,
+  markPlatformEventPublished,
+  publishPlatformOutbox,
+  stagePlatformEvent,
+  type PlatformOutboxRecord,
+  type PlatformOutboxRepository,
 } from "./outbox.js";
 export {
   acceptHumanReviewPolicyDelivery,

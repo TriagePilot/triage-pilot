@@ -156,6 +156,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
         },
         ({ decisionId }) => ({
           schemaVersion: 1,
+          eventType: "routing_decision",
           eventId: `decision:${decisionId}:v1`,
           occurredAt: "2026-08-18T12:02:00.000Z",
           workspaceId,

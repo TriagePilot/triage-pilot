@@ -3,17 +3,17 @@ import type {
   Clock,
   ConfigurationDocument,
   ConfigurationSource,
-  DecisionEventSink,
+  PlatformEventSink,
   RepositoryRef,
   WorkspaceId,
 } from "@triagepilot/contracts";
 import {
   createDatabase,
-  createDecisionOutboxRepository,
+  createPlatformOutboxRepository,
   createJobClaimer,
   createWorkspaceRepositories,
   ensureLocalWorkspace,
-  publishDecisionOutbox,
+  publishPlatformOutbox,
   updateWorkerHeartbeat,
   type WorkspaceRepositories,
 } from "@triagepilot/db";
@@ -25,14 +25,14 @@ import {
 } from "@triagepilot/provider-github";
 
 import type { WorkerEnv } from "../env";
-import { runDecisionOutboxDrain, runWorkerMaintenance, runWorkerStartup } from "../maintenance";
+import { runPlatformOutboxDrain, runWorkerMaintenance, runWorkerStartup } from "../maintenance";
 import type { RoutingJobMessage, RoutingJobServices } from "../processor";
 import { processRoutingJob } from "../processor";
 import { processHumanReviewPolicyJob } from "../review-policy-processor";
 import type { HumanReviewPolicyServices } from "../review-policy-processor";
 import { runWorkerOnce } from "../runner";
 import {
-  createNoopDecisionEventSink,
+  createNoopPlatformEventSink,
   createWorkerHumanReviewPolicyServiceFactory,
   createWorkerRoutingServiceFactory,
 } from "../runtime-services";
@@ -52,7 +52,7 @@ export interface SelfHostedConfigurationProbe {
 export interface SelfHostedWorkerCompositionDependencies {
   createRequester?: RequesterFactory;
   clock?: Clock;
-  decisionEventSink?: DecisionEventSink;
+  platformEventSink?: PlatformEventSink;
 }
 
 export interface SelfHostedWorkerComposition {
@@ -66,7 +66,7 @@ export interface SelfHostedWorkerComposition {
   runOnce(now: Date): Promise<boolean>;
   runStartup(now: Date): ReturnType<typeof runWorkerStartup>;
   runMaintenance(state: Awaited<ReturnType<typeof runWorkerStartup>>, now: Date): ReturnType<typeof runWorkerMaintenance>;
-  drainDecisionOutbox(now: Date): ReturnType<typeof runDecisionOutboxDrain>;
+  drainPlatformOutbox(now: Date): ReturnType<typeof runPlatformOutboxDrain>;
   close(): Promise<void>;
 }
 
@@ -77,10 +77,10 @@ export async function createSelfHostedWorkerComposition(
   const db = createDatabase(env.databaseUrl);
   const workspaceId = await ensureLocalWorkspace(db);
   const localRepositories = createWorkspaceRepositories(db, workspaceId);
-  const decisionOutbox = createDecisionOutboxRepository(db, workspaceId);
+  const platformOutbox = createPlatformOutboxRepository(db, workspaceId);
   const jobClaimer = createJobClaimer(db);
   const clock = dependencies.clock ?? { now: () => new Date() };
-  const decisionEventSink = dependencies.decisionEventSink ?? createNoopDecisionEventSink();
+  const platformEventSink = dependencies.platformEventSink ?? createNoopPlatformEventSink();
   const credentialProvider = new GitHubCredentialProvider(env.github);
   const createRequester = dependencies.createRequester ?? createInstallationRequester;
   const buildRoutingServices = createWorkerRoutingServiceFactory({
@@ -107,8 +107,8 @@ export async function createSelfHostedWorkerComposition(
     async updateHeartbeat(now: Date) {
       await updateWorkerHeartbeat(db, { workerId: env.workerId, now });
     },
-    async drainDecisionOutbox(now: Date) {
-      await publishDecisionOutbox({ repository: decisionOutbox, sink: decisionEventSink, limit: 25, now });
+    async drainPlatformOutbox(now: Date) {
+      await publishPlatformOutbox({ repository: platformOutbox, sink: platformEventSink, limit: 25, now });
     },
   };
 
@@ -138,8 +138,8 @@ export async function createSelfHostedWorkerComposition(
     runMaintenance(state, now) {
       return runWorkerMaintenance(state, maintenanceServices, now);
     },
-    drainDecisionOutbox(now) {
-      return runDecisionOutboxDrain(maintenanceServices, now);
+    drainPlatformOutbox(now) {
+      return runPlatformOutboxDrain(maintenanceServices, now);
     },
     close: () => db.destroy(),
   };

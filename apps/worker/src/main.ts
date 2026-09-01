@@ -24,7 +24,7 @@ export async function runWorkerProcess(source: NodeJS.ProcessEnv = process.env):
       try {
         maintenanceState = await composition.runMaintenance(maintenanceState, now);
         await composition.runOnce(now);
-        await composition.drainDecisionOutbox(new Date());
+        await composition.drainPlatformOutbox(new Date());
       } catch (error) {
         console.error(
           formatLog({

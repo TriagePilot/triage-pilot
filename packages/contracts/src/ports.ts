@@ -1,5 +1,5 @@
 import type {
-  DecisionEventV1,
+  PlatformEventV1,
 } from "./events.js";
 import type {
   ProviderConnectionId,
@@ -31,8 +31,8 @@ export interface ProviderConnectionLookup {
   findWorkspace(input: { provider: ProviderKind; externalConnectionId: string }): Promise<{ workspaceId: WorkspaceId; providerConnectionId: ProviderConnectionId; active: boolean } | null>;
 }
 
-export interface DecisionEventSink {
-  emit(event: DecisionEventV1): Promise<void>;
+export interface PlatformEventSink {
+  emit(event: PlatformEventV1): Promise<void>;
 }
 
 export interface Clock { now(): Date; }

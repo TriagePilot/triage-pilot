@@ -1,18 +1,18 @@
 import type { Kysely, Selectable, Transaction } from "kysely";
-import type { DecisionEventSink, DecisionEventV1, WorkspaceId } from "@triagepilot/contracts";
+import type { PlatformEventSink, PlatformEventV1, WorkspaceId } from "@triagepilot/contracts";
 
 import { buildNextRunAt } from "./jobs.js";
 import type { Database, DecisionOutboxTable } from "./kysely.js";
 
 type DatabaseExecutor = Kysely<Database> | Transaction<Database>;
-const DECISION_OUTBOX_LEASE_MS = 15 * 60 * 1000;
+const PLATFORM_OUTBOX_LEASE_MS = 15 * 60 * 1000;
 
-export interface DecisionOutboxRecord {
+export interface PlatformOutboxRecord {
   id: string;
   workspaceId: WorkspaceId;
   decisionId: string;
   schemaVersion: number;
-  payload: DecisionEventV1;
+  payload: PlatformEventV1;
   occurredAt: Date;
   availableAt: Date;
   publishedAt: Date | null;
@@ -20,21 +20,24 @@ export interface DecisionOutboxRecord {
   lastError: string | null;
 }
 
-export interface DecisionOutboxRepository {
-  claim(input: { limit: number; now: Date }): Promise<DecisionOutboxRecord[]>;
+export interface PlatformOutboxRepository {
+  claim(input: { limit: number; now: Date }): Promise<PlatformOutboxRecord[]>;
   markPublished(input: { id: string; attemptCount: number; now: Date }): Promise<boolean>;
   markFailed(input: { id: string; attemptCount: number; error: unknown; now: Date }): Promise<boolean>;
-  listUnpublished(): Promise<DecisionOutboxRecord[]>;
+  listUnpublished(): Promise<PlatformOutboxRecord[]>;
 }
 
-export async function stageDecisionEvent(
+export async function stagePlatformEvent(
   db: DatabaseExecutor,
   workspaceId: WorkspaceId,
   decisionId: string,
-  event: DecisionEventV1,
+  event: PlatformEventV1,
 ): Promise<void> {
-  if (event.workspaceId !== workspaceId) throw new Error("decision event workspace does not match persistence scope");
-  if (event.decisionId !== decisionId) throw new Error("decision event id does not match persisted decision");
+  if (event.eventType !== "routing_decision") {
+    throw new Error("only routing decision events can be staged by the current outbox schema");
+  }
+  if (event.workspaceId !== workspaceId) throw new Error("platform event workspace does not match persistence scope");
+  if (event.decisionId !== decisionId) throw new Error("platform event decision id does not match persisted decision");
 
   await db
     .insertInto("decision_outbox")
@@ -52,36 +55,36 @@ export async function stageDecisionEvent(
     .execute();
 }
 
-export async function claimDecisionEvents(input: {
+export async function claimPlatformEvents(input: {
   db: Kysely<Database>;
   workspaceId: WorkspaceId;
   limit: number;
   now?: Date;
-}): Promise<DecisionOutboxRecord[]> {
-  return await createDecisionOutboxRepository(input.db, input.workspaceId).claim({
+}): Promise<PlatformOutboxRecord[]> {
+  return await createPlatformOutboxRepository(input.db, input.workspaceId).claim({
     limit: input.limit,
     now: input.now ?? new Date(),
   });
 }
 
-export async function markDecisionEventPublished(input: {
+export async function markPlatformEventPublished(input: {
   db: Kysely<Database>;
   workspaceId: WorkspaceId;
   id: string;
   attemptCount: number;
   now?: Date;
 }): Promise<boolean> {
-  return await createDecisionOutboxRepository(input.db, input.workspaceId).markPublished({
+  return await createPlatformOutboxRepository(input.db, input.workspaceId).markPublished({
     id: input.id,
     attemptCount: input.attemptCount,
     now: input.now ?? new Date(),
   });
 }
 
-export function createDecisionOutboxRepository(
+export function createPlatformOutboxRepository(
   db: Kysely<Database>,
   workspaceId: WorkspaceId,
-): DecisionOutboxRepository {
+): PlatformOutboxRepository {
   return {
     async claim(input) {
       if (input.limit <= 0) return [];
@@ -101,7 +104,7 @@ export function createDecisionOutboxRepository(
           .skipLocked()
           .execute();
 
-        const claimed: DecisionOutboxRecord[] = [];
+        const claimed: PlatformOutboxRecord[] = [];
         for (const candidate of candidates) {
           const nextAttemptCount = candidate.attempt_count + 1;
           const updated = await trx
@@ -115,7 +118,7 @@ export function createDecisionOutboxRepository(
             .where("published_at", "is", null)
             .returningAll()
             .executeTakeFirst();
-          if (updated) claimed.push(toDecisionOutboxRecord(updated));
+          if (updated) claimed.push(toPlatformOutboxRecord(updated));
         }
         return claimed;
       });
@@ -159,14 +162,14 @@ export function createDecisionOutboxRepository(
         .orderBy("occurred_at", "asc")
         .orderBy("id", "asc")
         .execute();
-      return rows.map(toDecisionOutboxRecord);
+      return rows.map(toPlatformOutboxRecord);
     },
   };
 }
 
-export async function publishDecisionOutbox(input: {
-  repository: DecisionOutboxRepository;
-  sink: DecisionEventSink;
+export async function publishPlatformOutbox(input: {
+  repository: PlatformOutboxRepository;
+  sink: PlatformEventSink;
   limit: number;
   now?: Date;
 }): Promise<{ published: number }> {
@@ -194,13 +197,13 @@ export async function publishDecisionOutbox(input: {
   return { published };
 }
 
-function toDecisionOutboxRecord(row: Selectable<DecisionOutboxTable>): DecisionOutboxRecord {
+function toPlatformOutboxRecord(row: Selectable<DecisionOutboxTable>): PlatformOutboxRecord {
   return {
     id: row.id,
     workspaceId: row.workspace_id,
     decisionId: row.decision_id,
     schemaVersion: row.schema_version,
-    payload: row.payload as DecisionEventV1,
+    payload: row.payload as PlatformEventV1,
     occurredAt: row.occurred_at,
     availableAt: row.available_at,
     publishedAt: row.published_at,
@@ -211,9 +214,9 @@ function toDecisionOutboxRecord(row: Selectable<DecisionOutboxTable>): DecisionO
 
 function sanitizeError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  return message.replaceAll(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 1_000) || "decision event sink failed";
+  return message.replaceAll(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 1_000) || "platform event sink failed";
 }
 
 function buildLeaseExpiresAt(now: Date): Date {
-  return new Date(now.getTime() + DECISION_OUTBOX_LEASE_MS);
+  return new Date(now.getTime() + PLATFORM_OUTBOX_LEASE_MS);
 }

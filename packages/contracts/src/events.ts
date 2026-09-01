@@ -54,8 +54,17 @@ export interface HumanReviewPolicyJobPayload {
   changeRequest: Pick<ChangeRequestRef, "repository" | "externalId" | "number">;
 }
 
+export interface ReviewerAbsenceActivationJobPayload {
+  kind: "activate_reviewer_absence";
+  workspaceId: WorkspaceId;
+  providerConnectionId: ProviderConnectionId;
+  absenceId: string;
+  absenceRevision: number;
+}
+
 export interface DecisionEventV1 {
   schemaVersion: 1;
+  eventType: "routing_decision";
   eventId: string;
   occurredAt: string;
   workspaceId: WorkspaceId;
@@ -71,7 +80,44 @@ export interface DecisionEventV1 {
   effectiveConfigurationHash: string;
 }
 
-export type TriagePilotJobPayload = RoutingJobPayload | HumanReviewPolicyJobPayload;
+export type ReviewerReplacementOutcome =
+  | "replaced"
+  | "simulated_replacement"
+  | "no_replacement_available"
+  | "skipped_approved"
+  | "skipped_closed"
+  | "skipped_changed_head"
+  | "skipped_policy_satisfied"
+  | "permanent_failure";
+
+export interface ReviewerReplacementEventV1 {
+  schemaVersion: 1;
+  eventType: "reviewer_replacement";
+  eventId: string;
+  occurredAt: string;
+  workspaceId: WorkspaceId;
+  provider: ProviderKind;
+  providerConnectionId: ProviderConnectionId;
+  absenceId: string;
+  absenceRevision: number;
+  decisionId: string;
+  repositoryId: RepositoryId;
+  changeRequestId: ChangeRequestId;
+  unavailableActor: ExternalActorId;
+  replacementActor: ExternalActorId | null;
+  outcome: ReviewerReplacementOutcome;
+}
+
+export type PlatformEventV1 = DecisionEventV1 | ReviewerReplacementEventV1;
+
+export type TriagePilotJobPayload =
+  | RoutingJobPayload
+  | HumanReviewPolicyJobPayload
+  | ReviewerAbsenceActivationJobPayload;
+
+export function buildReviewerAbsenceActivationKey(absenceId: string, revision: number): string {
+  return `reviewer-absence:${absenceId}:revision:${revision}`;
+}
 
 export function buildRoutingKey(input: {
   workspaceId: WorkspaceId;

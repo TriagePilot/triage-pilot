@@ -3,7 +3,7 @@ import { sql, type Kysely, type Transaction } from "kysely";
 import { legacyRoutingKey, type ActionStatus, type DecisionEventV1, type RepositoryMode, type RoutingAction, type WorkspaceId } from "@triagepilot/contracts";
 
 import type { Database } from "./kysely.js";
-import { stageDecisionEvent } from "./outbox.js";
+import { stagePlatformEvent } from "./outbox.js";
 
 export interface DecisionInput {
   repositoryId: string;
@@ -69,7 +69,7 @@ export async function persistDecisionWithEvent(
 ): Promise<PersistedDecision> {
   return await db.transaction().execute(async (trx) => {
     const persisted = await persistDecisionRecord(trx, workspaceId, input.decision);
-    await stageDecisionEvent(trx, workspaceId, persisted.decisionId, input.event(persisted));
+    await stagePlatformEvent(trx, workspaceId, persisted.decisionId, input.event(persisted));
     return persisted;
   });
 }

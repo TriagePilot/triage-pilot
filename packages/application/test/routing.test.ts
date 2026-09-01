@@ -110,6 +110,7 @@ describe("processChangeRequest", () => {
       };
       expect(event(persisted)).toMatchObject({
         schemaVersion: 1,
+        eventType: "routing_decision",
         decisionId: "decision-atomic",
         workspaceId: "ws-a",
         provider: "gitlab",
@@ -166,6 +167,7 @@ describe("processChangeRequest", () => {
       expect.any(Function),
     );
     expect(stagedEvent).toMatchObject({
+      eventType: "routing_decision",
       decisionId: "decision-invalid",
       action: "configuration_failure",
     });

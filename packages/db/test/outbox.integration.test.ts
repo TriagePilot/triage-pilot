@@ -1,16 +1,22 @@
-import type { DecisionEventSink, DecisionEventV1, WorkspaceId } from "@triagepilot/contracts";
+import type {
+  DecisionEventV1,
+  PlatformEventSink,
+  ReviewerReplacementEventV1,
+  WorkspaceId,
+} from "@triagepilot/contracts";
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  claimDecisionEvents,
-  createDecisionOutboxRepository,
+  claimPlatformEvents,
+  createPlatformOutboxRepository,
   ensureLocalWorkspace,
   persistDecisionWithEvent,
-  publishDecisionOutbox,
+  publishPlatformOutbox,
+  stagePlatformEvent,
 } from "../src";
 import { withPostgresTestDatabase } from "./postgres";
 
-describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("decision outbox", () => {
+describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => {
   it("persists the decision and versioned event in one transaction", async () => {
     await withPostgresTestDatabase(async (db) => {
       const workspaceId = await ensureLocalWorkspace(db);
@@ -29,12 +35,32 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("decision outbox", () => 
           decision_id: persisted.decisionId,
           schema_version: 1,
           payload: expect.objectContaining({
+            eventType: "routing_decision",
             decisionId: persisted.decisionId,
             workspaceId,
             repositoryId: "101",
           }),
         }),
       ]);
+    });
+  });
+
+  it("does not stage reviewer replacement events before replacement persistence is available", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const repositoryId = await seedRepository(db, workspaceId, "101");
+      const persisted = await persistDecisionWithEvent(db, workspaceId, {
+        decision: decisionInput(repositoryId, "delivery-1"),
+        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+      });
+
+      await expect(stagePlatformEvent(
+        db,
+        workspaceId,
+        persisted.decisionId,
+        replacementEvent({ workspaceId, decisionId: persisted.decisionId }),
+      )).rejects.toThrow("only routing decision events can be staged by the current outbox schema");
+      await expect(db.selectFrom("decision_outbox").select("id").execute()).resolves.toHaveLength(1);
     });
   });
 
@@ -49,7 +75,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("decision outbox", () => 
           decision: decisionInput(repositoryId, "delivery-1"),
           event: ({ decisionId }) => decisionEvent({ workspaceId: otherWorkspaceId, decisionId, repositoryId: "101" }),
         }),
-      ).rejects.toThrow("decision event workspace does not match persistence scope");
+      ).rejects.toThrow("platform event workspace does not match persistence scope");
       await expect(db.selectFrom("routing_decisions").select("id").execute()).resolves.toHaveLength(0);
       await expect(db.selectFrom("decision_outbox").select("id").execute()).resolves.toHaveLength(0);
     });
@@ -91,7 +117,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("decision outbox", () => 
       });
 
       await expect(
-        claimDecisionEvents({ db, workspaceId: firstWorkspaceId, limit: 10, now: new Date("2026-08-26T10:00:00.000Z") }),
+        claimPlatformEvents({ db, workspaceId: firstWorkspaceId, limit: 10, now: new Date("2026-08-26T10:00:00.000Z") }),
       ).resolves.toEqual([
         expect.objectContaining({
           workspaceId: firstWorkspaceId,
@@ -110,15 +136,15 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("decision outbox", () => 
         decision: decisionInput(repositoryId, "delivery-1"),
         event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
       });
-      const repository = createDecisionOutboxRepository(db, workspaceId);
-      const failingSink: DecisionEventSink = {
+      const repository = createPlatformOutboxRepository(db, workspaceId);
+      const failingSink: PlatformEventSink = {
         emit: vi.fn(async () => {
           throw new Error("sink unavailable");
         }),
       };
 
       await expect(
-        publishDecisionOutbox({
+        publishPlatformOutbox({
           repository,
           sink: failingSink,
           limit: 10,
@@ -134,8 +160,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("decision outbox", () => 
         }),
       ]);
 
-      const healthySink: DecisionEventSink = { emit: vi.fn(async () => {}) };
-      await publishDecisionOutbox({
+      const healthySink: PlatformEventSink = { emit: vi.fn(async () => {}) };
+      await publishPlatformOutbox({
         repository,
         sink: healthySink,
         limit: 10,
@@ -158,15 +184,15 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("decision outbox", () => 
         decision: decisionInput(repositoryId, "delivery-1"),
         event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
       });
-      const repository = createDecisionOutboxRepository(db, workspaceId);
+      const repository = createPlatformOutboxRepository(db, workspaceId);
       let releaseFirstSink: (() => void) | undefined;
-      const firstSink: DecisionEventSink = {
+      const firstSink: PlatformEventSink = {
         emit: vi.fn(() => new Promise<void>((resolve) => {
           releaseFirstSink = resolve;
         })),
       };
-      const secondSink: DecisionEventSink = { emit: vi.fn(async () => {}) };
-      const firstPublish = publishDecisionOutbox({
+      const secondSink: PlatformEventSink = { emit: vi.fn(async () => {}) };
+      const firstPublish = publishPlatformOutbox({
         repository,
         sink: firstSink,
         limit: 10,
@@ -174,7 +200,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("decision outbox", () => 
       });
 
       await vi.waitFor(() => expect(firstSink.emit).toHaveBeenCalledOnce());
-      await expect(publishDecisionOutbox({
+      await expect(publishPlatformOutbox({
         repository,
         sink: secondSink,
         limit: 10,
@@ -263,6 +289,7 @@ function decisionEvent(input: {
 }): DecisionEventV1 {
   return {
     schemaVersion: 1,
+    eventType: "routing_decision",
     eventId: `decision:${input.decisionId}:v1`,
     occurredAt: "2026-08-26T09:59:00.000Z",
     workspaceId: input.workspaceId,
@@ -276,6 +303,29 @@ function decisionEvent(input: {
     riskScore: input.riskScore ?? 5,
     selectedActors: ["@user-7a91c0"],
     effectiveConfigurationHash: "hash-1",
+  };
+}
+
+function replacementEvent(input: {
+  workspaceId: WorkspaceId;
+  decisionId: string;
+}): ReviewerReplacementEventV1 {
+  return {
+    schemaVersion: 1,
+    eventType: "reviewer_replacement",
+    eventId: "reviewer-replacement:absence-42:revision:3:decision-1:v1",
+    occurredAt: "2026-08-26T10:00:00.000Z",
+    workspaceId: input.workspaceId,
+    provider: "github",
+    providerConnectionId: "connection-17",
+    absenceId: "absence-42",
+    absenceRevision: 3,
+    decisionId: input.decisionId,
+    repositoryId: "101",
+    changeRequestId: "cr-7",
+    unavailableActor: "@user-f2a19c",
+    replacementActor: "@user-4c8d31",
+    outcome: "replaced",
   };
 }
 

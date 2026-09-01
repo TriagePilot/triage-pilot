@@ -312,6 +312,7 @@ function decisionEvent(input: {
 }): DecisionEventV1 {
   return {
     schemaVersion: 1,
+    eventType: "routing_decision",
     eventId: `decision:${input.decisionId}:v1`,
     occurredAt: input.occurredAt.toISOString(),
     workspaceId: input.job.workspaceId,
