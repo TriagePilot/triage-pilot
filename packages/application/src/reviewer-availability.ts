@@ -339,7 +339,7 @@ export interface ReviewerAvailabilityPorts {
       replacementActor: ExternalActorId;
     }): Promise<{ changed: boolean }>;
     classifyError(error: unknown): {
-      kind: "permanent" | "retryable";
+      kind: "permanent" | "retryable" | "obsolete_claim";
       message: string;
     };
   };
@@ -938,6 +938,7 @@ async function applyCandidatePlan(
     });
   } catch (error) {
     const classified = ports.provider.classifyError(error);
+    if (classified.kind === "obsolete_claim") throw error;
     if (classified.kind === "retryable") throw error;
     return { plan: permanentFailurePlan(classified.message, intent.id), providerEffectsApplied: true };
   }

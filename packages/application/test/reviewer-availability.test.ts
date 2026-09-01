@@ -1332,6 +1332,21 @@ describe("activateReviewerAbsence", () => {
     },
   );
 
+  it("surfaces an obsolete mutation claim without terminal history", async () => {
+    const obsolete = new Error("provider mutation authority is obsolete");
+    const ports = buildPorts({
+      provider: {
+        reconcileReviewRequest: vi.fn(async () => { throw obsolete; }),
+        classifyError: vi.fn(() => ({ kind: "obsolete_claim", message: obsolete.message })),
+      },
+    });
+
+    await expect(activateReviewerAbsence(job, ports)).rejects.toBe(obsolete);
+
+    expect(ports.availability.persistReplacement).not.toHaveBeenCalled();
+    expect(ports.availability.persistMutationIntentRecovery).not.toHaveBeenCalled();
+  });
+
   it("keeps shadow mode free of reviewer and policy writes", async () => {
     const shadowCandidate = { ...candidate, mode: "shadow" as const, policyCheckState: "not_started" as const };
     const ports = buildPorts({

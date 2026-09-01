@@ -88,6 +88,108 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer avail
     });
   });
 
+  it.each([
+    ["workspace", (recovery: Record<string, unknown>, persistence: Record<string, unknown>) => {
+      const workspaceId = "22222222-2222-4222-8222-222222222222";
+      (recovery.job as Record<string, unknown>).workspaceId = workspaceId;
+      (persistence.event as Record<string, unknown>).workspaceId = workspaceId;
+    }],
+    ["provider", (recovery: Record<string, unknown>, persistence: Record<string, unknown>) => {
+      recovery.provider = "different-provider";
+      persistence.provider = "different-provider";
+      (persistence.event as Record<string, unknown>).provider = "different-provider";
+    }],
+    ["provider connection", (recovery: Record<string, unknown>, persistence: Record<string, unknown>) => {
+      const connectionId = "33333333-3333-4333-8333-333333333333";
+      (recovery.job as Record<string, unknown>).providerConnectionId = connectionId;
+      persistence.providerConnectionId = connectionId;
+      (persistence.event as Record<string, unknown>).providerConnectionId = connectionId;
+    }],
+    ["absence", (recovery: Record<string, unknown>, persistence: Record<string, unknown>) => {
+      const absenceId = "44444444-4444-4444-8444-444444444444";
+      (recovery.job as Record<string, unknown>).absenceId = absenceId;
+      persistence.absenceId = absenceId;
+      (persistence.event as Record<string, unknown>).absenceId = absenceId;
+    }],
+    ["absence revision", (recovery: Record<string, unknown>, persistence: Record<string, unknown>) => {
+      (recovery.job as Record<string, unknown>).absenceRevision = 2;
+      persistence.absenceRevision = 2;
+      (persistence.event as Record<string, unknown>).absenceRevision = 2;
+    }],
+    ["decision", (recovery: Record<string, unknown>, persistence: Record<string, unknown>) => {
+      const differentDecision = "11111111-1111-4111-8111-111111111111";
+      persistence.decisionId = differentDecision;
+      (persistence.event as Record<string, unknown>).decisionId = differentDecision;
+      (recovery.finalizer as Record<string, unknown>).decisionId = differentDecision;
+    }],
+    ["head revision", (_recovery: Record<string, unknown>, persistence: Record<string, unknown>) => {
+      persistence.expectedHeadRevision = "different-head";
+    }],
+    ["repository", (_recovery: Record<string, unknown>, persistence: Record<string, unknown>) => {
+      (persistence.event as Record<string, unknown>).repositoryId = "different-repository";
+    }],
+    ["change request", (_recovery: Record<string, unknown>, persistence: Record<string, unknown>) => {
+      (persistence.event as Record<string, unknown>).changeRequestId = "different-change-request";
+    }],
+    ["unavailable actor", (recovery: Record<string, unknown>, persistence: Record<string, unknown>) => {
+      recovery.unavailableActorId = "Actor:Different/Unavailable";
+      persistence.unavailableActorId = "Actor:Different/Unavailable";
+      (persistence.event as Record<string, unknown>).unavailableActor = "Actor:Different/Unavailable";
+    }],
+    ["replacement actor", (recovery: Record<string, unknown>, persistence: Record<string, unknown>) => {
+      recovery.replacementActorId = alternateReplacementActor;
+      persistence.replacementActorId = alternateReplacementActor;
+      (persistence.event as Record<string, unknown>).replacementActor = alternateReplacementActor;
+    }],
+  ] as const)("binds persist recovery %s to every immutable intent source field", async (_name, mutate) => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, `availability-intent-bind-${_name.replaceAll(" ", "-")}`);
+      const persistence = serializedPersistence(replacementInput(fixture));
+      const recovery = replacementRecovery(fixture, {
+        phase: "persist_replacement", replacementId: null, persistence,
+      });
+      mutate(recovery, persistence);
+      const lease = await claimRecovery(db, fixture, recovery, `intent-bind-${_name.replaceAll(" ", "-")}`);
+
+      await expect(createWorkspaceJobQueue(db, fixture.scope.workspaceId)
+        .exhaustReviewerAbsenceActivation(lease, "mismatched durable source", now))
+        .resolves.toEqual({ updated: true });
+      await expect(db.selectFrom("reviewer_replacements").select("id").execute()).resolves.toEqual([]);
+      await expect(db.selectFrom("reviewer_mutation_intents").select("id")
+        .where("id", "=", fixture.mutationIntentId).executeTakeFirstOrThrow())
+        .resolves.toEqual({ id: fixture.mutationIntentId });
+    });
+  });
+
+  it("accepts exact permanent-failure persistence for its named durable intent", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "availability-exact-permanent-intent");
+      const persistence = JSON.parse(JSON.stringify(
+        mutationIntentRecoveryInput(fixture, now, "provider mutation permanently failed"),
+      )) as Record<string, unknown>;
+      const recovery = replacementRecovery(fixture, {
+        phase: "persist_replacement",
+        finalizer: null,
+        replacementId: null,
+        outcome: "permanent_failure",
+        replacementActorId: null,
+        persistence,
+      });
+      const lease = await claimRecovery(db, fixture, recovery, "exact-permanent-intent");
+
+      await expect(createWorkspaceJobQueue(db, fixture.scope.workspaceId)
+        .exhaustReviewerAbsenceActivation(lease, "permanent recovery exhausted", now))
+        .resolves.toEqual({ updated: true });
+      await expect(db.selectFrom("reviewer_replacements")
+        .select(["state", "outcome", "mutation_intent_id"]).executeTakeFirstOrThrow())
+        .resolves.toEqual({
+          state: "permanent_failure",
+          outcome: "permanent_failure",
+          mutation_intent_id: fixture.mutationIntentId,
+        });
+    });
+  });
+
   it.each(["run_finalizer", "complete_replacement"] as const)(
     "accepts policy-success-after-intent %s recovery and terminally exposes the pending row",
     async (phase) => {

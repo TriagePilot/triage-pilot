@@ -18,6 +18,99 @@ const unavailableActor = "@user-d82a5f";
 const eligibleActors = [unavailableActor, "@user-c91e46", "@user-f37a82"];
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker reviewer availability runtime crash recovery", () => {
+  it("treats an old claim rejected behind a new claim as obsolete without terminal history", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedActivation(db, "obsolete-behind-new-claim");
+      const remote = new ReviewerRemote();
+      const services = fixture.buildServices(remote);
+      let releaseMutation!: () => void;
+      let mutationReached!: () => void;
+      const release = new Promise<void>((resolve) => { releaseMutation = resolve; });
+      const reached = new Promise<void>((resolve) => { mutationReached = resolve; });
+      const reconcile = services.provider.reconcileReviewRequest;
+      services.provider.reconcileReviewRequest = async (target) => {
+        mutationReached();
+        await release;
+        return await reconcile(target);
+      };
+
+      const oldClaim = processReviewerAbsenceActivationJob(fixture.message, services);
+      await reached;
+      const newLockedAt = new Date(now.getTime() + 1_000);
+      await db.updateTable("jobs").set({
+        status: "running", locked_at: newLockedAt, locked_by: "new-claim-worker", attempt_count: 2,
+      }).where("id", "=", fixture.lease.jobId).execute();
+      releaseMutation();
+
+      await expect(oldClaim).rejects.toThrow(/stale|obsolete|authority|lease/i);
+      expect(remote.deleteCount).toBe(0);
+      expect(remote.postCount).toBe(0);
+      await expect(db.selectFrom("reviewer_replacements").select("id").execute()).resolves.toEqual([]);
+      await expect(db.selectFrom("jobs").select(["status", "locked_by", "locked_at", "attempt_count"])
+        .where("id", "=", fixture.lease.jobId).executeTakeFirstOrThrow()).resolves.toEqual({
+        status: "running", locked_by: "new-claim-worker", locked_at: newLockedAt, attempt_count: 2,
+      });
+    });
+  });
+
+  it.each(["revise", "cancel", "suspend"] as const)(
+    "revalidates live activation authority before provider mutation after %s",
+    async (adminMutation) => {
+      await withPostgresTestDatabase(async (db) => {
+        const fixture = await seedActivation(db, `live-authority-${adminMutation}`);
+        const remote = new ReviewerRemote();
+        const services = fixture.buildServices(remote);
+        let releaseMutation!: () => void;
+        let mutationReached!: () => void;
+        const release = new Promise<void>((resolve) => { releaseMutation = resolve; });
+        const reached = new Promise<void>((resolve) => { mutationReached = resolve; });
+        const reconcile = services.provider.reconcileReviewRequest;
+        services.provider.reconcileReviewRequest = async (target) => {
+          mutationReached();
+          await release;
+          return await reconcile(target);
+        };
+
+        const processing = processReviewerAbsenceActivationJob(fixture.message, services);
+        await reached;
+        await applyAdminMutation(db, fixture, adminMutation);
+        releaseMutation();
+
+        await expect(processing).rejects.toThrow(/stale|obsolete|authority|lease/i);
+        expect(remote.deleteCount).toBe(0);
+        expect(remote.postCount).toBe(0);
+        await expect(db.selectFrom("reviewer_replacements").select("id").execute()).resolves.toEqual([]);
+        await expect(db.selectFrom("reviewer_mutation_intents").select("id").execute())
+          .resolves.toHaveLength(1);
+      });
+    },
+  );
+
+  it("times out hung provider I/O, releases the transaction, and prevents late writes", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedActivation(db, "hung-provider-timeout");
+      const remote = new ReviewerRemote();
+      let releaseHungRequest!: () => void;
+      const hungRequest = new Promise<void>((resolve) => { releaseHungRequest = resolve; });
+      remote.beforeDelete = async () => await hungRequest;
+      const services = fixture.buildServices(remote, { providerMutationTimeoutMs: 50 });
+
+      await expect(processReviewerAbsenceActivationJob(fixture.message, services))
+        .rejects.toThrow(/deadline|timeout|authority|lease/i);
+      expect(remote.deleteCount).toBe(0);
+      expect(remote.postCount).toBe(0);
+      await expect(Promise.race([
+        createWorkspaceJobQueue(db, fixture.message.workspaceId)
+          .exhaustReviewerAbsenceActivation(fixture.lease, "timeout released authority", now),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("database lock was not released")), 1_000)),
+      ])).resolves.toEqual({ updated: true });
+      releaseHungRequest();
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(remote.deleteCount).toBe(0);
+      expect(remote.postCount).toBe(0);
+    });
+  });
+
   it("performs no provider write when exhaustion wins before the mutation boundary", async () => {
     await withPostgresTestDatabase(async (db) => {
       const fixture = await seedActivation(db, "exhaust-before-provider");
@@ -427,12 +520,13 @@ async function seedActivation(
     connectionId: connection.id,
     repositoryRecordId: repository.id,
     lease,
-    buildServices(remote: ReviewerRemote) {
+    buildServices(remote: ReviewerRemote, options: { providerMutationTimeoutMs?: number } = {}) {
       return createWorkerReviewerAvailabilityServiceFactory({
         db,
         github: { appId: "123", privateKey: "test" },
         createRequester: async () => ({ request: remote.request }) as never,
         clock: { now: () => now },
+        ...options,
       })(message, lease);
     },
   };
@@ -505,7 +599,7 @@ class ReviewerRemote {
   deleteCount = 0;
   postCount = 0;
   failAfterNextDelete = false;
-  beforeDelete: (() => Promise<void>) | null = null;
+  beforeDelete: ((signal?: AbortSignal) => Promise<void>) | null = null;
 
   readonly request = vi.fn(async (route: string, parameters: Record<string, unknown>) => {
     const pullNumber = Number(parameters.pull_number);
@@ -522,7 +616,9 @@ class ReviewerRemote {
     }
     if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") return { data: [] };
     if (route === "DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers") {
-      if (this.beforeDelete !== null) await this.beforeDelete();
+      const signal = (parameters.request as { signal?: AbortSignal } | undefined)?.signal;
+      if (this.beforeDelete !== null) await this.beforeDelete(signal);
+      signal?.throwIfAborted();
       this.deleteCount += 1;
       for (const reviewer of parameters.reviewers as string[]) requested.delete(`@${reviewer}`);
       return { data: {} };

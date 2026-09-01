@@ -153,11 +153,16 @@ export class GitHubAdapter {
     return { state, currentHeadRevision, authorActor, requestedActors, reviews };
   }
 
-  async listRequestedReviewers(input: { pullRequest: PullRequestRef }): Promise<string[]> {
+  async listRequestedReviewers(input: {
+    pullRequest: PullRequestRef;
+    signal?: AbortSignal;
+    assertAuthorized?: () => Promise<void>;
+  }): Promise<string[]> {
+    await assertProviderMutationAuthorized(input);
     const reviewers = new Set<string>();
     const response = await this.octokit.request(
       "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
-      toPullParams(input.pullRequest),
+      { ...toPullParams(input.pullRequest), ...providerRequestSignal(input.signal) },
     );
     const users = readRequestedReviewerUsers(response.data);
     for (const user of users) {
@@ -173,28 +178,34 @@ export class GitHubAdapter {
     pullRequest: PullRequestRef;
     unavailableActor: string;
     replacementActor: string;
+    signal?: AbortSignal;
+    assertAuthorized?: () => Promise<void>;
   }): Promise<{ changed: boolean }> {
     const unavailableActor = normalizeGitHubIndividualActor(input.unavailableActor);
     const replacementActor = normalizeGitHubIndividualActor(input.replacementActor);
     if (unavailableActor === replacementActor) {
       throw new GitHubReviewerReplacementInputError("GitHub unavailable and replacement actors must differ");
     }
-    const requestedBeforeRemoval = await this.listRequestedReviewers({ pullRequest: input.pullRequest });
+    const requestedBeforeRemoval = await this.listRequestedReviewers(input);
     let changed = false;
     if (requestedBeforeRemoval.includes(unavailableActor)) {
+      await assertProviderMutationAuthorized(input);
       await this.octokit.request("DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", {
         ...toPullParams(input.pullRequest),
         reviewers: [unavailableActor.slice(1)],
         team_reviewers: [],
+        ...providerRequestSignal(input.signal),
       });
       changed = true;
     }
-    const requestedBeforeAddition = await this.listRequestedReviewers({ pullRequest: input.pullRequest });
+    const requestedBeforeAddition = await this.listRequestedReviewers(input);
     if (!requestedBeforeAddition.includes(replacementActor)) {
+      await assertProviderMutationAuthorized(input);
       await this.octokit.request("POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", {
         ...toPullParams(input.pullRequest),
         reviewers: [replacementActor.slice(1)],
         team_reviewers: [],
+        ...providerRequestSignal(input.signal),
       });
       changed = true;
     }
@@ -467,6 +478,19 @@ export class GitHubAdapter {
       ...check,
     });
   }
+}
+
+async function assertProviderMutationAuthorized(input: {
+  signal?: AbortSignal;
+  assertAuthorized?: () => Promise<void>;
+}): Promise<void> {
+  input.signal?.throwIfAborted();
+  await input.assertAuthorized?.();
+  input.signal?.throwIfAborted();
+}
+
+function providerRequestSignal(signal: AbortSignal | undefined): Record<string, unknown> {
+  return signal === undefined ? {} : { request: { signal } };
 }
 
 export function githubRepositoryUrl(repository: Pick<ContractRepositoryRef, "owner" | "name">): string {

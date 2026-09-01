@@ -68,6 +68,7 @@ interface WorkerServiceFactoryInput {
   createConfigurationSource?: ConfigurationSourceFactory;
   clock?: Clock;
   allowInactiveProviderConnection?: boolean;
+  providerMutationTimeoutMs?: number;
 }
 
 export function createNoopPlatformEventSink(): PlatformEventSink {
@@ -667,7 +668,7 @@ export function createWorkerReviewerAvailabilityServiceFactory(input: WorkerServ
           if (lease === undefined) {
             throw new PermanentJobError("reviewer provider mutation requires a claimed activation lease");
           }
-          return await runClaimedReviewerProviderMutation(input.db, lease, message, async () => {
+          return await runClaimedReviewerProviderMutation(input.db, lease, message, async (authority) => {
             const adapter = await adapterFor(target);
             return await adapter.reconcileReviewerReplacement({
               pullRequest: {
@@ -677,12 +678,16 @@ export function createWorkerReviewerAvailabilityServiceFactory(input: WorkerServ
               },
               unavailableActor: target.unavailableActor,
               replacementActor: target.replacementActor,
+              signal: authority.signal,
+              assertAuthorized: authority.assertActive,
             });
-          });
+          }, input.providerMutationTimeoutMs === undefined
+            ? {}
+            : { timeoutMs: input.providerMutationTimeoutMs });
         },
         classifyError(error) {
           if (error instanceof ReviewerMutationLeaseUnavailableError) {
-            return { kind: "permanent", message: error.message };
+            return { kind: "obsolete_claim", message: error.message };
           }
           return classifyAdapter.classifyReviewerReplacementError(error);
         },

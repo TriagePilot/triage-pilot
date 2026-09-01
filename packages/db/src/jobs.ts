@@ -1,4 +1,4 @@
-import type { Kysely, Transaction } from "kysely";
+import { sql, type Kysely, type Transaction } from "kysely";
 import type { ProviderConnectionId, ProviderKind, WorkspaceId } from "@triagepilot/contracts";
 
 import type { Database, JobRow } from "./kysely.js";
@@ -54,6 +54,11 @@ export type JobTransitionResult = { updated: true } | { updated: false; reason: 
 
 export class ReviewerMutationLeaseUnavailableError extends Error {}
 
+export interface ReviewerMutationAuthority {
+  signal: AbortSignal;
+  assertActive(): Promise<void>;
+}
+
 export interface JobRecovery {
   payload: unknown;
   maxAttempts: number;
@@ -104,9 +109,128 @@ export async function runClaimedReviewerProviderMutation<T>(
     absenceId: string;
     absenceRevision: number;
   },
-  mutation: () => Promise<T>,
+  mutation: (authority: ReviewerMutationAuthority) => Promise<T>,
+  options: { timeoutMs?: number } = {},
 ): Promise<T> {
-  return await withClaimedReviewerMutationLeaseTransaction(db, lease, scope, async () => await mutation());
+  // The bounded transaction serializes lease/admin changes with provider writes. Aborting cannot recall a request
+  // already accepted by the provider, so the immutable intent and idempotent reconciliation remain the replay fence.
+  const timeoutMs = options.timeoutMs ?? 60_000;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("reviewer provider mutation timeout must be a positive integer");
+  }
+  const controller = new AbortController();
+  const deadlineError = new ReviewerMutationLeaseUnavailableError(
+    "reviewer provider mutation authority deadline expired",
+  );
+  let providerError: unknown = noProviderError;
+  const transaction = db.transaction().execute(async (trx) => {
+    await sql`select set_config('lock_timeout', ${`${timeoutMs}ms`}, true)`.execute(trx);
+    await sql`select set_config('idle_in_transaction_session_timeout', ${`${timeoutMs + 1_000}ms`}, true)`.execute(trx);
+    await assertClaimedReviewerMutationAuthority(trx, lease, scope, true, controller.signal);
+    let result: T;
+    try {
+      const providerMutation = mutation({
+        signal: controller.signal,
+        assertActive: async () => {
+          await assertClaimedReviewerMutationAuthority(trx, lease, scope, false, controller.signal);
+        },
+      });
+      void providerMutation.catch(() => undefined);
+      result = await waitForReviewerMutationAuthority(providerMutation, controller.signal);
+    } catch (error) {
+      providerError = error;
+      throw error;
+    }
+    await assertClaimedReviewerMutationAuthority(trx, lease, scope, false, controller.signal);
+    return result;
+  });
+  void transaction.catch(() => undefined);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      controller.abort(deadlineError);
+      reject(deadlineError);
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([transaction, deadline]);
+  } catch (error) {
+    if (error instanceof ReviewerMutationLeaseUnavailableError) throw error;
+    if (providerError !== noProviderError && error === providerError) throw error;
+    throw new ReviewerMutationLeaseUnavailableError(
+      `reviewer provider mutation authority was lost: ${error instanceof Error ? error.message : "unknown database error"}`,
+    );
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    controller.abort(new ReviewerMutationLeaseUnavailableError("reviewer provider mutation authority ended"));
+  }
+}
+
+const noProviderError = Symbol("no-provider-error");
+
+async function waitForReviewerMutationAuthority<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  return await new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    void operation.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+
+async function assertClaimedReviewerMutationAuthority(
+  trx: Transaction<Database>,
+  lease: JobLease,
+  scope: {
+    workspaceId: WorkspaceId;
+    provider: ProviderKind;
+    providerConnectionId: ProviderConnectionId;
+    absenceId: string;
+    absenceRevision: number;
+  },
+  lock: boolean,
+  signal: AbortSignal,
+): Promise<void> {
+  signal.throwIfAborted();
+  let jobQuery = trx.selectFrom("jobs").selectAll()
+    .where("id", "=", lease.jobId).where("workspace_id", "=", lease.workspaceId)
+    .where("provider", "=", lease.provider).where("provider_connection_id", "=", lease.providerConnectionId)
+    .where("status", "=", "running").where("locked_by", "=", lease.lockedBy)
+    .where("locked_at", "=", lease.lockedAt).where("attempt_count", "=", lease.attemptCount);
+  if (lock) jobQuery = jobQuery.forUpdate();
+  const job = await jobQuery.executeTakeFirst();
+  const activation = job === undefined ? null : parseActivationScope(job);
+  if (activation === null || activation.absenceId !== scope.absenceId
+    || activation.absenceRevision !== scope.absenceRevision || scope.workspaceId !== lease.workspaceId
+    || scope.provider !== lease.provider || scope.providerConnectionId !== lease.providerConnectionId) {
+    throw new ReviewerMutationLeaseUnavailableError(
+      "reviewer provider mutation rejected stale or invalid activation lease",
+    );
+  }
+  signal.throwIfAborted();
+
+  let absenceQuery = trx.selectFrom("reviewer_absences").select(["revision", "status"])
+    .where("workspace_id", "=", scope.workspaceId).where("provider", "=", scope.provider)
+    .where("provider_connection_id", "=", scope.providerConnectionId).where("id", "=", scope.absenceId);
+  if (lock) absenceQuery = absenceQuery.forUpdate();
+  const absence = await absenceQuery.executeTakeFirst();
+  if (absence === undefined || absence.revision !== scope.absenceRevision || absence.status !== "scheduled") {
+    throw new ReviewerMutationLeaseUnavailableError(
+      "reviewer provider mutation rejected obsolete absence authority",
+    );
+  }
+  signal.throwIfAborted();
+
+  let connectionQuery = trx.selectFrom("provider_connections").select("status")
+    .where("workspace_id", "=", scope.workspaceId).where("provider", "=", scope.provider)
+    .where("id", "=", scope.providerConnectionId);
+  if (lock) connectionQuery = connectionQuery.forUpdate();
+  const connection = await connectionQuery.executeTakeFirst();
+  if (connection?.status !== "active") {
+    throw new ReviewerMutationLeaseUnavailableError(
+      "reviewer provider mutation rejected inactive provider connection authority",
+    );
+  }
+  signal.throwIfAborted();
 }
 
 async function withClaimedReviewerMutationLeaseTransaction<T>(
@@ -473,7 +597,22 @@ async function recoverySourceMatches(
       .where("absence_id", "=", scope.absenceId)
       .where("absence_revision", "=", scope.absenceRevision)
       .executeTakeFirst();
-    return intent !== undefined && intent.unavailable_actor_id === raw.unavailableActorId;
+    if (intent === undefined || !isRecord(raw.persistence) || !isRecord(raw.persistence.event)) return false;
+    const replacementActorMatches = raw.outcome === "replaced"
+      ? intent.replacement_actor_id === raw.replacementActorId
+        && intent.replacement_actor_id === raw.persistence.replacementActorId
+        && intent.replacement_actor_id === raw.persistence.event.replacementActor
+      : raw.replacementActorId === null
+        && raw.persistence.replacementActorId === null
+        && raw.persistence.event.replacementActor === null;
+    return intent.decision_id === raw.persistence.decisionId
+      && intent.expected_head_revision === raw.persistence.expectedHeadRevision
+      && intent.repository_id === raw.persistence.event.repositoryId
+      && intent.change_request_id === raw.persistence.event.changeRequestId
+      && intent.unavailable_actor_id === raw.unavailableActorId
+      && intent.unavailable_actor_id === raw.persistence.unavailableActorId
+      && intent.unavailable_actor_id === raw.persistence.event.unavailableActor
+      && replacementActorMatches;
   }
   if (!isUuid(raw.replacementId) || !isRecord(raw.finalizer) || !isUuid(raw.finalizer.decisionId)) return false;
   const row = await trx.selectFrom("reviewer_replacements").selectAll()
