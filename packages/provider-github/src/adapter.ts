@@ -76,6 +76,19 @@ export interface PullRequestReview {
   submittedAt: string | null;
 }
 
+export interface GitHubReviewerReplacementState {
+  state: string;
+  currentHeadRevision: string;
+  authorActor: string;
+  requestedActors: string[];
+  reviews: Array<{
+    actor: string;
+    actorType: "human" | "bot";
+    state: string;
+    submittedAt: string | null;
+  }>;
+}
+
 export async function createInstallationRequester(input: {
   appId: string;
   privateKey: string;
@@ -100,6 +113,77 @@ export class GitHubAdapter {
       ref: defaultBranch,
     });
     return readRequiredString(commitResponse.data, "sha", "GitHub default branch revision");
+  }
+
+  async inspectReviewerReplacement(input: {
+    pullRequest: PullRequestRef;
+  }): Promise<GitHubReviewerReplacementState> {
+    const response = await this.octokit.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
+      ...toPullParams(input.pullRequest),
+    });
+    if (!isRecord(response.data) || !isRecord(response.data.head) || !isRecord(response.data.user)) {
+      throw new Error("GitHub pull request replacement state is unavailable");
+    }
+    const state = readRequiredString(response.data, "state", "GitHub pull request state");
+    const currentHeadRevision = readRequiredString(response.data.head, "sha", "GitHub pull request head revision");
+    const authorActor = normalizeGitHubActor(
+      readRequiredString(response.data.user, "login", "GitHub pull request author"),
+    );
+    const requestedActors = await this.listRequestedReviewers(input);
+    const reviews = (await this.listPullRequestReviews(input)).map((review) => ({
+      actor: normalizeGitHubActor(review.userLogin),
+      actorType: review.userType?.toLowerCase() === "bot" ? "bot" as const : "human" as const,
+      state: review.state.toLowerCase(),
+      submittedAt: review.submittedAt,
+    }));
+    return { state, currentHeadRevision, authorActor, requestedActors, reviews };
+  }
+
+  async listRequestedReviewers(input: { pullRequest: PullRequestRef }): Promise<string[]> {
+    const reviewers = new Set<string>();
+    for (let page = 1; ; page += 1) {
+      const response = await this.octokit.request(
+        "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
+        { ...toPullParams(input.pullRequest), page, per_page: PAGE_SIZE },
+      );
+      const users = readRequestedReviewerUsers(response.data);
+      for (const user of users) {
+        if (!isRecord(user) || typeof user.login !== "string") continue;
+        reviewers.add(normalizeGitHubActor(user.login));
+      }
+      if (users.length < PAGE_SIZE) return [...reviewers];
+    }
+  }
+
+  async reconcileReviewerReplacement(input: {
+    pullRequest: PullRequestRef;
+    unavailableActor: string;
+    replacementActor: string;
+  }): Promise<{ changed: boolean }> {
+    const unavailableActor = normalizeGitHubIndividualActor(input.unavailableActor);
+    const replacementActor = normalizeGitHubIndividualActor(input.replacementActor);
+    if (unavailableActor === replacementActor) {
+      throw new Error("GitHub unavailable and replacement actors must differ");
+    }
+    const requested = await this.listRequestedReviewers({ pullRequest: input.pullRequest });
+    let changed = false;
+    if (requested.includes(unavailableActor)) {
+      await this.octokit.request("DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", {
+        ...toPullParams(input.pullRequest),
+        reviewers: [unavailableActor.slice(1)],
+        team_reviewers: [],
+      });
+      changed = true;
+    }
+    if (!requested.includes(replacementActor)) {
+      await this.octokit.request("POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", {
+        ...toPullParams(input.pullRequest),
+        reviewers: [replacementActor.slice(1)],
+        team_reviewers: [],
+      });
+      changed = true;
+    }
+    return { changed };
   }
 
   async upsertRoutingComment(input: { pullRequest: PullRequestRef; decisionId: string; body: string }) {
@@ -484,6 +568,22 @@ function readPullRequestReview(value: unknown): PullRequestReview | undefined {
     commitId: typeof value.commit_id === "string" ? value.commit_id : null,
     submittedAt: typeof value.submitted_at === "string" ? value.submitted_at : null,
   };
+}
+
+function readRequestedReviewerUsers(value: unknown): unknown[] {
+  return isRecord(value) && Array.isArray(value.users) ? value.users : [];
+}
+
+function normalizeGitHubActor(value: string): string {
+  const login = value.trim().replace(/^@/, "").toLowerCase();
+  if (login.length === 0) throw new Error("GitHub actor login is unavailable");
+  return `@${login}`;
+}
+
+function normalizeGitHubIndividualActor(value: string): string {
+  const actor = normalizeGitHubActor(value);
+  if (actor.includes("/")) throw new Error("GitHub reviewer actor must identify an individual user");
+  return actor;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -7,6 +7,7 @@ export {
   type CheckRunRef,
   type PullRequestRef,
   type PullRequestReview,
+  type GitHubReviewerReplacementState,
   type RepositoryRef,
 } from "./adapter.js";
 export {

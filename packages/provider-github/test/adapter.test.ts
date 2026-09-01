@@ -3,6 +3,151 @@ import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import { GitHubAdapter } from "../src/adapter";
 
 describe("GitHubAdapter", () => {
+  it("inspects current replacement state with normalized provider actors", async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: { state: "open", head: { sha: "head-1" }, user: { login: "User-A91F5C" } },
+      })
+      .mockResolvedValueOnce({
+        data: { users: [{ login: " USER-D82A5F " }], teams: [] },
+      })
+      .mockResolvedValueOnce({
+        data: [{
+          user: { login: "User-C91E46", type: "User" },
+          state: "APPROVED",
+          commit_id: "older-head",
+          submitted_at: "2026-08-31T09:00:00.000Z",
+        }],
+      });
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await expect(adapter.inspectReviewerReplacement({
+      pullRequest: { owner: "acme", repo: "api", pullNumber: 7 },
+    })).resolves.toEqual({
+      state: "open",
+      currentHeadRevision: "head-1",
+      authorActor: "@user-a91f5c",
+      requestedActors: ["@user-d82a5f"],
+      reviews: [{
+        actor: "@user-c91e46",
+        actorType: "human",
+        state: "approved",
+        submittedAt: "2026-08-31T09:00:00.000Z",
+      }],
+    });
+
+    expect(request.mock.calls.map(([route]) => route)).toEqual([
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}",
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+    ]);
+  });
+
+  it("performs an idempotent replacement no-op when provider state is already reconciled", async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: { users: [{ login: "user-c91e46" }], teams: [] },
+    });
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await expect(adapter.reconcileReviewerReplacement({
+      pullRequest: { owner: "acme", repo: "api", pullNumber: 7 },
+      unavailableActor: "@user-d82a5f",
+      replacementActor: "@user-c91e46",
+    })).resolves.toEqual({ changed: false });
+
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("normalizes actors at the boundary and removes before requesting the replacement", async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({ data: { users: [{ login: "USER-D82A5F" }], teams: [] } })
+      .mockResolvedValueOnce({ data: {} })
+      .mockResolvedValueOnce({ data: {} });
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await expect(adapter.reconcileReviewerReplacement({
+      pullRequest: { owner: "acme", repo: "api", pullNumber: 7 },
+      unavailableActor: " User-D82A5F ",
+      replacementActor: "@User-C91E46",
+    })).resolves.toEqual({ changed: true });
+
+    expect(request).toHaveBeenNthCalledWith(2,
+      "DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
+      {
+        owner: "acme",
+        repo: "api",
+        pull_number: 7,
+        reviewers: ["user-d82a5f"],
+        team_reviewers: [],
+      },
+    );
+    expect(request).toHaveBeenNthCalledWith(3,
+      "POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
+      {
+        owner: "acme",
+        repo: "api",
+        pull_number: 7,
+        reviewers: ["user-c91e46"],
+        team_reviewers: [],
+      },
+    );
+  });
+
+  it("completes a partial retry after removal without repeating that removal", async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({ data: { users: [], teams: [] } })
+      .mockResolvedValueOnce({ data: {} });
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await expect(adapter.reconcileReviewerReplacement({
+      pullRequest: { owner: "acme", repo: "api", pullNumber: 7 },
+      unavailableActor: "@user-d82a5f",
+      replacementActor: "@user-c91e46",
+    })).resolves.toEqual({ changed: true });
+
+    expect(request.mock.calls.map(([route]) => route)).toEqual([
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
+      "POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
+    ]);
+  });
+
+  it.each([
+    ["inspection", "GET /repos/{owner}/{repo}/pulls/{pull_number}", "inspection failed"],
+    ["removal", "DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", "removal failed"],
+    ["request", "POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", "request failed"],
+  ] as const)("propagates a provider %s error", async (operation, failingRoute, message) => {
+    const request = vi.fn(async (route: string) => {
+      if (route === failingRoute) throw new Error(message);
+      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
+        return { data: { state: "open", head: { sha: "head-1" }, user: { login: "user-a91f5c" } } };
+      }
+      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers") {
+        return { data: { users: [{ login: "user-d82a5f" }], teams: [] } };
+      }
+      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") return { data: [] };
+      return { data: {} };
+    });
+    const adapter = new GitHubAdapter({ request } as never);
+
+    const action = operation === "inspection"
+      ? adapter.inspectReviewerReplacement({ pullRequest: { owner: "acme", repo: "api", pullNumber: 7 } })
+      : adapter.reconcileReviewerReplacement({
+        pullRequest: { owner: "acme", repo: "api", pullNumber: 7 },
+        unavailableActor: "@user-d82a5f",
+        replacementActor: "@user-c91e46",
+      });
+
+    await expect(action).rejects.toThrow(message);
+    if (operation === "removal") {
+      expect(request.mock.calls.map(([route]) => route)).not.toContain(
+        "POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
+      );
+    }
+  });
+
   it("upserts the routing comment using a stable marker", async () => {
     const request = vi.fn().mockResolvedValueOnce({ data: [] }).mockResolvedValueOnce({ data: { id: 55 } });
     const adapter = new GitHubAdapter({ request } as never);
