@@ -40,6 +40,22 @@ const policyMessage = {
 };
 
 describe("worker routing GitHub reads", () => {
+  it("exposes a provider-neutral availability port without provider reads", async () => {
+    const request = vi.fn(async () => {
+      throw new Error("availability lookup must not use the provider");
+    });
+    const services = buildServices(message, request);
+    const at = new Date("2026-10-01T08:00:00.000Z");
+
+    await expect(services.availability.findActive({
+      workspaceId: "ws_local",
+      providerConnectionId: "99",
+      actors: [],
+      at,
+    })).resolves.toEqual([]);
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it("does not expose a compatibility path that persists a decision without its event", () => {
     const services = buildServices(message, configRequester());
 

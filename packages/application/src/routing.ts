@@ -14,11 +14,13 @@ import {
   type WorkspaceId,
 } from "@triagepilot/contracts";
 import {
+  availableActorsAt,
   decideRouting,
   isBranchExcluded,
   matchOwnership,
   scorePullRequestRisk,
   type ChangedFileMetadata,
+  type ReviewerAbsenceWindow,
   type RiskScoringResult,
 } from "@triagepilot/core";
 
@@ -87,6 +89,14 @@ export interface RoutingApplicationPorts {
     }): Promise<void>;
   };
   reviewerLoad(input: { workspaceId: WorkspaceId; actors: ExternalActorId[] }): Promise<Record<string, number>>;
+  availability: {
+    findActive(input: {
+      workspaceId: WorkspaceId;
+      providerConnectionId: ProviderConnectionId;
+      actors: ExternalActorId[];
+      at: Date;
+    }): Promise<ReviewerAbsenceWindow[]>;
+  };
   decisions: {
     persistWithEvent(input: DecisionInput, event: DecisionEventFactory): Promise<PersistedDecision>;
     markActionSucceeded(decisionId: string, at: Date): Promise<void>;
@@ -156,9 +166,38 @@ export async function processChangeRequest(
     rules: config.ownership.rules,
     fallbackReviewers: config.ownership.fallbackReviewers,
   });
+  const availabilityEvaluatedAt = ports.clock.now();
+  const availabilityActors = availableActorsAt({
+    actors: [...ownership.preferredReviewers, ...ownership.eligibleReviewers],
+    absences: [],
+    now: availabilityEvaluatedAt,
+  });
+  const absences = await ports.availability.findActive({
+    workspaceId: job.workspaceId,
+    providerConnectionId: job.providerConnectionId,
+    actors: availabilityActors,
+    at: availabilityEvaluatedAt,
+  });
+  const canonicalEligibleReviewers = availableActorsAt({
+    actors: ownership.eligibleReviewers,
+    absences: [],
+    now: availabilityEvaluatedAt,
+  });
+  const availableEligibleReviewers = availableActorsAt({
+    actors: ownership.eligibleReviewers,
+    absences,
+    now: availabilityEvaluatedAt,
+  });
+  const availablePreferredReviewers = availableActorsAt({
+    actors: ownership.preferredReviewers,
+    absences,
+    now: availabilityEvaluatedAt,
+  });
+  const availableEligibleSet = new Set(availableEligibleReviewers);
+  const excludedReviewers = canonicalEligibleReviewers.filter((actor) => !availableEligibleSet.has(actor));
   const load = await ports.reviewerLoad({
     workspaceId: job.workspaceId,
-    actors: ownership.eligibleReviewers,
+    actors: availableEligibleReviewers,
   });
   const risk = scorePullRequestRisk({
     files: changedFiles,
@@ -173,8 +212,8 @@ export async function processChangeRequest(
   const routing = decideRouting({
     risk,
     author: metadata.author,
-    preferredReviewers: ownership.preferredReviewers,
-    eligibleReviewers: ownership.eligibleReviewers,
+    preferredReviewers: availablePreferredReviewers,
+    eligibleReviewers: availableEligibleReviewers,
     existingApprovedReviewers,
     load,
     highRiskReviewers: config.routing.highRiskReviewers,
@@ -189,7 +228,16 @@ export async function processChangeRequest(
     action: routing.action,
     actionStatus: initialActionStatus,
     riskScore: risk.score,
-    details: { changeRequestNumber: job.changeRequest.number, risk, ownership, routing },
+    details: {
+      changeRequestNumber: job.changeRequest.number,
+      risk,
+      ownership,
+      availability: {
+        evaluatedAt: availabilityEvaluatedAt.toISOString(),
+        excludedReviewers,
+      },
+      routing,
+    },
     ...persistenceProvenance(provenance, []),
   };
   if (routing.selectedReviewers.length > 0) decision.selectedActors = routing.selectedReviewers;

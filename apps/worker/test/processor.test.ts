@@ -77,6 +77,7 @@ describe("processRoutingJob", () => {
         applyActions: vi.fn(async () => {}),
       },
       reviewerLoad: vi.fn(async () => ({})),
+      availability: { findActive: vi.fn(async () => []) },
       decisions: {
         persistWithEvent,
         markActionSucceeded: vi.fn(async () => {}),

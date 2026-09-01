@@ -15,6 +15,7 @@ import {
   type ScoreComponent,
 } from "@triagepilot/contracts";
 import {
+  createWorkspaceReviewerAvailability,
   createWorkspaceJobQueue,
   findLatestHumanReviewPolicyDecision,
   markActionFailed as persistActionFailed,
@@ -81,6 +82,7 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
     let pullRequestPromise: Promise<unknown> | null = null;
     let persistedDecisionId: string | null = null;
     const clock = input.clock ?? { now: () => new Date() };
+    const availability = createWorkspaceReviewerAvailability(input.db, message.workspaceId);
 
     async function requester(): Promise<Requester> {
       await repositoryId();
@@ -279,6 +281,20 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
 
       async reviewerLoad(reviewersInput) {
         return Object.fromEntries(reviewersInput.actors.map((actor) => [actor, 0]));
+      },
+
+      availability: {
+        async findActive(availabilityInput) {
+          if (
+            availabilityInput.workspaceId !== message.workspaceId
+            || availabilityInput.providerConnectionId !== message.providerConnectionId
+          ) throw new Error("availability lookup scope does not match routing job");
+          return await availability.findActiveAbsences({
+            providerConnectionId: availabilityInput.providerConnectionId,
+            actors: availabilityInput.actors,
+            at: availabilityInput.at,
+          });
+        },
       },
 
       decisions: {

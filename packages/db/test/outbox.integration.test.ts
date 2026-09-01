@@ -357,6 +357,53 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
     });
   });
 
+  it("rejects a corrupt singleton routing event without staging a second event", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const repositoryId = await seedRepository(db, workspaceId, "101");
+      const persisted = await persistDecisionWithEvent(db, workspaceId, {
+        decision: decisionInput(repositoryId, "delivery-corrupt-singleton"),
+        event: ({ decisionId, occurredAt }) => decisionEvent({
+          workspaceId,
+          decisionId,
+          repositoryId: "101",
+          deliveryId: "delivery-corrupt-singleton",
+          occurredAt: occurredAt.toISOString(),
+        }),
+      });
+      const stored = await db.selectFrom("decision_outbox")
+        .select("payload")
+        .where("decision_id", "=", persisted.decisionId)
+        .executeTakeFirstOrThrow();
+      const corruptEventId = `decision:${persisted.decisionId}:noncanonical:v1`;
+      await db.updateTable("decision_outbox")
+        .set({
+          event_id: corruptEventId,
+          payload: {
+            ...(stored.payload as DecisionEventV1),
+            eventId: corruptEventId,
+          },
+        })
+        .where("decision_id", "=", persisted.decisionId)
+        .executeTakeFirstOrThrow();
+
+      await expect(persistDecisionWithEvent(db, workspaceId, {
+        decision: decisionInput(repositoryId, "delivery-corrupt-singleton"),
+        event: ({ decisionId, occurredAt }) => decisionEvent({
+          workspaceId,
+          decisionId,
+          repositoryId: "101",
+          deliveryId: "delivery-corrupt-singleton",
+          occurredAt: occurredAt.toISOString(),
+        }),
+      })).rejects.toThrow("persisted routing event does not match callback event");
+      await expect(db.selectFrom("decision_outbox")
+        .select("event_id")
+        .where("decision_id", "=", persisted.decisionId)
+        .execute()).resolves.toEqual([{ event_id: corruptEventId }]);
+    });
+  });
+
   it("rejects ambiguous routing events already bound to the same decision source", async () => {
     await withPostgresTestDatabase(async (db) => {
       const workspaceId = await ensureLocalWorkspace(db);

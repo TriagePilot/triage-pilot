@@ -129,18 +129,21 @@ export async function persistDecisionWithEvent(
       .where("routing_decisions.id", "=", persisted.decisionId)
       .forUpdate("routing_decisions")
       .executeTakeFirstOrThrow();
-    const occurredAt = await resolveDecisionEventOccurredAt(trx, effective);
-    const event = input.event({ ...persisted, occurredAt });
-    assertDecisionEventMatches(effective, event, occurredAt);
+    const resolvedEvent = await resolveDecisionEvent(trx, effective);
+    const event = input.event({ ...persisted, occurredAt: resolvedEvent.occurredAt });
+    assertDecisionEventMatches(effective, event, resolvedEvent.occurredAt);
+    if (resolvedEvent.existingEvent !== null && !isDeepStrictEqual(event, resolvedEvent.existingEvent)) {
+      throw new DecisionValidationError("persisted routing event does not match callback event");
+    }
     await stagePlatformEvent(trx, workspaceId, persisted.decisionId, event);
     return persisted;
   });
 }
 
-async function resolveDecisionEventOccurredAt(
+async function resolveDecisionEvent(
   db: Transaction<Database>,
   decision: EffectiveDecisionEventSource,
-): Promise<Date> {
+): Promise<{ occurredAt: Date; existingEvent: DecisionEventV1 | null }> {
   const existing = await db
     .selectFrom("decision_outbox")
     .select([
@@ -156,7 +159,7 @@ async function resolveDecisionEventOccurredAt(
     .where("decision_id", "=", decision.id)
     .forUpdate()
     .execute();
-  if (existing.length === 0) return decision.created_at;
+  if (existing.length === 0) return { occurredAt: decision.created_at, existingEvent: null };
   if (existing.length !== 1) {
     throw new DecisionValidationError("ambiguous persisted routing events for decision source");
   }
@@ -177,8 +180,9 @@ async function resolveDecisionEventOccurredAt(
   ) {
     throw new DecisionValidationError("persisted routing event does not match decision source");
   }
-  assertDecisionEventMatches(decision, payload as DecisionEventV1, stored.occurred_at);
-  return stored.occurred_at;
+  const existingEvent = payload as DecisionEventV1;
+  assertDecisionEventMatches(decision, existingEvent, stored.occurred_at);
+  return { occurredAt: stored.occurred_at, existingEvent };
 }
 
 async function persistDecisionRecord(

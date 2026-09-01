@@ -75,6 +75,9 @@ function buildPorts(configuration = effectiveConfiguration("version: 1\nmode: sh
     reviewerLoad: vi.fn<RoutingApplicationPorts["reviewerLoad"]>(
       async ({ actors }) => Object.fromEntries(actors.map((actor) => [actor, 0])),
     ),
+    availability: {
+      findActive: vi.fn(async () => []),
+    },
     decisions: {
       persistWithEvent: vi.fn(async (input: DecisionInput, event) => {
         const persisted = {
@@ -331,6 +334,61 @@ ownership:
         details: expect.objectContaining({
           ownership: expect.objectContaining({ preferredReviewers: ["@user-2e7d4b"] }),
           routing: expect.objectContaining({ requestedReviewerCount: 1, reviewerShortfall: 0 }),
+        }),
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it("filters both routing tiers at one captured instant before loading available actors", async () => {
+    const ports = buildPorts(effectiveConfiguration(`
+version: 1
+mode: shadow
+risk:
+  paths:
+    - pattern: README.md
+      weight: 30
+      tag: docs
+ownership:
+  fallback_reviewers: ["@USER-Fallback"]
+  rules:
+    - paths: [README.md]
+      reviewers: ["@User-Preferred"]
+`));
+    const evaluatedAt = new Date("2026-10-01T08:00:00.000Z");
+    vi.mocked(ports.clock.now).mockReturnValue(evaluatedAt);
+    vi.mocked(ports.availability.findActive).mockResolvedValueOnce([{
+      externalActorId: "user-preferred",
+      startAt: new Date("2026-10-01T07:00:00.000Z"),
+      endAt: new Date("2026-10-01T09:00:00.000Z"),
+    }]);
+
+    await processChangeRequest(job, ports);
+
+    expect(ports.clock.now).toHaveBeenCalledOnce();
+    expect(ports.availability.findActive).toHaveBeenCalledOnce();
+    expect(ports.availability.findActive).toHaveBeenCalledWith({
+      workspaceId: "ws-a",
+      providerConnectionId: "connection-a",
+      actors: ["@user-preferred", "@user-fallback"],
+      at: evaluatedAt,
+    });
+    expect(ports.reviewerLoad).toHaveBeenCalledWith({
+      workspaceId: "ws-a",
+      actors: ["@user-fallback"],
+    });
+    expect(ports.decisions.persistWithEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selectedActors: ["@user-fallback"],
+        details: expect.objectContaining({
+          ownership: expect.objectContaining({
+            preferredReviewers: ["@User-Preferred"],
+            eligibleReviewers: ["@User-Preferred", "@USER-Fallback"],
+          }),
+          availability: {
+            evaluatedAt: "2026-10-01T08:00:00.000Z",
+            excludedReviewers: ["@user-preferred"],
+          },
         }),
       }),
       expect.any(Function),

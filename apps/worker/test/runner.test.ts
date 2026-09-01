@@ -408,6 +408,7 @@ describe("runWorkerOnce", () => {
         }),
       },
       reviewerLoad: vi.fn(async () => ({})),
+      availability: { findActive: vi.fn(async () => []) },
       decisions: {
         persistWithEvent: vi.fn(async (_input, event) => {
           const persisted = {

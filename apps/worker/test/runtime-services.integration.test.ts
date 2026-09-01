@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { withPostgresTestDatabase } from "../../../packages/db/test/postgres";
-import { ensureLocalWorkspace } from "@triagepilot/db";
+import { createWorkspaceReviewerAvailability, ensureLocalWorkspace } from "@triagepilot/db";
 import {
   createWorkerHumanReviewPolicyServiceFactory,
   createWorkerRoutingServiceFactory,
@@ -26,6 +26,48 @@ const message: RoutingJobMessage = {
 };
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime services", () => {
+  it("wires routing availability to the workspace and provider connection repository", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const connection = await db.insertInto("provider_connections").values({
+        workspace_id: workspaceId,
+        provider: "github",
+        external_connection_id: "99",
+        workspace_login: "acme",
+        account_type: "Organization",
+        status: "active",
+        permissions: {},
+      }).returning("id").executeTakeFirstOrThrow();
+      const at = new Date("2026-10-01T08:00:00.000Z");
+      await createWorkspaceReviewerAvailability(db, workspaceId).scheduleAbsence({
+        provider: "github",
+        providerConnectionId: connection.id,
+        externalActorId: "Actor:Preferred/7",
+        startAt: new Date("2026-10-01T07:00:00.000Z"),
+        endAt: new Date("2026-10-01T09:00:00.000Z"),
+        now: new Date("2026-09-30T12:00:00.000Z"),
+      });
+      const services = createWorkerRoutingServiceFactory({
+        db,
+        github: {
+          appId: "123",
+          privateKey: "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----",
+        },
+      })({ ...message, workspaceId, providerConnectionId: connection.id });
+
+      await expect(services.availability.findActive({
+        workspaceId,
+        providerConnectionId: connection.id,
+        actors: ["Actor:Preferred/7", "Actor:Fallback/8"],
+        at,
+      })).resolves.toEqual([{
+        externalActorId: "Actor:Preferred/7",
+        startAt: new Date("2026-10-01T07:00:00.000Z"),
+        endAt: new Date("2026-10-01T09:00:00.000Z"),
+      }]);
+    });
+  });
+
   it("atomically persists invalid configuration identity through application processing and exact retry", async () => {
     await withPostgresTestDatabase(async (db) => {
       const workspaceId = await ensureLocalWorkspace(db);
