@@ -377,6 +377,9 @@ ownership:
       workspaceId: "ws-a",
       actors: ["@user-fallback"],
     });
+    const availabilityCallOrder = vi.mocked(ports.availability.findActive).mock.invocationCallOrder[0] as number;
+    const reviewerLoadCallOrder = vi.mocked(ports.reviewerLoad).mock.invocationCallOrder[0] as number;
+    expect(availabilityCallOrder).toBeLessThan(reviewerLoadCallOrder);
     expect(ports.decisions.persistWithEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         selectedActors: ["@user-fallback"],

@@ -63,3 +63,32 @@ The worker binds `createWorkspaceReviewerAvailability` to the routing job worksp
 ## Concerns
 
 No Task 7 blocker remains. The only observed concern is the pre-existing public-boundary script finding internal Task 6 report vocabulary described above.
+
+## Fix round 1: enforce routing order and runtime scope guards
+
+The two Important review gaps were closed with tests only; the assertions passed against the existing production implementation, so no production change was required.
+
+The application regression `filters both routing tiers at one captured instant before loading available actors` now compares `availability.findActive` and `reviewerLoad` through Vitest `invocationCallOrder`. It retains the assertions for exactly one Clock call, exactly one availability call, normalized union arguments, the captured instant, filtered load actors, and immutable availability details.
+
+Worker runtime coverage adds two independent regressions:
+
+- `rejects a wrong-workspace availability lookup before repository or provider access`
+- `rejects a wrong-provider-connection availability lookup before repository or provider access`
+
+Each uses a non-empty actor list, a `selectFrom` spy for repository database access, and a provider-request spy. Each expects the literal `availability lookup scope does not match routing job` error and zero calls to both spies. Removing either corresponding guard makes its test leave the guarded path and fail, while the existing real-PostgreSQL matching-scope success test remains green.
+
+Focused new-assertion command:
+
+```text
+pnpm vitest run packages/application/test/routing.test.ts apps/worker/test/runtime-services.test.ts -t 'filters both routing tiers|wrong-workspace availability|wrong-provider-connection availability'
+```
+
+Result: 2 files passed; 3 tests passed and 40 unrelated tests skipped.
+
+Full named routing/runtime command used the disposable PostgreSQL harness:
+
+```text
+TEST_DATABASE_URL=<local disposable-test server> pnpm vitest run packages/application/test/routing.test.ts apps/worker/test/runtime-services.test.ts apps/worker/test/runtime-services.integration.test.ts
+```
+
+Result: 3 files and 47 tests passed, including all 4 real-DB runtime integration tests. Application and worker TypeScript checks passed, `git diff --check` passed, and post-run inspection found zero `triagepilot_test_%` databases. Root integration was not rerun because neither production nor integration-test code changed in this test-only round.

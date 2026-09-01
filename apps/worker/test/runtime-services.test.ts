@@ -56,6 +56,42 @@ describe("worker routing GitHub reads", () => {
     expect(request).not.toHaveBeenCalled();
   });
 
+  it("rejects a wrong-workspace availability lookup before repository or provider access", async () => {
+    const request = vi.fn(async () => {
+      throw new Error("scope rejection must not use the provider");
+    });
+    const database = knownRepositoryDatabase();
+    const selectFrom = vi.spyOn(database, "selectFrom");
+    const services = buildServices(message, request, database);
+
+    await expect(services.availability.findActive({
+      workspaceId: "ws-other",
+      providerConnectionId: "99",
+      actors: ["Actor:Preferred/7"],
+      at: new Date("2026-10-01T08:00:00.000Z"),
+    })).rejects.toEqual(new Error("availability lookup scope does not match routing job"));
+    expect(selectFrom).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("rejects a wrong-provider-connection availability lookup before repository or provider access", async () => {
+    const request = vi.fn(async () => {
+      throw new Error("scope rejection must not use the provider");
+    });
+    const database = knownRepositoryDatabase();
+    const selectFrom = vi.spyOn(database, "selectFrom");
+    const services = buildServices(message, request, database);
+
+    await expect(services.availability.findActive({
+      workspaceId: "ws_local",
+      providerConnectionId: "connection-other",
+      actors: ["Actor:Preferred/7"],
+      at: new Date("2026-10-01T08:00:00.000Z"),
+    })).rejects.toEqual(new Error("availability lookup scope does not match routing job"));
+    expect(selectFrom).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it("does not expose a compatibility path that persists a decision without its event", () => {
     const services = buildServices(message, configRequester());
 
