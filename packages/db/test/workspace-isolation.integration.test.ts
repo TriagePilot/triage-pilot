@@ -577,6 +577,7 @@ function decision(repositoryId: string, deliveryId: string, routingKey: string) 
   return {
     repositoryId,
     deliveryId,
+    changeRequestId: `change:${deliveryId}`,
     routingKey,
     pullNumber: 7,
     headSha: "head-1",

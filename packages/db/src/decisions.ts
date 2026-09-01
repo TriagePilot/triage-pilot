@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { sql, type Kysely, type Transaction } from "kysely";
 import {
   legacyRoutingKey,
@@ -43,6 +44,8 @@ export interface PersistedDecision {
   actionError: string | null;
   actionAppliedAt: Date | null;
 }
+
+export class DecisionValidationError extends Error {}
 
 export interface HumanReviewPolicyDecision {
   decisionId: string;
@@ -99,7 +102,31 @@ export async function persistDecisionWithEvent(
 ): Promise<PersistedDecision> {
   return await db.transaction().execute(async (trx) => {
     const persisted = await persistDecisionRecord(trx, workspaceId, input.decision);
-    await stagePlatformEvent(trx, workspaceId, persisted.decisionId, input.event(persisted));
+    const effective = await trx
+      .selectFrom("routing_decisions")
+      .innerJoin("repositories", (join) => join
+        .onRef("repositories.workspace_id", "=", "routing_decisions.workspace_id")
+        .onRef("repositories.id", "=", "routing_decisions.repository_id"))
+      .select([
+        "routing_decisions.id",
+        "routing_decisions.workspace_id",
+        "routing_decisions.change_request_id",
+        "routing_decisions.routing_key",
+        "routing_decisions.mode",
+        "routing_decisions.action",
+        "routing_decisions.risk_score",
+        "routing_decisions.selected_reviewers",
+        "routing_decisions.effective_config_hash",
+        "repositories.provider",
+        "repositories.external_repository_id",
+      ])
+      .where("routing_decisions.workspace_id", "=", workspaceId)
+      .where("routing_decisions.id", "=", persisted.decisionId)
+      .forUpdate("routing_decisions")
+      .executeTakeFirstOrThrow();
+    const event = input.event(persisted);
+    assertDecisionEventMatches(effective, event);
+    await stagePlatformEvent(trx, workspaceId, persisted.decisionId, event);
     return persisted;
   });
 }
@@ -109,6 +136,7 @@ async function persistDecisionRecord(
   workspaceId: WorkspaceId,
   input: DecisionInput,
 ): Promise<PersistedDecision> {
+  validateChangeRequestId(input.changeRequestId);
   const selectedReviewers = [...new Set(input.selectedReviewers ?? [])].slice(0, 2);
   const selectedReviewersJson = JSON.stringify(selectedReviewers);
   const routingKey = input.routingKey ?? legacyRoutingKey(input.deliveryId);
@@ -183,6 +211,47 @@ async function persistDecisionRecord(
     actionError: decision.action_error,
     actionAppliedAt: decision.action_applied_at,
   };
+}
+
+function validateChangeRequestId(value: unknown): asserts value is string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new DecisionValidationError("changeRequestId must be a non-empty provider identifier");
+  }
+}
+
+function assertDecisionEventMatches(
+  decision: {
+    id: string;
+    workspace_id: string;
+    change_request_id: string | null;
+    routing_key: string;
+    mode: RepositoryMode;
+    action: string;
+    risk_score: number;
+    selected_reviewers: unknown;
+    effective_config_hash: string;
+    provider: ProviderKind;
+    external_repository_id: string;
+  },
+  event: DecisionEventV1,
+): void {
+  const selectedActors = parseStrictActorList(decision.selected_reviewers);
+  if (
+    event.schemaVersion !== 1
+    || event.eventType !== "routing_decision"
+    || event.decisionId !== decision.id
+    || event.workspaceId !== decision.workspace_id
+    || event.provider !== decision.provider
+    || event.repositoryId !== decision.external_repository_id
+    || event.changeRequestId !== decision.change_request_id
+    || event.routingKey !== decision.routing_key
+    || event.mode !== decision.mode
+    || event.action !== decision.action
+    || event.riskScore !== decision.risk_score
+    || selectedActors === null
+    || !isDeepStrictEqual(event.selectedActors, selectedActors)
+    || event.effectiveConfigurationHash !== decision.effective_config_hash
+  ) throw new DecisionValidationError("routing decision event does not match persisted decision");
 }
 
 export async function recordPolicyCheck(

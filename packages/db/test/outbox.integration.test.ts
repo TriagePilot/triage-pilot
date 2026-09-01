@@ -12,6 +12,8 @@ import {
   claimPlatformEvents,
   createPlatformOutboxRepository,
   ensureLocalWorkspace,
+  markActionSucceeded,
+  persistDecision,
   persistDecisionWithEvent,
   publishPlatformOutbox,
   stagePlatformEvent,
@@ -19,6 +21,26 @@ import {
 import { withPostgresTestDatabase } from "./postgres";
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => {
+  it("rejects missing or blank change request identities without writing a decision or event", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const repositoryId = await seedRepository(db, workspaceId, "101");
+      const { changeRequestId: _omitted, ...missingChangeRequestId } = decisionInput(repositoryId, "delivery-missing");
+
+      await expect(persistDecisionWithEvent(db, workspaceId, {
+        decision: missingChangeRequestId as unknown as ReturnType<typeof decisionInput>,
+        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+      })).rejects.toThrow("changeRequestId must be a non-empty provider identifier");
+      await expect(persistDecision(db, workspaceId, {
+        ...decisionInput(repositoryId, "delivery-blank"),
+        changeRequestId: "  ",
+      })).rejects.toThrow("changeRequestId must be a non-empty provider identifier");
+
+      await expect(db.selectFrom("routing_decisions").select("id").execute()).resolves.toEqual([]);
+      await expect(db.selectFrom("decision_outbox").select("id").execute()).resolves.toEqual([]);
+    });
+  });
+
   it("persists the decision and versioned event in one transaction", async () => {
     await withPostgresTestDatabase(async (db) => {
       const workspaceId = await ensureLocalWorkspace(db);
@@ -138,7 +160,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
       });
       const secondDecision = await persistDecisionWithEvent(db, workspaceId, {
         decision: decisionInput(repositoryId, "delivery-2"),
-        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101", deliveryId: "delivery-2" }),
       });
       const firstSource = await seedReviewerReplacement(db, workspaceId, firstDecision.decisionId, "first");
       const secondSource = await seedReviewerReplacement(db, workspaceId, secondDecision.decisionId, "second");
@@ -206,7 +228,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
     });
   });
 
-  it("rolls back the decision when event staging fails", async () => {
+  it("rolls back the decision when event identity validation fails", async () => {
     await withPostgresTestDatabase(async (db) => {
       const workspaceId = await ensureLocalWorkspace(db);
       const otherWorkspaceId = await seedWorkspace(db, "workspace-b");
@@ -217,9 +239,64 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
           decision: decisionInput(repositoryId, "delivery-1"),
           event: ({ decisionId }) => decisionEvent({ workspaceId: otherWorkspaceId, decisionId, repositoryId: "101" }),
         }),
-      ).rejects.toThrow("platform event workspace does not match persistence scope");
+      ).rejects.toThrow("routing decision event does not match persisted decision");
       await expect(db.selectFrom("routing_decisions").select("id").execute()).resolves.toHaveLength(0);
       await expect(db.selectFrom("decision_outbox").select("id").execute()).resolves.toHaveLength(0);
+    });
+  });
+
+  it.each([
+    ["repository", { repositoryId: "forged-repository" }],
+    ["change request", { changeRequestId: "forged-change-request" }],
+  ] as const)("rejects a %s identity mismatch between the decision and its event", async (_name, mismatch) => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const repositoryId = await seedRepository(db, workspaceId, "101");
+
+      await expect(persistDecisionWithEvent(db, workspaceId, {
+        decision: decisionInput(repositoryId, "delivery-1"),
+        event: ({ decisionId }) => ({
+          ...decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+          ...mismatch,
+        }),
+      })).rejects.toThrow("routing decision event does not match persisted decision");
+      await expect(db.selectFrom("routing_decisions").select("id").execute()).resolves.toEqual([]);
+      await expect(db.selectFrom("decision_outbox").select("id").execute()).resolves.toEqual([]);
+    });
+  });
+
+  it("validates a terminal retry event against the preserved persisted decision identity", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const repositoryId = await seedRepository(db, workspaceId, "101");
+      const first = await persistDecisionWithEvent(db, workspaceId, {
+        decision: decisionInput(repositoryId, "delivery-1"),
+        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+      });
+      await markActionSucceeded(db, workspaceId, first.decisionId, new Date("2026-08-26T10:01:00.000Z"));
+      const changedInput = {
+        ...decisionInput(repositoryId, "delivery-1"),
+        changeRequestId: "incoming-change-request",
+        riskScore: 55,
+      };
+
+      await expect(persistDecisionWithEvent(db, workspaceId, {
+        decision: changedInput,
+        event: ({ decisionId }) => ({
+          ...decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+          changeRequestId: changedInput.changeRequestId,
+          riskScore: changedInput.riskScore,
+        }),
+      })).rejects.toThrow("routing decision event does not match persisted decision");
+      await expect(persistDecisionWithEvent(db, workspaceId, {
+        decision: changedInput,
+        event: ({ decisionId }) => decisionEvent({ workspaceId, decisionId, repositoryId: "101" }),
+      })).resolves.toEqual(expect.objectContaining({ decisionId: first.decisionId, actionStatus: "succeeded" }));
+      await expect(db.selectFrom("routing_decisions")
+        .select(["change_request_id", "risk_score"])
+        .where("id", "=", first.decisionId)
+        .executeTakeFirstOrThrow()).resolves.toEqual({ change_request_id: "cr-7", risk_score: 5 });
+      await expect(db.selectFrom("decision_outbox").select("id").execute()).resolves.toHaveLength(1);
     });
   });
 
@@ -279,7 +356,12 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
       });
       await persistDecisionWithEvent(db, secondWorkspaceId, {
         decision: decisionInput(secondRepositoryId, "delivery-2"),
-        event: ({ decisionId }) => decisionEvent({ workspaceId: secondWorkspaceId, decisionId, repositoryId: "202" }),
+        event: ({ decisionId }) => decisionEvent({
+          workspaceId: secondWorkspaceId,
+          decisionId,
+          repositoryId: "202",
+          deliveryId: "delivery-2",
+        }),
       });
 
       await expect(
@@ -433,6 +515,7 @@ function decisionInput(repositoryId: string, deliveryId: string) {
   return {
     repositoryId,
     deliveryId,
+    changeRequestId: "cr-7",
     routingKey: `routing:${deliveryId}`,
     pullNumber: 7,
     headSha: "head-1",
@@ -451,6 +534,7 @@ function decisionEvent(input: {
   workspaceId: WorkspaceId;
   decisionId: string;
   repositoryId: string;
+  deliveryId?: string;
   riskScore?: number;
 }): DecisionEventV1 {
   return {
@@ -463,7 +547,7 @@ function decisionEvent(input: {
     decisionId: input.decisionId,
     repositoryId: input.repositoryId,
     changeRequestId: "cr-7",
-    routingKey: "routing:delivery-1",
+    routingKey: `routing:${input.deliveryId ?? "delivery-1"}`,
     mode: "shadow",
     action: "policy_approval",
     riskScore: input.riskScore ?? 5,

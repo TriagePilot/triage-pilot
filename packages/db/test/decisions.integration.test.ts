@@ -70,6 +70,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       const first = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
+        changeRequestId: "change:7/terminal",
         pullNumber: 7,
         headSha: "head-1",
         mode: "enforce",
@@ -85,6 +86,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       const retried = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
+        changeRequestId: "change:7/terminal",
         pullNumber: 7,
         headSha: "head-1",
         mode: "enforce",
@@ -138,6 +140,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       const first = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
+        changeRequestId: "change:7/retry",
         pullNumber: 7,
         headSha: "head-1",
         mode: "enforce",
@@ -153,6 +156,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       const retried = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
+        changeRequestId: "change:7/retry",
         pullNumber: 7,
         headSha: "head-1",
         mode: "shadow",
@@ -205,6 +209,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       const decision = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
+        changeRequestId: "change:7/outcome",
         pullNumber: 7,
         headSha: "head-1",
         mode: "enforce",
@@ -216,6 +221,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       const untouched = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-2",
+        changeRequestId: "change:7/untouched",
         pullNumber: 7,
         headSha: "head-1",
         mode: "enforce",
@@ -257,6 +263,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       const decision = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
+        changeRequestId: "change:7/late-failure",
         pullNumber: 7,
         headSha: "head-1",
         mode: "enforce",
@@ -298,6 +305,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       const first = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
+        changeRequestId: "change:7/policy-first",
         pullNumber: 7,
         headSha: "head-1",
         mode: "enforce",
@@ -332,6 +340,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       const latest = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-2",
+        changeRequestId: "change:7/policy-latest",
         pullNumber: 7,
         headSha: "head-2",
         mode: "enforce",
@@ -372,6 +381,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-enforce",
+        changeRequestId: "change:7/enforce",
         pullNumber: 7,
         headSha: "head-1",
         mode: "enforce",
@@ -384,6 +394,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-shadow",
+        changeRequestId: "change:7/shadow",
         pullNumber: 7,
         headSha: "head-2",
         mode: "shadow",

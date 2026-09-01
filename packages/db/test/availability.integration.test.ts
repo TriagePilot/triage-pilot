@@ -457,6 +457,44 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer avail
     });
   });
 
+  it("keeps historical replacement history without an outbox event eventless on retry", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "availability-historical-eventless");
+      const input = replacementInput(fixture);
+      const historical = await db.insertInto("reviewer_replacements").values({
+        workspace_id: fixture.scope.workspaceId,
+        provider: input.provider,
+        provider_connection_id: input.providerConnectionId,
+        absence_id: input.absenceId,
+        absence_revision: input.absenceRevision,
+        decision_id: input.decisionId,
+        unavailable_actor_id: input.unavailableActorId,
+        replacement_actor_id: input.replacementActorId,
+        outcome: input.outcome,
+        reason: input.reason,
+        state: input.state,
+        last_error: input.lastError,
+        started_at: input.startedAt,
+        completed_at: input.completedAt,
+      }).returning("id").executeTakeFirstOrThrow();
+
+      await expect(fixture.availability.persistReplacement({
+        ...input,
+        event: {
+          ...input.event,
+          repositoryId: "forged-repository",
+          changeRequestId: "forged-change-request",
+        },
+      })).resolves.toMatchObject({
+        inserted: false,
+        activationCurrent: true,
+        replacement: { id: historical.id },
+      });
+      await expect(db.selectFrom("decision_outbox").select("id").execute()).resolves.toEqual([]);
+      await expect(db.selectFrom("reviewer_replacements").select("id").execute()).resolves.toEqual([historical]);
+    });
+  });
+
   it("blocks final persistence behind a concurrent absence revision and then rejects the stale revision", async () => {
     await withPostgresTestDatabase(async (db) => {
       const fixture = await seedReplacementFixture(db, "availability-concurrent-revision");

@@ -403,8 +403,15 @@ export function createWorkspaceReviewerAvailability(
           .executeTakeFirst();
         if (existing !== undefined) {
           assertReplacementRetryMatches(existing, input);
-          await assertReplacementEventRetryMatches(trx, workspaceId, existing.id, input.event);
-          await stagePlatformEvent(trx, workspaceId, existing.id, input.event);
+          const hasPersistedEvent = await assertReplacementEventRetryMatches(
+            trx,
+            workspaceId,
+            existing.id,
+            input.event,
+          );
+          if (hasPersistedEvent) {
+            await stagePlatformEvent(trx, workspaceId, existing.id, input.event);
+          }
           return { inserted: false, activationCurrent: true, replacement: toReplacement(existing) };
         }
 
@@ -818,7 +825,7 @@ async function assertReplacementEventRetryMatches(
   workspaceId: WorkspaceId,
   replacementId: string,
   event: ReviewerReplacementEventV1,
-): Promise<void> {
+): Promise<boolean> {
   const existing = await trx
     .selectFrom("decision_outbox")
     .select(["event_id", "event_type", "schema_version", "payload", "occurred_at"])
@@ -827,7 +834,7 @@ async function assertReplacementEventRetryMatches(
     .forUpdate()
     .limit(2)
     .execute();
-  if (existing.length === 0) return;
+  if (existing.length === 0) return false;
   if (
     existing.length !== 1
     || existing[0]!.event_id !== event.eventId
@@ -836,6 +843,7 @@ async function assertReplacementEventRetryMatches(
     || existing[0]!.occurred_at.getTime() !== new Date(event.occurredAt).getTime()
     || !isDeepStrictEqual(existing[0]!.payload, event)
   ) throw new Error("reviewer replacement retry conflicts with persisted platform event");
+  return true;
 }
 
 function translateAbsenceConflict(error: unknown): Error {
