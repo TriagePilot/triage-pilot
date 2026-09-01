@@ -20,6 +20,8 @@ import {
   createWorkspaceReviewerAvailability,
   createWorkspaceJobQueue,
   prepareClaimedReviewerMutationIntent,
+  ReviewerMutationLeaseUnavailableError,
+  runClaimedReviewerProviderMutation,
   findLatestHumanReviewPolicyDecision,
   markActionFailed as persistActionFailed,
   markActionSucceeded as persistActionSucceeded,
@@ -662,18 +664,26 @@ export function createWorkerReviewerAvailabilityServiceFactory(input: WorkerServ
         },
         async reconcileReviewRequest(target) {
           assertTargetScope(target);
-          const adapter = await adapterFor(target);
-          return await adapter.reconcileReviewerReplacement({
-            pullRequest: {
-              owner: target.repository.owner,
-              repo: target.repository.name,
-              pullNumber: target.changeRequestNumber,
-            },
-            unavailableActor: target.unavailableActor,
-            replacementActor: target.replacementActor,
+          if (lease === undefined) {
+            throw new PermanentJobError("reviewer provider mutation requires a claimed activation lease");
+          }
+          return await runClaimedReviewerProviderMutation(input.db, lease, message, async () => {
+            const adapter = await adapterFor(target);
+            return await adapter.reconcileReviewerReplacement({
+              pullRequest: {
+                owner: target.repository.owner,
+                repo: target.repository.name,
+                pullNumber: target.changeRequestNumber,
+              },
+              unavailableActor: target.unavailableActor,
+              replacementActor: target.replacementActor,
+            });
           });
         },
         classifyError(error) {
+          if (error instanceof ReviewerMutationLeaseUnavailableError) {
+            return { kind: "permanent", message: error.message };
+          }
           return classifyAdapter.classifyReviewerReplacementError(error);
         },
       },

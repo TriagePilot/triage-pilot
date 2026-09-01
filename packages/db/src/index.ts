@@ -3,6 +3,7 @@ export {
   createJobClaimer,
   createWorkspaceJobQueue,
   prepareClaimedReviewerMutationIntent,
+  runClaimedReviewerProviderMutation,
   type EnqueueJobInput,
   type JobKind,
   type JobLease,
@@ -11,6 +12,7 @@ export {
   type JobRecovery,
   type JobStatus,
   type JobTransitionResult,
+  ReviewerMutationLeaseUnavailableError,
   type WorkspaceJobQueue,
   recoverStaleJobs,
 } from "./jobs.js";

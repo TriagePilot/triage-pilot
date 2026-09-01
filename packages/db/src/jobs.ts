@@ -1,4 +1,4 @@
-import type { Kysely } from "kysely";
+import type { Kysely, Transaction } from "kysely";
 import type { ProviderConnectionId, ProviderKind, WorkspaceId } from "@triagepilot/contracts";
 
 import type { Database, JobRow } from "./kysely.js";
@@ -52,6 +52,8 @@ export interface JobLease {
 
 export type JobTransitionResult = { updated: true } | { updated: false; reason: "stale_lease" };
 
+export class ReviewerMutationLeaseUnavailableError extends Error {}
+
 export interface JobRecovery {
   payload: unknown;
   maxAttempts: number;
@@ -87,6 +89,38 @@ export async function prepareClaimedReviewerMutationIntent(
   lease: JobLease,
   input: PrepareReviewerMutationIntentInput,
 ): Promise<ReviewerMutationIntent> {
+  return await withClaimedReviewerMutationLeaseTransaction(db, lease, input, async (trx) => {
+    return await prepareMutationIntentTransaction(trx, lease.workspaceId, input);
+  });
+}
+
+export async function runClaimedReviewerProviderMutation<T>(
+  db: Kysely<Database>,
+  lease: JobLease,
+  scope: {
+    workspaceId: WorkspaceId;
+    provider: ProviderKind;
+    providerConnectionId: ProviderConnectionId;
+    absenceId: string;
+    absenceRevision: number;
+  },
+  mutation: () => Promise<T>,
+): Promise<T> {
+  return await withClaimedReviewerMutationLeaseTransaction(db, lease, scope, async () => await mutation());
+}
+
+async function withClaimedReviewerMutationLeaseTransaction<T>(
+  db: Kysely<Database>,
+  lease: JobLease,
+  scope: {
+    workspaceId: WorkspaceId;
+    provider: ProviderKind;
+    providerConnectionId: ProviderConnectionId;
+    absenceId: string;
+    absenceRevision: number;
+  },
+  operation: (trx: Transaction<Database>) => Promise<T>,
+): Promise<T> {
   return await db.transaction().execute(async (trx) => {
     const job = await trx.selectFrom("jobs").selectAll()
       .where("id", "=", lease.jobId).where("workspace_id", "=", lease.workspaceId)
@@ -94,13 +128,15 @@ export async function prepareClaimedReviewerMutationIntent(
       .where("status", "=", "running").where("locked_by", "=", lease.lockedBy)
       .where("locked_at", "=", lease.lockedAt).where("attempt_count", "=", lease.attemptCount)
       .forUpdate().executeTakeFirst();
-    const scope = job === undefined ? null : parseActivationScope(job);
-    if (scope === null || scope.absenceId !== input.absenceId
-      || scope.absenceRevision !== input.absenceRevision || input.workspaceId !== lease.workspaceId
-      || input.provider !== lease.provider || input.providerConnectionId !== lease.providerConnectionId) {
-      throw new Error("reviewer mutation intent prepare rejected stale or invalid activation lease");
+    const activation = job === undefined ? null : parseActivationScope(job);
+    if (activation === null || activation.absenceId !== scope.absenceId
+      || activation.absenceRevision !== scope.absenceRevision || scope.workspaceId !== lease.workspaceId
+      || scope.provider !== lease.provider || scope.providerConnectionId !== lease.providerConnectionId) {
+      throw new ReviewerMutationLeaseUnavailableError(
+        "reviewer provider mutation rejected stale or invalid activation lease",
+      );
     }
-    return await prepareMutationIntentTransaction(trx, lease.workspaceId, input);
+    return await operation(trx);
   });
 }
 
@@ -318,11 +354,11 @@ function isValidRecoveryShape(
   scope: { absenceId: string; absenceRevision: number },
 ): boolean {
   if (!isRecord(value) || !isRecord(value.job)
-    || !hasOnlyKeys(value, ["kind", "phase", "job", "provider", "unavailableActorId", "lastError", "retryable",
+    || !hasExactKeys(value, ["kind", "phase", "job", "provider", "unavailableActorId", "lastError", "retryable",
       "finalizer", "replacementId", "outcome", "replacementActorId", "mutationIntentId",
       "providerEffectsApplied", "persistence"])
-    || !hasOnlyKeys(value.job, ["kind", "workspaceId", "providerConnectionId", "absenceId", "absenceRevision"])
-    || value.kind !== "reviewer_replacement_finalizer" || value.state !== undefined
+    || !hasExactKeys(value.job, ["kind", "workspaceId", "providerConnectionId", "absenceId", "absenceRevision"])
+    || value.kind !== "reviewer_replacement_finalizer"
     || !["persist_replacement", "run_finalizer", "complete_replacement"].includes(String(value.phase))
     || value.provider !== job.provider || !isNonBlank(value.unavailableActorId)
     || !isNonBlank(value.lastError) || typeof value.retryable !== "boolean"
@@ -347,40 +383,66 @@ function isValidRecoveryShape(
     || (expectedAction === "fail_policy" && !isNonBlank(value.finalizer.summary))) return false;
   if (value.phase === "persist_replacement") {
     if (value.replacementId !== null || !isRecord(value.persistence)) return false;
-  } else if (!isUuid(value.replacementId) || (value.persistence !== null && !isRecord(value.persistence))) return false;
+  } else if (!isUuid(value.replacementId) || value.persistence !== null) return false;
   if (outcome === "permanent_failure") {
-    if (!isUuid(value.mutationIntentId) || value.replacementActorId !== null || !isRecord(value.persistence)) return false;
-    if (value.persistence.state !== "permanent_failure" || value.persistence.outcome !== outcome
-      || !isNonBlank(value.persistence.lastError) || value.persistence.mutationIntentId !== value.mutationIntentId) return false;
+    if (value.phase !== "persist_replacement" || !isUuid(value.mutationIntentId)
+      || value.replacementActorId !== null || !isRecord(value.persistence)) return false;
   } else {
     if (outcome === "replaced" && (!isNonBlank(value.replacementActorId) || !isUuid(value.mutationIntentId))) return false;
-    if (outcome !== "replaced" && (value.replacementActorId !== null || value.mutationIntentId !== null)) return false;
-    if (isRecord(value.persistence)
-      && (value.persistence.outcome !== outcome || value.persistence.state !== "finalizer_pending")) return false;
+    if (outcome !== "replaced" && (value.replacementActorId !== null
+      || (value.mutationIntentId !== null && !isUuid(value.mutationIntentId)))) return false;
   }
-  if (isRecord(value.persistence)) {
-    const persistence = value.persistence;
-    if (!hasOnlyKeys(persistence, ["provider", "providerConnectionId", "absenceId", "absenceRevision", "decisionId",
-      "expectedHeadRevision", "unavailableActorId", "replacementActorId", "mutationIntentId", "outcome", "reason",
-      "state", "lastError", "startedAt", "completedAt", "replaceCohort", "event"])
-      || !isRecord(persistence.event) || persistence.provider !== job.provider
-      || persistence.providerConnectionId !== job.provider_connection_id
-      || persistence.absenceId !== scope.absenceId || persistence.absenceRevision !== scope.absenceRevision
-      || persistence.unavailableActorId !== value.unavailableActorId
-      || persistence.replacementActorId !== value.replacementActorId
-      || persistence.mutationIntentId !== value.mutationIntentId || persistence.outcome !== outcome
-      || persistence.event.workspaceId !== job.workspace_id || persistence.event.provider !== job.provider
-      || persistence.event.providerConnectionId !== job.provider_connection_id
-      || persistence.event.absenceId !== scope.absenceId || persistence.event.absenceRevision !== scope.absenceRevision
-      || persistence.event.decisionId !== persistence.decisionId
-      || persistence.event.unavailableActor !== value.unavailableActorId
-      || persistence.event.replacementActor !== value.replacementActorId
-      || persistence.event.outcome !== outcome) return false;
-    if (persistence.replaceCohort !== (outcome === "replaced")
-      || persistence.event.schemaVersion !== 1 || persistence.event.eventType !== "reviewer_replacement") return false;
-    if (isRecord(value.finalizer) && persistence.decisionId !== value.finalizer.decisionId) return false;
-  }
-  return true;
+  return value.persistence === null || isValidRecoveryPersistence(value.persistence, value, job, scope);
+}
+
+function isValidRecoveryPersistence(
+  persistence: Record<string, unknown>,
+  recovery: Record<string, unknown>,
+  job: JobRow,
+  scope: { absenceId: string; absenceRevision: number },
+): boolean {
+  if (!hasExactKeys(persistence, ["provider", "providerConnectionId", "absenceId", "absenceRevision", "decisionId",
+    "expectedHeadRevision", "unavailableActorId", "replacementActorId", "mutationIntentId", "outcome", "reason",
+    "state", "lastError", "startedAt", "completedAt", "replaceCohort", "event"])
+    || !isRecord(persistence.event) || !isNonBlank(persistence.decisionId)
+    || !isNonBlank(persistence.expectedHeadRevision) || !isNonBlank(persistence.unavailableActorId)
+    || !isNonBlank(persistence.reason) || persistence.provider !== job.provider
+    || persistence.providerConnectionId !== job.provider_connection_id
+    || persistence.absenceId !== scope.absenceId || persistence.absenceRevision !== scope.absenceRevision
+    || persistence.unavailableActorId !== recovery.unavailableActorId
+    || persistence.replacementActorId !== recovery.replacementActorId
+    || persistence.mutationIntentId !== recovery.mutationIntentId || persistence.outcome !== recovery.outcome) return false;
+  const startedAt = parseCanonicalRecoveryDate(persistence.startedAt);
+  const completedAt = parseCanonicalRecoveryDate(persistence.completedAt);
+  if (startedAt === null || completedAt === null || completedAt < startedAt) return false;
+  const permanent = recovery.outcome === "permanent_failure";
+  if (persistence.state !== (permanent ? "permanent_failure" : "finalizer_pending")
+    || (permanent ? !isNonBlank(persistence.lastError) : persistence.lastError !== null)
+    || persistence.replaceCohort !== (recovery.outcome === "replaced")) return false;
+  const event = persistence.event;
+  if (!hasExactKeys(event, ["schemaVersion", "eventType", "eventId", "occurredAt", "workspaceId", "provider",
+    "providerConnectionId", "absenceId", "absenceRevision", "decisionId", "repositoryId", "changeRequestId",
+    "unavailableActor", "replacementActor", "outcome"])
+    || event.schemaVersion !== 1 || event.eventType !== "reviewer_replacement"
+    || !isNonBlank(event.eventId) || !isNonBlank(event.repositoryId) || !isNonBlank(event.changeRequestId)
+    || parseCanonicalRecoveryDate(event.occurredAt)?.getTime() !== completedAt.getTime()
+    || event.workspaceId !== job.workspace_id || event.provider !== job.provider
+    || event.providerConnectionId !== job.provider_connection_id
+    || event.absenceId !== scope.absenceId || event.absenceRevision !== scope.absenceRevision
+    || event.decisionId !== persistence.decisionId || event.unavailableActor !== recovery.unavailableActorId
+    || event.replacementActor !== recovery.replacementActorId || event.outcome !== recovery.outcome) return false;
+  return !isRecord(recovery.finalizer) || persistence.decisionId === recovery.finalizer.decisionId;
+}
+
+function parseCanonicalRecoveryDate(value: unknown): Date | null {
+  if (!isNonBlank(value)) return null;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value ? parsed : null;
+}
+
+function hasExactKeys(value: Record<string, unknown>, required: readonly string[]): boolean {
+  return Object.keys(value).length === required.length
+    && required.every((key) => Object.prototype.hasOwnProperty.call(value, key));
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {

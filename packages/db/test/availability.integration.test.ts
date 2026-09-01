@@ -24,6 +24,111 @@ const alternateReplacementActor = "Actor:Alternate/73";
 const changeRequestId = "change:Request/A17";
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer availability", () => {
+  it.each(["run_finalizer", "complete_replacement"] as const)(
+    "rejects fully shaped persistence on %s recovery without mutating the pending replacement",
+    async (phase) => {
+      await withPostgresTestDatabase(async (db) => {
+        const fixture = await seedReplacementFixture(db, `availability-phase-persistence-${phase}`);
+        const persisted = await fixture.availability.persistReplacement(replacementInput(fixture));
+        const recovery = replacementRecovery(fixture, {
+          phase,
+          replacementId: persisted.replacement!.id,
+          persistence: serializedPersistence(replacementInput(fixture)),
+        });
+        const lease = await claimRecovery(db, fixture, recovery, `phase-persistence-${phase}`);
+
+        await expect(createWorkspaceJobQueue(db, fixture.scope.workspaceId)
+          .exhaustReviewerAbsenceActivation(lease, "phase-invalid recovery", now))
+          .resolves.toEqual({ updated: true });
+        await expect(db.selectFrom("reviewer_replacements").select(["state", "last_error"])
+          .where("id", "=", persisted.replacement!.id).executeTakeFirstOrThrow()).resolves.toEqual({
+          state: "finalizer_pending", last_error: null,
+        });
+      });
+    },
+  );
+
+  it.each([
+    ["missing reason", (persistence: Record<string, unknown>) => { delete persistence.reason; }],
+    ["empty expected head", (persistence: Record<string, unknown>) => { persistence.expectedHeadRevision = ""; }],
+    ["invalid start timestamp", (persistence: Record<string, unknown>) => { persistence.startedAt = "not-a-date"; }],
+    ["reversed timestamps", (persistence: Record<string, unknown>) => {
+      persistence.startedAt = "2026-09-01T12:01:00.000Z";
+    }],
+    ["non-null pending error", (persistence: Record<string, unknown>) => { persistence.lastError = "unexpected"; }],
+    ["missing event id", (persistence: Record<string, unknown>) => {
+      delete (persistence.event as Record<string, unknown>).eventId;
+    }],
+    ["missing repository id", (persistence: Record<string, unknown>) => {
+      delete (persistence.event as Record<string, unknown>).repositoryId;
+    }],
+    ["missing change request id", (persistence: Record<string, unknown>) => {
+      delete (persistence.event as Record<string, unknown>).changeRequestId;
+    }],
+    ["mismatched event timestamp", (persistence: Record<string, unknown>) => {
+      (persistence.event as Record<string, unknown>).occurredAt = "2026-09-01T12:01:00.000Z";
+    }],
+  ] as const)("rejects persist recovery with %s without auditing its durable intent", async (_name, mutate) => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, `availability-canonical-${_name.replaceAll(" ", "-")}`);
+      const persistence = serializedPersistence(replacementInput(fixture));
+      mutate(persistence);
+      const recovery = replacementRecovery(fixture, {
+        phase: "persist_replacement", replacementId: null, persistence,
+      });
+      const lease = await claimRecovery(db, fixture, recovery, `canonical-${_name.replaceAll(" ", "-")}`);
+
+      await expect(createWorkspaceJobQueue(db, fixture.scope.workspaceId)
+        .exhaustReviewerAbsenceActivation(lease, "malformed persistence", now))
+        .resolves.toEqual({ updated: true });
+      await expect(db.selectFrom("reviewer_replacements").select("id").execute()).resolves.toEqual([]);
+      await expect(db.selectFrom("reviewer_mutation_intents").select("id")
+        .where("id", "=", fixture.mutationIntentId).executeTakeFirstOrThrow())
+        .resolves.toEqual({ id: fixture.mutationIntentId });
+    });
+  });
+
+  it.each(["run_finalizer", "complete_replacement"] as const)(
+    "accepts policy-success-after-intent %s recovery and terminally exposes the pending row",
+    async (phase) => {
+      await withPostgresTestDatabase(async (db) => {
+        const fixture = await seedReplacementFixture(db, `availability-policy-intent-${phase}`);
+        const input = replacementInput(fixture);
+        const persisted = await fixture.availability.persistReplacement({
+          ...input,
+          outcome: "skipped_policy_satisfied",
+          replacementActorId: null,
+          replaceCohort: false,
+          event: {
+            ...input.event,
+            outcome: "skipped_policy_satisfied",
+            replacementActor: null,
+          },
+        });
+        const recovery = replacementRecovery(fixture, {
+          phase,
+          replacementId: persisted.replacement!.id,
+          persistence: null,
+          outcome: "skipped_policy_satisfied",
+          replacementActorId: null,
+          providerEffectsApplied: false,
+        });
+        const lease = await claimRecovery(db, fixture, recovery, `policy-intent-${phase}`);
+
+        await expect(createWorkspaceJobQueue(db, fixture.scope.workspaceId)
+          .exhaustReviewerAbsenceActivation(lease, "policy finalizer exhausted", now))
+          .resolves.toEqual({ updated: true });
+        await expect(db.selectFrom("reviewer_replacements")
+          .select(["state", "last_error", "mutation_intent_id"])
+          .where("id", "=", persisted.replacement!.id).executeTakeFirstOrThrow()).resolves.toEqual({
+          state: "permanent_failure",
+          last_error: "policy finalizer exhausted",
+          mutation_intent_id: fixture.mutationIntentId,
+        });
+      });
+    },
+  );
+
   it.each([
     ["phase", { phase: "unknown_phase" }],
     ["finalizer", { finalizer: { action: "fail_policy", decisionId: "will-be-replaced", summary: "bad" } }],
@@ -1716,6 +1821,72 @@ function mutationIntentRecoveryInput(
       replacementActor: null,
       outcome: "permanent_failure" as const,
     },
+  };
+}
+
+function serializedPersistence(input: ReturnType<typeof replacementInput>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(input)) as Record<string, unknown>;
+}
+
+function replacementRecovery(
+  fixture: Awaited<ReturnType<typeof seedReplacementFixture>>,
+  overrides: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    kind: "reviewer_replacement_finalizer",
+    phase: "run_finalizer",
+    provider: fixture.scope.provider,
+    unavailableActorId: unavailableActor,
+    job: {
+      kind: "activate_reviewer_absence",
+      workspaceId: fixture.scope.workspaceId,
+      providerConnectionId: fixture.scope.providerConnectionId,
+      absenceId: fixture.absence.id,
+      absenceRevision: fixture.absence.revision,
+    },
+    finalizer: { action: "reevaluate_policy", decisionId: fixture.decisionId, summary: null },
+    replacementId: null,
+    outcome: "replaced",
+    replacementActorId: replacementActor,
+    mutationIntentId: fixture.mutationIntentId,
+    providerEffectsApplied: true,
+    persistence: null,
+    retryable: true,
+    lastError: "recovery failed",
+    ...overrides,
+  };
+}
+
+async function claimRecovery(
+  db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0],
+  fixture: Awaited<ReturnType<typeof seedReplacementFixture>>,
+  recovery: Record<string, unknown>,
+  workerId: string,
+) {
+  await db.updateTable("jobs").set({
+    payload: {
+      kind: "activate_reviewer_absence",
+      workspaceId: fixture.scope.workspaceId,
+      providerConnectionId: fixture.scope.providerConnectionId,
+      absenceId: fixture.absence.id,
+      absenceRevision: fixture.absence.revision,
+      reviewerReplacementFinalizerRecovery: recovery,
+    },
+  }).where("workspace_id", "=", fixture.scope.workspaceId)
+    .where("kind", "=", "activate_reviewer_absence").execute();
+  const claimed = await createJobClaimer(db).claimNext(workerId, now);
+  if (claimed === null || claimed.lockedBy === null || claimed.lockedAt === null) {
+    throw new Error("expected reviewer activation claim");
+  }
+  return {
+    jobId: claimed.id,
+    workspaceId: claimed.workspaceId,
+    provider: claimed.provider,
+    providerConnectionId: claimed.providerConnectionId,
+    lockedBy: claimed.lockedBy,
+    lockedAt: claimed.lockedAt,
+    attemptCount: claimed.attemptCount,
+    maxAttempts: claimed.maxAttempts,
   };
 }
 
