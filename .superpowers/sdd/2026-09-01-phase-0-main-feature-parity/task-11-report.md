@@ -105,3 +105,55 @@ docker build .
 ## Concerns
 
 - No known Task 11 blocker. HTTP authentication/status mapping and reusable recovery controls remain intentionally assigned to Task 12.
+
+## Review-fix round
+
+Review-fix implementation commit: `b8ea4cceaeb6857f37c279f3c13b9a405d8e1e97` (`fix: validate routing recovery boundaries`)
+
+The application boundary now parses decision targets as canonical RFC UUIDs into an internal branded ID before calling `findTarget`. A malformed nonblank decision ID therefore produces `RoutingRecoveryValidationError` and cannot reach a PostgreSQL UUID comparison. Current provider state now accepts only the provider-neutral `open` and `closed` lifecycle values; any other nonblank state is a malformed-provider-response validation error rather than a closed classification.
+
+Review-fix RED:
+
+```text
+pnpm exec vitest run packages/application/test/routing-recovery.test.ts --reporter=verbose
+```
+
+- 2 tests failed: `not-a-uuid` reached the mocked target and queued a job, and `unexpected` provider state produced `RoutingRecoveryClosedError`.
+- The malformed-target case also asserted that `findTarget`, `fetchCurrentState`, and `enqueue` must not be called.
+
+```text
+TEST_DATABASE_URL=<tmpfs PostgreSQL container> pnpm exec vitest run \
+  apps/web/test/self-hosted-composition.test.ts \
+  --reporter=verbose --maxWorkers=1 --minWorkers=1
+```
+
+- 1 of 8 tests failed exactly as reviewed: `{ decisionId: "not-a-uuid" }` raised PostgreSQL `22P02` instead of an `invalid_target` application outcome.
+- The test harness created and dropped a random database inside a dedicated tmpfs PostgreSQL container; the persistent Compose database was not used.
+
+Review-fix GREEN:
+
+```text
+TEST_DATABASE_URL=<tmpfs PostgreSQL container> pnpm exec vitest run \
+  packages/application/test/routing-recovery.test.ts \
+  packages/provider-github/test/adapter.test.ts \
+  packages/db/test/routing-recovery.integration.test.ts \
+  packages/db/test/workspace-isolation.integration.test.ts \
+  apps/web/test/self-hosted-composition.test.ts \
+  --reporter=dot --silent --maxWorkers=1 --minWorkers=1
+```
+
+- 5 files passed, 112 tests passed, 0 failed.
+- The real composition regression returned `invalid_target`, performed no provider access, inserted no job, and no longer emitted `22P02`.
+
+Review-fix gates:
+
+```text
+pnpm check
+pnpm check:package-boundary
+git diff --check
+```
+
+- Workspace build, TypeScript and type-test checks, package-boundary checks, and whitespace checks passed.
+- No migration, provider adapter, database query, webhook behavior, configuration timing, or shadow/enforce write behavior changed.
+
+Review-fix concerns: none known. The UUID validation deliberately matches the existing application/database convention for canonical version 1-5 RFC UUIDs with a valid variant; routing decision IDs are generated as version 4 UUIDs by PostgreSQL.
