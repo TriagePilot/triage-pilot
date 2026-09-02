@@ -4,6 +4,8 @@ The canonical repository configuration path is `.triagepilot.yml` at the reposit
 
 Missing configuration uses built-in safe defaults in shadow mode. Platforms may also supply workspace or organization configuration. A repository file replaces that configuration unless it opts into inheritance:
 
+Reviewer-availability schedules are deliberately outside this contract. They are centrally administered, workspace- and provider-connection-scoped operational records stored in PostgreSQL. TriagePilot neither reads absences from repository YAML nor writes availability changes back to a repository. Availability may narrow the configured eligible pool at a routing or replacement instant, but it cannot add an owner or fallback reviewer that this file did not make eligible.
+
 | Organization configuration | Repository configuration | Effective configuration |
 | --- | --- | --- |
 | absent | absent | built-in defaults (`mode: shadow`) |
@@ -81,6 +83,8 @@ In enforce mode, TriagePilot also synchronizes one risk label on each routed pul
 `exclude_target_branches` accepts exact target branch names and defaults to an empty list. `exclude_source_branch_patterns` accepts source branch glob patterns and also defaults to an empty list. A pull request matching either exclusion is silently skipped: TriagePilot does not score it, select reviewers, store a decision, or make a GitHub write. For example, set `exclude_target_branches: ["main"]` to skip release pull requests from `develop` into `main`, or set `exclude_source_branch_patterns: ["dependabot/**"]` to skip Dependabot pull requests. Source exclusions are opt-in for each repository.
 
 Draft pull requests are silently skipped by default: TriagePilot does not score them, select reviewers, store a decision, or make a GitHub write. Set `routing.include_draft_pull_requests: true` to route drafts normally. When the default is retained, GitHub's `ready_for_review` event routes the pull request using the trusted base configuration at that time.
+
+An administrator-triggered routing recovery uses the same contract. It fetches the pull request's current base, head, and draft state, then queues a fresh operator routing run. The worker resolves this file from the current trusted base when it processes that job; recovery does not snapshot, copy, or edit repository configuration through the operations UI.
 
 The only accepted mode values are `shadow` and `enforce`. In the OSS self-hosted composition, only a trusted repository document can authorize writes. Organization-only `mode: enforce` is forced to shadow; a repository using `inheritance: true` may deliberately inherit organization enforce because the trusted repository document opted into that policy. TriagePilot never reads this policy from the unmerged head commit, so a pull request cannot enable writes for itself. Missing configuration stays in shadow mode; invalid effective configuration records a configuration-failure decision and performs no write. Follow the [rollout guide](../operations/shadow-to-enforce.md) before enabling enforce mode.
 

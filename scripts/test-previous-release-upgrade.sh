@@ -359,8 +359,14 @@ compose up -d web-current
 wait_for_health web-current
 
 latest_migration="$(query_single_value "select name from schema_migrations order by name desc limit 1")"
-[[ "$latest_migration" == "0006_decision_outbox.sql" ]] || {
-  echo "Expected highest migration 0006_decision_outbox.sql, found $latest_migration" >&2
+[[ "$latest_migration" == "0010_provider_connection_preemptive_revocations.sql" ]] || {
+  echo "Expected highest migration 0010_provider_connection_preemptive_revocations.sql, found $latest_migration" >&2
+  exit 1
+}
+
+historical_0005_migrations="$(query_single_value "select string_agg(name, ',' order by name) from schema_migrations where name like '0005_%'")"
+[[ "$historical_0005_migrations" == "0005_reviewer_availability.sql,0005_workspace_scope.sql" ]] || {
+  echo "Expected both historical 0005 migrations, found $historical_0005_migrations" >&2
   exit 1
 }
 

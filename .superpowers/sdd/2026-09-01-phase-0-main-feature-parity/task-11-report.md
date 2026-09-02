@@ -97,7 +97,7 @@ docker build .
 
 ## Self-review
 
-- Generic application and database implementation contains no GitHub URL parsing, GitHub request types, installation ID, tenant, OAuth, billing, or hosted-service concepts.
+- Generic application and database implementation contains no GitHub URL parsing, GitHub request types, installation ID, tenant, OAuth, billing, or managed-service concepts.
 - Every lookup and inserted job is bound to workspace, provider, and provider connection; enqueue revalidates active scope after provider state was read.
 - The recovery path has a provider read port and no provider write port. Worker shadow/enforce behavior remains unchanged and the standard routing job path resolves live trusted configuration.
 - No migrations, release metadata, unrelated runtime routes, or UI behavior changed.

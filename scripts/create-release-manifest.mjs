@@ -26,6 +26,10 @@ const imagePublishedAtLabel = "org.opencontainers.image.created";
 const imageFutureLicenseEffectiveAtLabel = "org.triagepilot.future-license-effective-at";
 const digestPattern = /^sha256:[0-9a-f]{64}$/;
 const shaPattern = /^[0-9a-f]{64}$/;
+const requiredHistoricalMigrations = [
+  "0005_reviewer_availability.sql",
+  "0005_workspace_scope.sql",
+];
 
 export async function createReleaseManifest(options) {
   const repoRoot = resolve(options.cwd ?? defaultRepoRoot);
@@ -278,6 +282,11 @@ export async function findHighestDatabaseMigration(repoRoot) {
   const migrations = (await readdir(migrationDir))
     .filter((entry) => /^\d+_.+\.sql$/.test(entry))
     .sort();
+  for (const requiredMigration of requiredHistoricalMigrations) {
+    if (!migrations.includes(requiredMigration)) {
+      throw new Error(`Missing required historical database migration ${requiredMigration}.`);
+    }
+  }
   const highestMigration = migrations.at(-1);
   if (!highestMigration) throw new Error("No database migrations found.");
   return highestMigration;

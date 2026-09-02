@@ -230,7 +230,7 @@ jobs:
             --cwd "$snapshot_dir" \
             --version "${{ steps.release_meta.outputs.version }}" \
             --git-commit "${{ steps.release_meta.outputs.git_commit }}" \
-            --database-migration 0006_decision_outbox.sql \
+            --database-migration 0010_provider_connection_preemptive_revocations.sql \
             --container-digest "${{ steps.container_meta.outputs.container_digest }}" \
             --published-at "${{ steps.release_meta.outputs.artifact_published_at }}" \
             --oci-metadata "$GITHUB_WORKSPACE/artifacts/container/metadata.json" \
@@ -308,7 +308,7 @@ jobs:
             --tag-name "$GITHUB_REF_NAME" \
             --image-name "${{ needs.build_verify.outputs.image_name }}" \
             --git-commit "${{ needs.build_verify.outputs.git_commit }}" \
-            --database-migration 0006_decision_outbox.sql \
+            --database-migration 0010_provider_connection_preemptive_revocations.sql \
             --container-digest "${{ needs.build_verify.outputs.container_digest }}"
 
       - name: Attest the published release bundle

@@ -2,7 +2,7 @@
 
 TriagePilot is a self-hosted, risk-based pull request router for GitHub teams.
 
-It receives GitHub pull request events, scores PR risk, matches changed files to ownership rules, and records the routing decision and action outcome. Repositories default to shadow mode so teams can evaluate decisions before enabling GitHub writes.
+It receives GitHub pull request events, scores PR risk, matches changed files to ownership rules, and records the routing decision and action outcome. Central reviewer-availability schedules keep absent reviewers out of new and outstanding cohorts, and authenticated recovery can re-run routing from current GitHub state when an event was missed. Repositories default to shadow mode so teams can evaluate decisions before enabling GitHub writes.
 
 ## Self-Hosted Quickstart
 
@@ -28,7 +28,7 @@ Open `http://localhost:8787` and log in with `ADMIN_USERNAME` and `ADMIN_PASSWOR
 
 ## Deployment Model
 
-The supported public deployment is Docker Compose with `web`, exactly one `worker`, and PostgreSQL. One deployment manages one configured GitHub organization and multiple selected repositories in that organization.
+The supported public deployment is Docker Compose with `web`, exactly one `worker`, and PostgreSQL. One deployment manages one configured GitHub organization and multiple selected repositories in that organization. The administrator operates the deployment's deterministic local workspace; repository policy remains file-managed, while reviewer availability is centralized operational state.
 
 ## Documentation
 
@@ -36,6 +36,8 @@ The supported public deployment is Docker Compose with `web`, exactly one `worke
 - [Architecture](docs/architecture.md)
 - [Repository configuration](docs/github-app/repository-configuration.md)
 - [Reviewer availability](docs/operations/reviewer-availability.md)
+- [Job troubleshooting and routing recovery](docs/troubleshooting/jobs.md)
+- [Required human-review policy](docs/github-app/required-human-review-policy.md)
 - [Shadow-to-enforce rollout](docs/operations/shadow-to-enforce.md)
 - [Release checklist](docs/self-hosting/release-checklist.md)
 

@@ -38,7 +38,7 @@ describe("verifyReleaseArtifacts", () => {
         artifactsDir: fixture.artifactsDir,
         version: "0.1.0",
         gitCommit: fixture.gitCommit,
-        databaseMigration: "0006_decision_outbox.sql",
+        databaseMigration: "0010_provider_connection_preemptive_revocations.sql",
         containerDigest: fixture.containerDigest,
       }),
     ).resolves.toMatchObject({
@@ -56,7 +56,7 @@ describe("verifyReleaseArtifacts", () => {
         artifactsDir: fixture.artifactsDir,
         version: "0.1.0",
         gitCommit: fixture.gitCommit,
-        databaseMigration: "0006_decision_outbox.sql",
+        databaseMigration: "0010_provider_connection_preemptive_revocations.sql",
         containerDigest: fixture.containerDigest,
       }),
     ).rejects.toThrow("release-notes.md does not match the release manifest.");
@@ -70,7 +70,7 @@ describe("verifyReleaseArtifacts", () => {
         artifactsDir: fixture.artifactsDir,
         version: "0.1.0",
         gitCommit: fixture.gitCommit,
-        databaseMigration: "0006_decision_outbox.sql",
+        databaseMigration: "0010_provider_connection_preemptive_revocations.sql",
         containerDigest: fixture.containerDigest,
       }),
     ).rejects.toThrow("Publishable image annotation org.opencontainers.image.licenses MIT does not match FSL-1.1-Apache-2.0.");
@@ -84,7 +84,7 @@ describe("verifyReleaseArtifacts", () => {
         artifactsDir: fixture.artifactsDir,
         version: "0.1.0",
         gitCommit: fixture.gitCommit,
-        databaseMigration: "0006_decision_outbox.sql",
+        databaseMigration: "0010_provider_connection_preemptive_revocations.sql",
         containerDigest: fixture.containerDigest,
       }),
     ).rejects.toThrow("Saved image label org.opencontainers.image.licenses MIT does not match FSL-1.1-Apache-2.0 for linux/amd64.");
@@ -173,7 +173,7 @@ describe("verifyReleaseArtifacts", () => {
           artifactsDir: fixture.artifactsDir,
           version: "0.1.0",
           gitCommit: fixture.gitCommit,
-          databaseMigration: "0006_decision_outbox.sql",
+          databaseMigration: "0010_provider_connection_preemptive_revocations.sql",
           containerDigest: fixture.containerDigest,
         }),
       ).rejects.toThrow(message);
@@ -191,7 +191,7 @@ describe("verifyReleaseArtifacts", () => {
         artifactsDir: fixture.artifactsDir,
         version: "0.1.0",
         gitCommit: fixture.gitCommit,
-        databaseMigration: "0006_decision_outbox.sql",
+        databaseMigration: "0010_provider_connection_preemptive_revocations.sql",
         containerDigest: fixture.containerDigest,
       }),
     ).rejects.toThrow("Artifact checksum mismatch for packages/triagepilot-config-0.1.0.tgz.");
@@ -214,7 +214,7 @@ describe("verifyReleaseArtifacts", () => {
         artifactsDir: fixture.artifactsDir,
         version: "0.1.0",
         gitCommit: fixture.gitCommit,
-        databaseMigration: "0006_decision_outbox.sql",
+        databaseMigration: "0010_provider_connection_preemptive_revocations.sql",
         containerDigest: fixture.containerDigest,
       }),
     ).rejects.toThrow("checksums.txt is missing container/triagepilot-0.1.0.oci.tar.");
@@ -234,7 +234,7 @@ describe("verifyReleaseArtifacts", () => {
         artifactsDir: fixture.artifactsDir,
         version: "0.1.0",
         gitCommit: fixture.gitCommit,
-        databaseMigration: "0006_decision_outbox.sql",
+        databaseMigration: "0010_provider_connection_preemptive_revocations.sql",
         containerDigest: fixture.containerDigest,
       }),
     ).rejects.toThrow("Checksum entry path must be relative: ");
@@ -248,7 +248,7 @@ describe("verifyReleaseArtifacts", () => {
         artifactsDir: currentDirectoryFixture.artifactsDir,
         version: "0.1.0",
         gitCommit: currentDirectoryFixture.gitCommit,
-        databaseMigration: "0006_decision_outbox.sql",
+        databaseMigration: "0010_provider_connection_preemptive_revocations.sql",
         containerDigest: currentDirectoryFixture.containerDigest,
       }),
     ).rejects.toThrow("Checksum entry path must use canonical POSIX relative form: ./release-manifest.json");
@@ -264,7 +264,7 @@ describe("verifyReleaseArtifacts", () => {
         artifactsDir: internalTraversalFixture.artifactsDir,
         version: "0.1.0",
         gitCommit: internalTraversalFixture.gitCommit,
-        databaseMigration: "0006_decision_outbox.sql",
+        databaseMigration: "0010_provider_connection_preemptive_revocations.sql",
         containerDigest: internalTraversalFixture.containerDigest,
       }),
     ).rejects.toThrow(
@@ -278,7 +278,7 @@ describe("verifyReleaseArtifacts", () => {
         artifactsDir: repeatedSeparatorFixture.artifactsDir,
         version: "0.1.0",
         gitCommit: repeatedSeparatorFixture.gitCommit,
-        databaseMigration: "0006_decision_outbox.sql",
+        databaseMigration: "0010_provider_connection_preemptive_revocations.sql",
         containerDigest: repeatedSeparatorFixture.containerDigest,
       }),
     ).rejects.toThrow("Checksum entry path must use canonical POSIX relative form: container//metadata.json");
@@ -290,7 +290,7 @@ describe("verifyReleaseArtifacts", () => {
         artifactsDir: backslashFixture.artifactsDir,
         version: "0.1.0",
         gitCommit: backslashFixture.gitCommit,
-        databaseMigration: "0006_decision_outbox.sql",
+        databaseMigration: "0010_provider_connection_preemptive_revocations.sql",
         containerDigest: backslashFixture.containerDigest,
       }),
     ).rejects.toThrow("Checksum entry path must use canonical POSIX relative form: container\\metadata.json");
@@ -307,7 +307,7 @@ describe("verifyReleaseArtifacts", () => {
         artifactsDir: duplicateFixture.artifactsDir,
         version: "0.1.0",
         gitCommit: duplicateFixture.gitCommit,
-        databaseMigration: "0006_decision_outbox.sql",
+        databaseMigration: "0010_provider_connection_preemptive_revocations.sql",
         containerDigest: duplicateFixture.containerDigest,
       }),
     ).rejects.toThrow("Duplicate checksum entry for release-manifest.json.");
@@ -322,7 +322,7 @@ describe("verifyReleaseArtifacts", () => {
         artifactsDir: traversalFixture.artifactsDir,
         version: "0.1.0",
         gitCommit: traversalFixture.gitCommit,
-        databaseMigration: "0006_decision_outbox.sql",
+        databaseMigration: "0010_provider_connection_preemptive_revocations.sql",
         containerDigest: traversalFixture.containerDigest,
       }),
     ).rejects.toThrow("Checksum entry path escapes artifacts directory: ../escape");
@@ -337,7 +337,7 @@ describe("verifyReleaseArtifacts", () => {
         artifactsDir: unexpectedChecksumFixture.artifactsDir,
         version: "0.1.0",
         gitCommit: unexpectedChecksumFixture.gitCommit,
-        databaseMigration: "0006_decision_outbox.sql",
+        databaseMigration: "0010_provider_connection_preemptive_revocations.sql",
         containerDigest: unexpectedChecksumFixture.containerDigest,
       }),
     ).rejects.toThrow("Unexpected checksum entry packages/unexpected-0.1.0.tgz.");
@@ -349,7 +349,7 @@ describe("verifyReleaseArtifacts", () => {
         artifactsDir: extraPackageFixture.artifactsDir,
         version: "0.1.0",
         gitCommit: extraPackageFixture.gitCommit,
-        databaseMigration: "0006_decision_outbox.sql",
+        databaseMigration: "0010_provider_connection_preemptive_revocations.sql",
         containerDigest: extraPackageFixture.containerDigest,
       }),
     ).rejects.toThrow("Unexpected artifact file packages/triagepilot-extra-0.1.0.tgz.");
@@ -363,7 +363,7 @@ describe("verifyReleaseArtifacts", () => {
         artifactsDir: missingFixture.artifactsDir,
         version: "0.1.0",
         gitCommit: missingFixture.gitCommit,
-        databaseMigration: "0006_decision_outbox.sql",
+        databaseMigration: "0010_provider_connection_preemptive_revocations.sql",
         containerDigest: missingFixture.containerDigest,
       }),
     ).rejects.toThrow(/ENOENT/);
@@ -375,7 +375,7 @@ describe("verifyReleaseArtifacts", () => {
         artifactsDir: unexpectedFixture.artifactsDir,
         version: "0.1.0",
         gitCommit: unexpectedFixture.gitCommit,
-        databaseMigration: "0006_decision_outbox.sql",
+        databaseMigration: "0010_provider_connection_preemptive_revocations.sql",
         containerDigest: unexpectedFixture.containerDigest,
       }),
     ).rejects.toThrow("Unexpected artifact file container/extra.txt.");
@@ -456,7 +456,7 @@ async function createArtifactFixture(
       sha256: packageEntries.find((entry) => entry.name === "@triagepilot/contracts")!.sha256,
     },
     databaseMigration: {
-      id: "0006_decision_outbox.sql",
+      id: "0010_provider_connection_preemptive_revocations.sql",
       package: "@triagepilot/db",
     },
     container: {

@@ -26,7 +26,7 @@ const version = "0.1.0";
 const tagName = "v0.1.0";
 const imageName = "ghcr.io/acme/triagepilot:0.1.0";
 const gitCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const databaseMigration = "0006_decision_outbox.sql";
+const databaseMigration = "0010_provider_connection_preemptive_revocations.sql";
 const publishedAt = "2026-08-28T10:20:30.000Z";
 const futureLicenseEffectiveAt = "2028-08-28T10:20:30.000Z";
 

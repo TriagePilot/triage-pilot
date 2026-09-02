@@ -93,7 +93,7 @@ describe("validateReleaseManifest", () => {
         ...validExpectations(),
         databaseMigration: "0005_workspace_scope.sql",
       }),
-    ).toThrow("Release manifest database migration 0006_decision_outbox.sql does not match 0005_workspace_scope.sql.");
+    ).toThrow("Release manifest database migration 0010_provider_connection_preemptive_revocations.sql does not match 0005_workspace_scope.sql.");
   });
 
   it("rejects missing digests and mismatched image versions", () => {
@@ -152,7 +152,7 @@ function createValidManifest() {
       sha256: "3".repeat(64),
     },
     databaseMigration: {
-      id: "0006_decision_outbox.sql",
+      id: "0010_provider_connection_preemptive_revocations.sql",
       package: "@triagepilot/db",
     },
     container: {
@@ -168,7 +168,7 @@ function validExpectations() {
   return {
     version: "0.1.0",
     gitCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    databaseMigration: "0006_decision_outbox.sql",
+    databaseMigration: "0010_provider_connection_preemptive_revocations.sql",
     containerDigest: `sha256:${"4".repeat(64)}`,
   };
 }

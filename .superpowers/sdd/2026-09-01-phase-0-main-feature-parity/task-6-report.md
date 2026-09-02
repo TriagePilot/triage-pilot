@@ -2,9 +2,9 @@
 
 ## Final status
 
-Task 6 and its five review-fix rounds are implemented in the local `commercial-saas-phase-0` worktree. The implementation is provider-neutral, workspace-bound, transactionally stages current events, and keeps historical replay fail-closed. Historical migrations `0001` through `0006` are unchanged. Migration `0007_workspace_reviewer_availability.sql` is intentionally extended by Task 6 to add durable provider change-request identity to routing decisions.
+Task 6 and its five review-fix rounds are implemented in the local Phase 0 worktree. The implementation is provider-neutral, workspace-bound, transactionally stages current events, and keeps historical replay fail-closed. Historical migrations `0001` through `0006` are unchanged. Migration `0007_workspace_reviewer_availability.sql` is intentionally extended by Task 6 to add durable provider change-request identity to routing decisions.
 
-No push, pull request, tag, publication, dependency change, commercial/tenant API, or persistent database migration was performed.
+No push, pull request, tag, publication, dependency change, private-product/tenant API, or persistent database migration was performed.
 
 ## Repository API
 

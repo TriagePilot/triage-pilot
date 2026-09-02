@@ -381,7 +381,7 @@ All database verification used a disposable PostgreSQL 16 container with tmpfs s
 - `pnpm build` passed. `pnpm check` passed its full rebuild and all package type checks.
 - `pnpm check:package-boundary`, `docker compose config --quiet`, `docker build .`, and `git diff --check` passed.
 - `gitleaks git --no-banner --redact .` scanned 122 commits with no leaks; `gitleaks dir --no-banner --redact .` scanned the working tree with no leaks.
-- The tracked public-boundary tests passed in the 811-test root run. The standalone `pnpm check:public-boundary` still exits nonzero only for the inherited Task 6 report terms `commercial` and `saas`; this breaker resolution adds no finding.
+- The tracked public-boundary tests passed in the 811-test root run. At that point the standalone `pnpm check:public-boundary` exited nonzero only for two inherited Task 6 report boundary terms; this breaker resolution added no finding.
 
 Implementation commit: `0c6ebd8a2b6519e72036604f81eb5bacca7cec80` (`fix: revoke provider connections before cleanup`).
 

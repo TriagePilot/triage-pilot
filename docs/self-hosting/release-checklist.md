@@ -27,7 +27,9 @@ gitleaks detect --source . --no-banner
 test -f LICENSE -a -f SECURITY.md -a -f CONTRIBUTING.md -a -f CODE_OF_CONDUCT.md
 ```
 
-Record the command outputs and identify the authentication, installation-token, organization-scope, delivery deduplication, retry and recovery, shadow and enforce processing, dashboard, and retention tests. Confirm the migration used an empty database, the previous-release upgrade reached `0006_decision_outbox.sql`, the Compose smoke endpoint returned HTTP 200, the secret and public-boundary scans reported no findings, and pull-request CI did not publish an image.
+Record the command outputs and identify the authentication, installation-token, organization/workspace scope, delivery deduplication, routing recovery, reviewer availability and replacement finalizer, status-first connection revocation, shadow and enforce processing, dashboard, and retention tests. Confirm the migration used an empty database, the previous-release upgrade reached `0010_provider_connection_preemptive_revocations.sql` and recorded both `0005_reviewer_availability.sql` and `0005_workspace_scope.sql`, the Compose smoke endpoint returned HTTP 200, the secret and public-boundary scans reported no findings, and pull-request CI did not publish an image.
+
+Use a fresh disposable PostgreSQL server for release evidence; do not point the integration gate at a persistent deployment database. On a constrained local Docker runtime, database-backed Vitest files may exhaust the shared server when run in parallel. In that environment, retain the unconstrained result as diagnostic evidence and rerun the database-backed batch against a fresh disposable server with `--maxWorkers=1 --minWorkers=1`. This is local runner guidance, not permission to replace or weaken the canonical `pnpm test` command in CI or the final release record.
 
 The tag workflow also produces `artifacts/release-manifest.json`, `artifacts/release-notes.md`, `artifacts/container/triagepilot-X.Y.Z.oci.tar`, and `artifacts/checksums.txt`. The manifest is the release contract for consumers and must contain:
 
@@ -52,6 +54,8 @@ At the rendered-configuration validation boundary, the smoke shell owns and supp
 Before tagging, run the automated gate from a clean detached checkout: frozen install, exact parallel tests, build, boundary checks, container/Compose/upgrade checks, secret scan, and whitespace check. Artifact verification must install all seven packed packages by name through a temporary registry, compile and import them from the consumer, and reject lockfile references using `workspace:`, `link:`, `file:`, Git, or source paths. Dry-run output is review evidence only and must not be presented as the future tag's published digests or timestamps.
 
 After review and explicit approval, the protected tag workflow is authoritative. It takes the tag target as `gitCommit`, synchronizes `version` with the tag, chooses `publishedAt` once, derives the future-license timestamp, identifies the highest shipped public migration, and produces `release-manifest.json`, release notes, OCI archive, and checksums. Record the resulting version, commit, migration, package SHA-256 values, OCI digest, license identifier, and timestamps from those workflow outputs; their byte-level annotations and checksums must agree.
+
+For the current candidate, the expected highest migration is `0010_provider_connection_preemptive_revocations.sql`. The manifest generator also checks that both historical `0005` filenames are present before it writes evidence. Pass the same `0010` filename to manifest creation, artifact verification, publication verification, and the protected workflow; a stale value must fail before publication.
 
 The exact parallel `pnpm test` gate packages in a disposable source workspace, so it does not mutate root `dist` entries used by concurrent suites. Do not tag until the clean-checkout gate passes, review is complete, and explicit release approval is granted.
 

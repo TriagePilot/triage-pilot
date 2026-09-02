@@ -16,6 +16,7 @@
 - [GitHub App setup](github-app/setup.md)
 - [GitHub App permissions](github-app/permissions.md)
 - [Repository configuration](github-app/repository-configuration.md)
+- [Required human-review policy](github-app/required-human-review-policy.md)
 - [Shadow-to-enforce rollout](operations/shadow-to-enforce.md)
 
 ## Develop And Extend

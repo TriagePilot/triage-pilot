@@ -21,6 +21,20 @@ const publishedPackages = [
 const licenseId = "FSL-1.1-Apache-2.0";
 const publishedAt = "2026-08-28T10:20:30.000Z";
 const futureLicenseEffectiveAt = "2028-08-28T10:20:30.000Z";
+const currentDatabaseMigration = "0010_provider_connection_preemptive_revocations.sql";
+const migrationFiles = [
+  "0001_initial.sql",
+  "0002_selected_reviewers.sql",
+  "0003_human_review_policy.sql",
+  "0004_semantic_routing_deduplication.sql",
+  "0005_reviewer_availability.sql",
+  "0005_workspace_scope.sql",
+  "0006_decision_outbox.sql",
+  "0007_workspace_reviewer_availability.sql",
+  "0008_reviewer_mutation_intents.sql",
+  "0009_provider_connection_revocations.sql",
+  currentDatabaseMigration,
+] as const;
 
 const cleanupPaths: string[] = [];
 
@@ -37,13 +51,49 @@ describe("createReleaseManifest", () => {
         cwd: fixture.repoRoot,
         version: "0.1.0",
         gitCommit: fixture.gitCommit,
-        expectedDatabaseMigration: "0005_workspace_scope.sql",
+        expectedDatabaseMigration: "0009_provider_connection_revocations.sql",
         containerDigest: fixture.containerDigest,
         publishedAt,
         ociMetadataPath: fixture.validOciMetadataPath,
         packageTarballs: fixture.validTarballs,
       }),
-    ).rejects.toThrow("Expected highest migration 0005_workspace_scope.sql, found 0006_decision_outbox.sql.");
+    ).rejects.toThrow(`Expected highest migration 0009_provider_connection_revocations.sql, found ${currentDatabaseMigration}.`);
+  });
+
+  it("requires both historical 0005 migration lineages", async () => {
+    const missingReviewerAvailability = await createManifestFixture({
+      omitMigration: "0005_reviewer_availability.sql",
+    });
+
+    await expect(
+      createReleaseManifest({
+        cwd: missingReviewerAvailability.repoRoot,
+        version: "0.1.0",
+        gitCommit: missingReviewerAvailability.gitCommit,
+        expectedDatabaseMigration: currentDatabaseMigration,
+        containerDigest: missingReviewerAvailability.containerDigest,
+        publishedAt,
+        ociMetadataPath: missingReviewerAvailability.validOciMetadataPath,
+        packageTarballs: missingReviewerAvailability.validTarballs,
+      }),
+    ).rejects.toThrow("Missing required historical database migration 0005_reviewer_availability.sql.");
+
+    const missingWorkspaceScope = await createManifestFixture({
+      omitMigration: "0005_workspace_scope.sql",
+    });
+
+    await expect(
+      createReleaseManifest({
+        cwd: missingWorkspaceScope.repoRoot,
+        version: "0.1.0",
+        gitCommit: missingWorkspaceScope.gitCommit,
+        expectedDatabaseMigration: currentDatabaseMigration,
+        containerDigest: missingWorkspaceScope.containerDigest,
+        publishedAt,
+        ociMetadataPath: missingWorkspaceScope.validOciMetadataPath,
+        packageTarballs: missingWorkspaceScope.validTarballs,
+      }),
+    ).rejects.toThrow("Missing required historical database migration 0005_workspace_scope.sql.");
   });
 
   it("requires exactly the seven unique expected public packages and a contracts artifact", async () => {
@@ -181,7 +231,7 @@ describe("createReleaseManifest", () => {
       cwd: fixture.repoRoot,
       version: "0.1.0",
       gitCommit: fixture.gitCommit,
-      expectedDatabaseMigration: "0006_decision_outbox.sql",
+      expectedDatabaseMigration: currentDatabaseMigration,
       containerDigest: fixture.containerDigest,
       publishedAt,
       ociMetadataPath: fixture.buildxOciMetadataPath,
@@ -202,7 +252,7 @@ describe("createReleaseManifest", () => {
       cwd: fixture.repoRoot,
       version: "0.1.0",
       gitCommit: fixture.gitCommit,
-      expectedDatabaseMigration: "0006_decision_outbox.sql",
+      expectedDatabaseMigration: currentDatabaseMigration,
       containerDigest: fixture.containerDigest,
       publishedAt,
       ociMetadataPath: fixture.validOciMetadataPath,
@@ -213,7 +263,7 @@ describe("createReleaseManifest", () => {
       cwd: fixture.repoRoot,
       version: "0.1.0",
       gitCommit: fixture.gitCommit,
-      expectedDatabaseMigration: "0006_decision_outbox.sql",
+      expectedDatabaseMigration: currentDatabaseMigration,
       containerDigest: fixture.containerDigest,
       publishedAt,
       ociMetadataPath: fixture.validOciMetadataPath,
@@ -227,7 +277,7 @@ describe("createReleaseManifest", () => {
       databaseMigration: { id: string };
       packages: Array<{ name: string; publishedAt: string; futureLicenseEffectiveAt: string }>;
     };
-    expect(manifest.databaseMigration.id).toBe("0006_decision_outbox.sql");
+    expect(manifest.databaseMigration.id).toBe(currentDatabaseMigration);
     expect(manifest.contracts.sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(manifest.packages.map((entry) => entry.name)).toEqual([...publishedPackages].sort());
     expect(manifest.packages.map((entry) => entry.publishedAt)).toEqual(publishedPackages.map(() => publishedAt));
@@ -238,15 +288,18 @@ describe("createReleaseManifest", () => {
   });
 });
 
-async function createManifestFixture() {
+async function createManifestFixture(options: { omitMigration?: string } = {}) {
   const repoRoot = await mkdtemp(join(tmpdir(), "triagepilot-release-manifest-"));
   cleanupPaths.push(repoRoot);
 
   await mkdir(join(repoRoot, "packages", "db", "migrations"), { recursive: true });
   await writeFile(join(repoRoot, "package.json"), JSON.stringify({ name: "fixture", version: "0.1.0" }, null, 2));
   await writeFile(join(repoRoot, "Dockerfile"), "FROM scratch\n");
-  await writeFile(join(repoRoot, "packages", "db", "migrations", "0005_workspace_scope.sql"), "-- 0005\n");
-  await writeFile(join(repoRoot, "packages", "db", "migrations", "0006_decision_outbox.sql"), "-- 0006\n");
+  for (const migration of migrationFiles) {
+    if (migration !== options.omitMigration) {
+      await writeFile(join(repoRoot, "packages", "db", "migrations", migration), `-- ${migration}\n`);
+    }
+  }
 
   await execFileAsync("git", ["init"], { cwd: repoRoot });
   await execFileAsync("git", ["config", "user.name", "Codex"], { cwd: repoRoot });

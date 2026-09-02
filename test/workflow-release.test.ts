@@ -30,6 +30,13 @@ describe("release workflow guardrails", () => {
     expect(upgrade).not.toContain("compose up -d postgres\nwait_for_postgres");
   });
 
+  it("uses the current database migration for manifest creation and publication verification", async () => {
+    const release = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+    const migrationArgument = "--database-migration 0010_provider_connection_preemptive_revocations.sql";
+
+    expect(release.split(migrationArgument)).toHaveLength(3);
+  });
+
   it("pins gitleaks by digest in CI and release workflows", async () => {
     const ci = await readFile(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
     const release = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
