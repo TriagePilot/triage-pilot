@@ -212,6 +212,32 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("delivery ingestion", () 
     });
   });
 
+  it("keeps installation creation fail closed when deletion arrives first", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const repositories = createWorkspaceRepositories(db, await ensureLocalWorkspace(db));
+
+      await repositories.revokeConfiguredProviderConnection({ provider: "github", externalConnectionId: "99" });
+
+      await expect(db.selectFrom("provider_connection_revocations")
+        .select(["external_connection_id", "revoked_connection_id", "cleanup_completed_at"])
+        .execute()).resolves.toEqual([{
+        external_connection_id: "99",
+        revoked_connection_id: expect.any(String),
+        cleanup_completed_at: null,
+      }]);
+      await expect(db.selectFrom("provider_connection_revocations")
+        .select("physical_connection_id").executeTakeFirstOrThrow()).resolves.toEqual({
+        physical_connection_id: null,
+      });
+
+      await repositories.replaceProviderConnectionRepositories({
+        ...connection("99", "delayed-create"),
+        repositories: [repository("101", "api")],
+      });
+      await expectCounts(db, { provider_connections: 0, repositories: 0 });
+    });
+  });
+
   it("fails closed for a reused external ID and preserves a reconnect with a new external ID", async () => {
     await withPostgresTestDatabase(async (db) => {
       const repositories = createWorkspaceRepositories(db, await ensureLocalWorkspace(db));

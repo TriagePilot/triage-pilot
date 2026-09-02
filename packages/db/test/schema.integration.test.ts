@@ -149,6 +149,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         { name: "0007_workspace_reviewer_availability.sql" },
         { name: "0008_reviewer_mutation_intents.sql" },
         { name: "0009_provider_connection_revocations.sql" },
+        { name: "0010_provider_connection_preemptive_revocations.sql" },
       ]);
     });
   });

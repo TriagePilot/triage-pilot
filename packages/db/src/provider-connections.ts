@@ -150,25 +150,26 @@ export async function revokeConfiguredProviderConnection(
     await lockProviderConnectionProjection(trx, workspaceId);
     const connection = await trx
       .selectFrom("provider_connections")
-      .select(["id", "status"])
+      .select("id")
       .where("workspace_id", "=", workspaceId)
       .where("provider", "=", input.provider)
       .where("external_connection_id", "=", input.externalConnectionId)
       .where("status", "!=", "revoked")
       .forUpdate()
       .executeTakeFirst();
-    if (connection === undefined) return;
     const revokedAt = new Date();
     await trx.insertInto("provider_connection_revocations").values({
       workspace_id: workspaceId,
       provider: input.provider,
       external_connection_id: input.externalConnectionId,
-      revoked_connection_id: connection.id,
+      ...(connection === undefined ? {} : { revoked_connection_id: connection.id }),
+      physical_connection_id: connection?.id ?? null,
       revoked_at: revokedAt,
       cleanup_completed_at: null,
     }).onConflict((conflict) => conflict
-      .columns(["workspace_id", "provider", "revoked_connection_id"])
+      .columns(["workspace_id", "provider", "external_connection_id"])
       .doNothing()).execute();
+    if (connection === undefined) return;
     await trx.updateTable("provider_connections").set({
       status: "revoked",
       updated_at: revokedAt,
@@ -189,16 +190,24 @@ export async function cleanupRevokedProviderConnections(
     throw new Error("provider connection cleanup limit must be a positive integer");
   }
   const pending = await db.selectFrom("provider_connection_revocations")
-    .select(["provider", "revoked_connection_id"])
+    .select(["provider", "revoked_connection_id", "physical_connection_id"])
     .where("workspace_id", "=", workspaceId)
     .where("cleanup_completed_at", "is", null)
+    .where("physical_connection_id", "is not", null)
     .orderBy("revoked_at")
     .orderBy("revoked_connection_id")
     .limit(limit)
     .execute();
   let cleaned = 0;
   for (const candidate of pending) {
-    const completed = await cleanupRevokedProviderConnection(db, workspaceId, candidate, now);
+    const physicalConnectionId = candidate.physical_connection_id;
+    if (physicalConnectionId === null) continue;
+    const completed = await cleanupRevokedProviderConnection(
+      db,
+      workspaceId,
+      { ...candidate, physical_connection_id: physicalConnectionId },
+      now,
+    );
     if (completed) cleaned += 1;
   }
   return cleaned;
@@ -207,7 +216,11 @@ export async function cleanupRevokedProviderConnections(
 async function cleanupRevokedProviderConnection(
   db: Kysely<Database>,
   workspaceId: WorkspaceId,
-  candidate: { provider: ProviderKind; revoked_connection_id: string },
+  candidate: {
+    provider: ProviderKind;
+    revoked_connection_id: string;
+    physical_connection_id: string;
+  },
   now: Date,
 ): Promise<boolean> {
   return await db.transaction().execute(async (trx) => {
@@ -224,13 +237,13 @@ async function cleanupRevokedProviderConnection(
     const deleted = await trx.deleteFrom("provider_connections")
       .where("workspace_id", "=", workspaceId)
       .where("provider", "=", candidate.provider)
-      .where("id", "=", candidate.revoked_connection_id)
+      .where("id", "=", candidate.physical_connection_id)
       .where("status", "=", "revoked")
       .where(({ not, exists, selectFrom }) => not(exists(
         selectFrom("jobs").select("id")
           .where("workspace_id", "=", workspaceId)
           .where("provider", "=", candidate.provider)
-          .where("provider_connection_id", "=", candidate.revoked_connection_id)
+          .where("provider_connection_id", "=", candidate.physical_connection_id)
           .where("status", "in", ["queued", "running"]),
       )))
       .returning("id")
@@ -239,7 +252,7 @@ async function cleanupRevokedProviderConnection(
       const connection = await trx.selectFrom("provider_connections").select("status")
         .where("workspace_id", "=", workspaceId)
         .where("provider", "=", candidate.provider)
-        .where("id", "=", candidate.revoked_connection_id)
+        .where("id", "=", candidate.physical_connection_id)
         .executeTakeFirst();
       if (connection !== undefined) return false;
     }

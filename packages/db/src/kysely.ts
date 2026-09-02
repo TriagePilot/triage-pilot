@@ -38,7 +38,8 @@ export interface ProviderConnectionRevocationsTable {
   workspace_id: string;
   provider: ProviderKind;
   external_connection_id: string;
-  revoked_connection_id: string;
+  revoked_connection_id: Generated<string>;
+  physical_connection_id: string | null;
   revoked_at: Timestamp;
   cleanup_completed_at: NullableTimestamp;
 }

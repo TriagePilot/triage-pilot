@@ -20,6 +20,7 @@ const FINAL_MIGRATIONS = [
   "0007_workspace_reviewer_availability.sql",
   "0008_reviewer_mutation_intents.sql",
   "0009_provider_connection_revocations.sql",
+  "0010_provider_connection_preemptive_revocations.sql",
 ];
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability migration histories", () => {
