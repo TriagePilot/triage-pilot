@@ -392,3 +392,47 @@ The prior accepted external boundary remains: an HTTP mutation already accepted 
 GitHub installation lifecycle payloads expose the external installation ID but no TriagePilot internal generation token. This implementation assumes a real reinstall receives a new immutable installation ID, which is the expected GitHub lifecycle. It does not treat delivery order or a repeated `installation.created` action as proof that a tombstoned ID is a new generation: doing so would let a delayed old `installation.deleted` revoke a new connection. If GitHub ever reuses an installation ID, the system intentionally stays disconnected until explicit operator intervention proves the new identity and reconciles the tombstone.
 
 No push, pull request, tag, publication, dependency change, released-migration edit, or persistent-database operation was performed.
+
+## Task 9 breaker-resolution fix round 2: preemptive revocation
+
+### Review finding and RED
+
+The independent review found that revocation still depended on an existing physical connection row. An `installation.deleted` delivery received before `installation.created` returned successfully without writing a tombstone, so the delayed create could activate the same external installation ID.
+
+The minimal disposable-PostgreSQL RED was:
+
+```text
+TEST_DATABASE_URL=<disposable> pnpm vitest run packages/db/test/deliveries.integration.test.ts -t 'deletion arrives first' --reporter=dot --maxWorkers=1 --minWorkers=1
+```
+
+It failed the selected test, with 10 skipped, at the direct persistence assertion: the expected external-ID tombstone was absent (`expected [...]`, received `[]`). The test then requires the delayed same-ID repository snapshot to leave both provider connections and repositories empty.
+
+### Additive schema and behavior
+
+`revokeConfiguredProviderConnection` now inserts the workspace/provider/external-ID tombstone unconditionally while holding the existing provider-projection advisory lock. If the physical row exists, status-first revocation still binds and revokes that exact internal connection. If no row exists, the tombstone receives a generated immutable revocation-generation ID and records a null `physical_connection_id`; it does not claim that a physical connection was present or revoked.
+
+Migration `0009_provider_connection_revocations.sql` remains byte-for-byte unchanged after its commit. The new additive `0010_provider_connection_preemptive_revocations.sql`:
+
+- adds nullable `physical_connection_id`;
+- backfills it from `revoked_connection_id` for every existing physical-generation tombstone;
+- gives future tombstones a generated revocation-generation ID by default; and
+- adds scoped uniqueness for non-null physical connection IDs.
+
+Deferred cleanup now scans only tombstones with a non-null physical target, locks the tombstone by its immutable revocation-generation ID, and deletes/checks jobs by the exact physical ID. A preventive delete-before-create tombstone therefore requires no cleanup and is never misreported as a physically revoked connection. Its permanent external-ID guard blocks the delayed same-ID create, while the existing distinct-external-ID reconnect behavior is unchanged.
+
+This does not alter the canonical locking protocol: preemptive revocation takes only the workspace lifecycle advisory lock and tombstone uniqueness path; existing-row revocation additionally takes the exact provider row. It never takes child locks, and provider authority still requires job, absence, then an active exact connection. Duplicate delete deliveries remain idempotent through the scoped external-ID conflict target.
+
+### GREEN and verification
+
+All database commands used one disposable PostgreSQL 16 tmpfs container on a random host port. No persistent database was touched.
+
+- Targeted delete-before-create GREEN: 1/1 selected test passed, with 10 skipped.
+- Requested focused matrix: `schema.integration`, `availability-upgrade.integration`, `deliveries.integration`, worker `availability-runtime.integration`, webhooks, and maintenance — 6 files, 69/69 tests.
+- `pnpm check` passed its full workspace build and all package type checks.
+- A two-worker root run completed all 812 test assertions but exited nonzero because Vitest observed an unhandled rejection from the pre-existing `serializes both mutation-intent insert and absence-revision orderings` concurrency test. That unchanged availability file passed 75/75 when immediately rerun serially.
+- The bounded serial root rerun, `TEST_DATABASE_URL=<disposable> pnpm test --reporter=dot --silent --maxWorkers=1 --minWorkers=1`, passed cleanly: 71 files, 812/812 tests, zero unhandled errors.
+- `git diff --check` passed.
+
+Implementation commit: `cdc4e5fc4e39368c2ca9bc197594a4fc40d62402` (`fix: tombstone preemptive installation deletions`).
+
+The residual external-provider ambiguity is unchanged: an already accepted GitHub request cannot be recalled, and hypothetical external installation-ID reuse remains fail-closed pending explicit operator intervention. No push, pull request, tag, publication, dependency change, released-migration edit, or persistent-database operation was performed.
