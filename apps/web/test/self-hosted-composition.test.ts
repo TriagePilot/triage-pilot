@@ -81,6 +81,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("self-hosted web composit
         createRunId: () => "run-c91e46",
       });
       try {
+        await expect(composition.routingRecovery.queue({ decisionId: "not-a-uuid" }))
+          .rejects.toMatchObject({ code: "invalid_target" });
         await expect(composition.routingRecovery.queue({ changeRequestUrl: "https://example.test/acme/api/pull/17" }))
           .rejects.toMatchObject({ code: "invalid_target" });
         await expect(composition.routingRecovery.queue({ changeRequestUrl: "https://github.com/acme/api/pull/17" }))

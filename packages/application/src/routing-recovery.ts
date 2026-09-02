@@ -10,6 +10,11 @@ import {
 
 const PROVIDERS = new Set<ProviderKind>(["github", "gitlab", "bitbucket"]);
 const MAX_CHANGE_REQUEST_NUMBER = 2_147_483_647;
+const routingRecoveryDecisionIdBrand: unique symbol = Symbol("RoutingRecoveryDecisionId");
+
+type RoutingRecoveryDecisionId = string & {
+  readonly [routingRecoveryDecisionIdBrand]: true;
+};
 
 export type RoutingRecoveryRequest =
   | { decisionId: string }
@@ -20,6 +25,10 @@ export type RoutingRecoveryRequest =
         number: number;
       };
     };
+
+type ValidatedRoutingRecoveryRequest =
+  | { decisionId: RoutingRecoveryDecisionId }
+  | Exclude<RoutingRecoveryRequest, { decisionId: string }>;
 
 export interface RoutingRecoveryTarget {
   providerConnectionId: ProviderConnectionId;
@@ -46,7 +55,7 @@ export interface EnqueueRoutingRecoveryInput {
 export interface RoutingRecoveryPorts {
   findTarget(input: {
     workspaceId: WorkspaceId;
-    request: RoutingRecoveryRequest;
+    request: ValidatedRoutingRecoveryRequest;
   }): Promise<RoutingRecoveryTarget | null>;
   fetchCurrentState(input: { workspaceId: WorkspaceId } & RoutingRecoveryTarget): Promise<RoutingRecoveryCurrentState | null>;
   enqueue(input: EnqueueRoutingRecoveryInput): Promise<{ jobId: string } | null>;
@@ -126,14 +135,14 @@ export async function queueRoutingRecovery(
 function parseRoutingRecoveryRequest(
   workspaceId: WorkspaceId,
   request: unknown,
-): RoutingRecoveryRequest {
+): ValidatedRoutingRecoveryRequest {
   if (!isNonEmptyString(workspaceId) || !isRecord(request)) {
     throw new RoutingRecoveryValidationError("Routing recovery target is invalid");
   }
   const keys = Object.keys(request);
   if (keys.length !== 1) throw new RoutingRecoveryValidationError("Exactly one routing recovery target is required");
-  if (keys[0] === "decisionId" && isNonEmptyString(request.decisionId)) {
-    return { decisionId: request.decisionId.trim() };
+  if (keys[0] === "decisionId") {
+    return { decisionId: parseDecisionId(request.decisionId) };
   }
   if (keys[0] !== "changeRequest" || !isRecord(request.changeRequest)) {
     throw new RoutingRecoveryValidationError("Routing recovery target is invalid");
@@ -176,12 +185,24 @@ function parseCurrentState(state: RoutingRecoveryCurrentState): RoutingRecoveryC
     || typeof state.isDraft !== "boolean") {
     throw new RoutingRecoveryValidationError("Current provider change-request state is invalid");
   }
+  const normalizedState = state.state.trim().toLowerCase();
+  if (normalizedState !== "open" && normalizedState !== "closed") {
+    throw new RoutingRecoveryValidationError("Current provider change-request state is invalid");
+  }
   return {
-    state: state.state.trim().toLowerCase(),
+    state: normalizedState,
     baseRevision: state.baseRevision.trim(),
     headRevision: state.headRevision.trim(),
     isDraft: state.isDraft,
   };
+}
+
+function parseDecisionId(value: unknown): RoutingRecoveryDecisionId {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(normalized)) {
+    throw new RoutingRecoveryValidationError("Routing recovery decision ID is invalid");
+  }
+  return normalized as RoutingRecoveryDecisionId;
 }
 
 function parseRunId(value: string): string {

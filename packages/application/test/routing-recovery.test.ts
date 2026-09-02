@@ -10,6 +10,7 @@ import {
 } from "../src/routing-recovery";
 
 const workspaceId = "workspace-51b9cf";
+const decisionId = "c91e4600-0000-4000-8000-000000000001";
 const target = {
   providerConnectionId: "connection-a91f5c",
   repository: { provider: "github" as const, externalId: "repository-71c9ab", owner: "acme", name: "api" },
@@ -21,7 +22,7 @@ describe("queueRoutingRecovery", () => {
   it("queues a fresh operator run from current provider state for a decision", async () => {
     const ports = buildPorts();
 
-    await expect(queueRoutingRecovery({ workspaceId, request: { decisionId: "decision-c91e46" } }, ports))
+    await expect(queueRoutingRecovery({ workspaceId, request: { decisionId } }, ports))
       .resolves.toEqual({
         jobId: "job-4e5c21",
         routingKey: "routing:workspace-51b9cf:github:repository-71c9ab:change-d82a5f:base-current:head-current:ready:operator:run-b4e82d",
@@ -29,7 +30,7 @@ describe("queueRoutingRecovery", () => {
 
     expect(ports.findTarget).toHaveBeenCalledWith({
       workspaceId,
-      request: { decisionId: "decision-c91e46" },
+      request: { decisionId },
     });
     expect(ports.fetchCurrentState).toHaveBeenCalledWith({ workspaceId, ...target });
     expect(ports.enqueue).toHaveBeenCalledWith({
@@ -87,8 +88,8 @@ describe("queueRoutingRecovery", () => {
       .mockReturnValueOnce("run-2a907d");
     const ports = buildPorts({ createRunId });
 
-    const first = await queueRoutingRecovery({ workspaceId, request: { decisionId: "decision-c91e46" } }, ports);
-    const second = await queueRoutingRecovery({ workspaceId, request: { decisionId: "decision-c91e46" } }, ports);
+    const first = await queueRoutingRecovery({ workspaceId, request: { decisionId } }, ports);
+    const second = await queueRoutingRecovery({ workspaceId, request: { decisionId } }, ports);
 
     expect(first.routingKey).toMatch(/:operator:run-1f83b9$/);
     expect(second.routingKey).toMatch(/:operator:run-2a907d$/);
@@ -99,7 +100,7 @@ describe("queueRoutingRecovery", () => {
   it("does not enqueue when the scoped target is unknown or inactive", async () => {
     const ports = buildPorts({ findTarget: vi.fn(async () => null) });
 
-    await expect(queueRoutingRecovery({ workspaceId, request: { decisionId: "decision-c91e46" } }, ports))
+    await expect(queueRoutingRecovery({ workspaceId, request: { decisionId } }, ports))
       .rejects.toBeInstanceOf(RoutingRecoveryTargetUnavailableError);
     expect(ports.fetchCurrentState).not.toHaveBeenCalled();
     expect(ports.enqueue).not.toHaveBeenCalled();
@@ -108,7 +109,7 @@ describe("queueRoutingRecovery", () => {
   it("reports a provider connection that becomes inactive before enqueue without leaking the target", async () => {
     const ports = buildPorts({ enqueue: vi.fn(async () => null) });
 
-    await expect(queueRoutingRecovery({ workspaceId, request: { decisionId: "decision-c91e46" } }, ports))
+    await expect(queueRoutingRecovery({ workspaceId, request: { decisionId } }, ports))
       .rejects.toMatchObject({ code: "not_found_or_inactive" });
   });
 
@@ -117,7 +118,7 @@ describe("queueRoutingRecovery", () => {
       currentState: { state: "closed", baseRevision: "base-current", headRevision: "head-current", isDraft: false },
     });
 
-    await expect(queueRoutingRecovery({ workspaceId, request: { decisionId: "decision-c91e46" } }, ports))
+    await expect(queueRoutingRecovery({ workspaceId, request: { decisionId } }, ports))
       .rejects.toBeInstanceOf(RoutingRecoveryClosedError);
     expect(ports.enqueue).not.toHaveBeenCalled();
   });
@@ -125,15 +126,16 @@ describe("queueRoutingRecovery", () => {
   it("does not disclose a change request missing from current provider state", async () => {
     const ports = buildPorts({ currentState: null });
 
-    await expect(queueRoutingRecovery({ workspaceId, request: { decisionId: "decision-c91e46" } }, ports))
+    await expect(queueRoutingRecovery({ workspaceId, request: { decisionId } }, ports))
       .rejects.toBeInstanceOf(RoutingRecoveryTargetUnavailableError);
     expect(ports.enqueue).not.toHaveBeenCalled();
   });
 
   it.each([
-    ["blank workspace", { workspaceId: " ", request: { decisionId: "decision-c91e46" } }],
+    ["blank workspace", { workspaceId: " ", request: { decisionId } }],
     ["blank decision", { workspaceId, request: { decisionId: " " } }],
-    ["both targets", { workspaceId, request: { decisionId: "decision-c91e46", changeRequest: target } }],
+    ["non-UUID decision", { workspaceId, request: { decisionId: "not-a-uuid" } }],
+    ["both targets", { workspaceId, request: { decisionId, changeRequest: target } }],
     ["neither target", { workspaceId, request: {} }],
     ["unknown request key", { workspaceId, request: { providerUrl: "https://example.invalid" } }],
     ["blank repository identity", {
@@ -158,13 +160,14 @@ describe("queueRoutingRecovery", () => {
   });
 
   it.each([
+    [{ state: "unexpected", baseRevision: "base-current", headRevision: "head-current", isDraft: false }],
     [{ state: "open", baseRevision: "", headRevision: "head-current", isDraft: false }],
     [{ state: "open", baseRevision: "base-current", headRevision: "", isDraft: false }],
     [{ state: "open", baseRevision: "base-current", headRevision: "head-current", isDraft: "false" }],
   ])("rejects malformed current provider state without enqueueing", async (currentState) => {
     const ports = buildPorts({ currentState: currentState as never });
 
-    await expect(queueRoutingRecovery({ workspaceId, request: { decisionId: "decision-c91e46" } }, ports))
+    await expect(queueRoutingRecovery({ workspaceId, request: { decisionId } }, ports))
       .rejects.toBeInstanceOf(RoutingRecoveryValidationError);
     expect(ports.enqueue).not.toHaveBeenCalled();
   });
