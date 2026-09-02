@@ -2,6 +2,7 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { OperationsDashboard, type OperationsApiClient, type WorkspaceContext } from "@triagepilot/ui";
@@ -79,6 +80,21 @@ describe("OperationsDashboard", () => {
     expect(buttonNamed(container, /re-run routing/i)).toBeNull();
     expect(container.textContent).not.toContain("Run missing change request");
     expect(container.textContent).toContain("Operations ledger");
+  });
+
+  it("does not disclose supplied operations data or recovery controls without view capability", () => {
+    const html = renderToStaticMarkup(<OperationsDashboard
+      api={api}
+      workspace={workspace}
+      authorization={{ canViewOperations: false, canManageConfiguration: false, canManageReviewerAvailability: false, canRunRoutingRecovery: true }}
+      navigation={{ hrefFor: (target) => `/ops/${target}` }}
+      initialOverview={overview}
+    />);
+
+    expect(html).toContain("Operations are not available for this workspace.");
+    expect(html).not.toContain("acme/api");
+    expect(html).not.toContain("Run missing change request");
+    expect(html).not.toContain("Re-run routing");
   });
 
   it("queues recovery for a displayed decision and refreshes the ledger after success", async () => {

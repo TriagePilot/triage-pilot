@@ -38,9 +38,11 @@ function OperationsDashboardWorkspace({
   headerActions,
   onUnauthorized,
 }: OperationsDashboardProps) {
-  const [state, setState] = useState<LoadState>(
-    initialOverview ? { status: "ready", overview: initialOverview } : { status: "loading" },
-  );
+  const [state, setState] = useState<LoadState>(() => !authorization.canViewOperations
+    ? { status: "failed", message: "Operations are not available for this workspace." }
+    : initialOverview
+      ? { status: "ready", overview: initialOverview }
+      : { status: "loading" });
   const [recoveryUrl, setRecoveryUrl] = useState("");
   const [pendingRecovery, setPendingRecovery] = useState<string | null>(null);
   const [recoveryNotice, setRecoveryNotice] = useState<{ tone: "success" | "danger"; message: string } | null>(null);
@@ -64,6 +66,10 @@ function OperationsDashboardWorkspace({
   }
 
   useEffect(() => {
+    if (!authorization.canViewOperations) {
+      setState({ status: "failed", message: "Operations are not available for this workspace." });
+      return;
+    }
     if (initialOverview) {
       setState({ status: "ready", overview: initialOverview });
       return;
