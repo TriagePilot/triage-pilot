@@ -301,3 +301,94 @@ All database work used one disposable PostgreSQL 16 container with tmpfs storage
 Migration `0008_reviewer_mutation_intents.sql` remains the highest migration and no migration file changed. Canonical lock order, SQL lifecycle/provenance immutability, per-job maintenance isolation, exact recovery shape, multi-intent atomicity, idempotency, workspace/provider isolation, and shadow-mode write-free behavior remain covered by the green root suite.
 
 Round-5 implementation commit: `a750f9c` (`fix: bound reviewer mutation authority`). No push, pull request, tag, publication, or persistent-database operation was performed.
+
+## Task 9 breaker-resolution
+
+### Status-first revocation and canonical protocol
+
+GitHub `installation.deleted` now performs a security-critical local revocation, not a physical delete. The workspace repository transaction takes the provider-projection workspace advisory lock, locks the exact workspace/provider/external-connection row, inserts a durable tombstone bound to that row's immutable internal ID, changes the row from `active` or `suspended` to permanent `revoked`, and commits. It never locks or deletes job, absence, replacement, intent, repository, or receipt children. Temporary GitHub suspension remains the distinct `suspended` state; suspension updates only an active connection and cannot overwrite `revoked`.
+
+The canonical concurrency protocol is:
+
+```text
+provider mutation authority: exact job -> exact absence -> exact provider connection
+provider lifecycle projection: workspace advisory lock -> exact provider connection
+deferred cleanup: exact tombstone -> exact revoked provider connection,
+                  but only when no queued/running job references that internal ID
+```
+
+The provider mutation and revocation paths may wait on the provider row, but revocation holds no child lock, so they cannot form the former parent/child cycle. If revocation commits before provider authority reaches the connection row, the active-status check rejects authority and the worker performs zero provider writes or terminal-history writes. If provider authority already holds the connection row, revocation cannot commit until that bounded authority finishes; consequently no new provider request can start after the revocation commit.
+
+Physical deletion is retryable maintenance work. Worker startup and every maintenance cycle scan at most 25 pending tombstones in stable order. Each attempt locks one tombstone, deletes only its immutable revoked connection ID after all jobs for that generation leave `queued`/`running`, lets existing foreign keys cascade that old generation's dependents, and then records `cleanup_completed_at`. A lock, statement, or connection failure leaves the durable tombstone pending; the maintenance cycle remains available and retries it next time. Cleanup is idempotent when the connection is already absent or the tombstone is already complete.
+
+Tombstones remain after cleanup as the anti-resurrection guard. All ordinary delivery, activation, snapshot, suspension, and repository-update paths for that same workspace/provider/external ID fail closed. A legitimate reconnect must arrive with a different immutable external installation ID, which creates a distinct internal connection generation; old cleanup is keyed by the revoked internal ID and cannot delete or mutate the reconnect. No behavior depends on webhook delivery order.
+
+### Migration decision
+
+A new `0009_provider_connection_revocations.sql` migration is necessary because permanent anti-resurrection state must survive physical deletion of `provider_connections`. It adds `revoked` to the allowed provider-connection statuses and adds the durable tombstone table with both the immutable revoked internal ID and a unique workspace/provider/external-ID guard. The tombstone deliberately has no foreign key to the physical connection, so cascade cleanup cannot erase the revocation evidence. The original provider-connection external-ID uniqueness remains intact. Migrations `0001` through `0008` are unchanged; `0009_provider_connection_revocations.sql` is now the highest migration and the fresh/upgrade/schema tests include it.
+
+### RED evidence
+
+The first unit RED was:
+
+```text
+pnpm vitest run apps/worker/test/maintenance.test.ts apps/web/test/webhooks.test.ts --reporter=dot
+```
+
+It failed 3 of 29 tests: cleanup was absent at startup and during maintenance, and authoritative installation creation had no explicit generation semantics.
+
+The first disposable-PostgreSQL command was:
+
+```text
+TEST_DATABASE_URL=<disposable> pnpm vitest run packages/db/test/schema.integration.test.ts packages/db/test/deliveries.integration.test.ts apps/worker/test/availability-runtime.integration.test.ts --reporter=dot --maxWorkers=1 --minWorkers=1
+```
+
+Schema/delivery produced the intended 3 failures and 9 passes: physical deletion removed the row, the reconnect-generation contract was absent, and migration `0009` did not exist. The worker file initially failed collection because that app test directly imported Kysely through a pnpm-inaccessible package path; the test-only lock observation was corrected to use the existing typed database handle, without production changes.
+
+The corrected worker RED was:
+
+```text
+TEST_DATABASE_URL=<disposable> pnpm vitest run apps/worker/test/availability-runtime.integration.test.ts --reporter=dot --maxWorkers=1 --minWorkers=1
+```
+
+It failed 2 of 24 tests. With provider authority holding the job and waiting for the locked absence, physical deletion did not settle within 500 ms; in the reverse ordering it removed the connection instead of leaving durable revocation.
+
+The delayed-suspension RED was:
+
+```text
+TEST_DATABASE_URL=<disposable> pnpm vitest run packages/db/test/deliveries.integration.test.ts -t 'durably revokes' --reporter=dot --maxWorkers=1 --minWorkers=1
+```
+
+It failed the selected test, with 9 skipped, because a late suspension changed `revoked` back to `suspended` and replaced its metadata.
+
+The initial reconnect design allowed authoritative `installation.created` to supersede a tombstone for the same external ID. The final fail-closed ruling was first captured with:
+
+```text
+pnpm vitest run apps/web/test/webhooks.test.ts --reporter=dot
+```
+
+It failed 1 of 24 tests because the route still emitted `establishNewGeneration: true`; that signal and the supersede API/schema were then removed before final GREEN.
+
+### GREEN and operational evidence
+
+All database verification used a disposable PostgreSQL 16 container with tmpfs storage on a random host port. No persistent database was touched.
+
+- Webhook and maintenance unit slice: 2 files, 29/29 tests.
+- Schema, delivery/reconnect/cleanup, and controlled deadlock runtime slice: 3 files, 36/36 tests. The runtime file contributes both orderings and asserts prompt revocation, zero provider writes, no false history or intent, and permanent revoked status.
+- Final delivery fail-closed/reconnect slice: 10/10 tests. It proves same-ID creation remains blocked before and after physical cleanup, a new external ID remains active, pending old work delays cleanup, and repeated cleanup is idempotent.
+- Final maintenance retry slice: 5/5 tests; a failed cleanup attempt is retried on the following cycle while heartbeat/outbox work continues.
+- Root PostgreSQL run: `TEST_DATABASE_URL=<disposable> pnpm test --reporter=dot --silent --maxWorkers=2 --minWorkers=2` — 71 files, 811/811 tests.
+- `pnpm build` passed. `pnpm check` passed its full rebuild and all package type checks.
+- `pnpm check:package-boundary`, `docker compose config --quiet`, `docker build .`, and `git diff --check` passed.
+- `gitleaks git --no-banner --redact .` scanned 122 commits with no leaks; `gitleaks dir --no-banner --redact .` scanned the working tree with no leaks.
+- The tracked public-boundary tests passed in the 811-test root run. The standalone `pnpm check:public-boundary` still exits nonzero only for the inherited Task 6 report terms `commercial` and `saas`; this breaker resolution adds no finding.
+
+Implementation commit: `0c6ebd8a2b6519e72036604f81eb5bacca7cec80` (`fix: revoke provider connections before cleanup`).
+
+### Residual external API ambiguity
+
+The prior accepted external boundary remains: an HTTP mutation already accepted by GitHub cannot be recalled if authority is lost while that request is in flight. The bounded authority signal prevents later controllable requests, and durable intent plus idempotent reconciliation handles the unknown result.
+
+GitHub installation lifecycle payloads expose the external installation ID but no TriagePilot internal generation token. This implementation assumes a real reinstall receives a new immutable installation ID, which is the expected GitHub lifecycle. It does not treat delivery order or a repeated `installation.created` action as proof that a tombstoned ID is a new generation: doing so would let a delayed old `installation.deleted` revoke a new connection. If GitHub ever reuses an installation ID, the system intentionally stays disconnected until explicit operator intervention proves the new identity and reconciles the tombstone.
+
+No push, pull request, tag, publication, dependency change, released-migration edit, or persistent-database operation was performed.
