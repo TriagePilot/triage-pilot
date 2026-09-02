@@ -109,13 +109,9 @@ describe("OperationsDashboard", () => {
     });
     expect(client.queueRoutingRecovery).toHaveBeenCalledWith(workspace, { decisionId: "decision-1" });
     expect(container.textContent).toContain("Routing run queued");
-
-    await act(async () => {
-      buttonNamed(container, /refresh ledger/i)?.click();
-      await flushAsyncWork();
-    });
     expect(client.readOperationsOverview).toHaveBeenCalledWith(workspace);
     expect(container.textContent).toContain("77");
+    expect(buttonNamed(container, /refresh ledger/i)).not.toBeNull();
   });
 
   it("queues a missing change request, retains errors, and clears the input only after success", async () => {

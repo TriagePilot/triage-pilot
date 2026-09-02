@@ -92,6 +92,7 @@ function OperationsDashboardWorkspace({
         tone: "success",
         message: "Routing run queued. The new revision will appear after the worker processes it.",
       });
+      await loadOverview();
     } catch (caught) {
       const message = messageFrom(caught, "Could not queue the routing run.");
       if (isUnauthorized(caught)) {
