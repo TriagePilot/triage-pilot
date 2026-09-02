@@ -1,8 +1,16 @@
+import { randomUUID } from "node:crypto";
 import { getConnInfo } from "@hono/node-server/conninfo";
+import {
+  RoutingRecoveryTargetUnavailableError,
+  RoutingRecoveryValidationError,
+  queueRoutingRecovery,
+  type RoutingRecoveryRequest,
+} from "@triagepilot/application";
 import { resolveConfiguration, type TriagePilotConfig } from "@triagepilot/config";
 import type { ConfigurationDocument, ConfigurationSource, RepositoryRef, WorkspaceId } from "@triagepilot/contracts";
 import {
   createDatabase,
+  createWorkspaceRoutingRecoveryRepository,
   createWorkspaceRepositories,
   ensureLocalWorkspace,
   type WorkspaceRepositories,
@@ -15,6 +23,7 @@ import {
   GitHubCredentialProvider,
   githubRepositoryUrl,
   normalizeGitHubWebhook,
+  parseGitHubPullRequestUrl,
   verifyGitHubSignature,
 } from "@triagepilot/provider-github";
 
@@ -39,11 +48,19 @@ export interface SelfHostedWebComposition {
   localRepositories: WorkspaceRepositories;
   services: WebServices;
   configuration: SelfHostedConfigurationProbe;
+  routingRecovery: SelfHostedRoutingRecovery;
   close(): Promise<void>;
 }
 
 export interface SelfHostedWebCompositionDependencies {
   createRequester?: typeof createInstallationRequester;
+  createRunId?: () => string;
+}
+
+export type SelfHostedRoutingRecoveryRequest = { decisionId: string } | { changeRequestUrl: string };
+
+export interface SelfHostedRoutingRecovery {
+  queue(request: SelfHostedRoutingRecoveryRequest): Promise<{ jobId: string; routingKey: string }>;
 }
 
 export async function createSelfHostedWebComposition(
@@ -54,6 +71,13 @@ export async function createSelfHostedWebComposition(
   const workspaceId = await ensureLocalWorkspace(db);
   const localRepositories = createWorkspaceRepositories(db, workspaceId);
   const configuration = createSelfHostedConfigurationProbe(workspaceId);
+  const routingRecovery = createSelfHostedRoutingRecovery({
+    db,
+    workspaceId,
+    github: env.github,
+    ...(dependencies.createRequester === undefined ? {} : { createRequester: dependencies.createRequester }),
+    ...(dependencies.createRunId === undefined ? {} : { createRunId: dependencies.createRunId }),
+  });
   const services = createWebRuntimeServices({
     db,
     workspaceId,
@@ -83,8 +107,99 @@ export async function createSelfHostedWebComposition(
     localRepositories,
     services,
     configuration,
+    routingRecovery,
     close: () => db.destroy(),
   };
+}
+
+export function createSelfHostedRoutingRecovery(input: {
+  db: DatabaseClient;
+  workspaceId: WorkspaceId;
+  github: WebRuntimeEnv["github"];
+  createRequester?: typeof createInstallationRequester;
+  createRunId?: () => string;
+}): SelfHostedRoutingRecovery {
+  const repository = createWorkspaceRoutingRecoveryRepository(input.db, input.workspaceId);
+  const credentialProvider = new GitHubCredentialProvider(input.github);
+  const createRequester = input.createRequester ?? createInstallationRequester;
+  const createRunId = input.createRunId ?? randomUUID;
+
+  return {
+    async queue(request) {
+      const applicationRequest = await toRoutingRecoveryRequest(request);
+      return await queueRoutingRecovery({ workspaceId: input.workspaceId, request: applicationRequest }, {
+        createRunId,
+        findTarget: async (targetInput) => {
+          if (targetInput.workspaceId !== input.workspaceId) return null;
+          return await repository.findTarget(targetInput.request);
+        },
+        fetchCurrentState: async (target) => {
+          if (target.workspaceId !== input.workspaceId || target.repository.provider !== "github") {
+            throw new RoutingRecoveryTargetUnavailableError(
+              "Routing recovery target is unavailable in this workspace",
+            );
+          }
+          const externalConnectionId = await repository.findActiveExternalConnectionId({
+            provider: target.repository.provider,
+            providerConnectionId: target.providerConnectionId,
+          });
+          if (externalConnectionId === null) {
+            throw new RoutingRecoveryTargetUnavailableError(
+              "Routing recovery target is unavailable in this workspace",
+            );
+          }
+          const credentials = await credentialProvider.getCredential({
+            workspaceId: input.workspaceId,
+            providerConnectionId: target.providerConnectionId,
+          });
+          const requester = await createRequester({
+            appId: credentials.appId,
+            privateKey: credentials.privateKey,
+            installationId: toSafeInteger(externalConnectionId),
+          });
+          return await new GitHubAdapter(requester).fetchRoutingRecoveryState({
+            pullRequest: {
+              owner: target.repository.owner,
+              repo: target.repository.name,
+              pullNumber: target.changeRequestNumber,
+            },
+          });
+        },
+        enqueue: async (enqueueInput) => {
+          if (enqueueInput.workspaceId !== input.workspaceId) return null;
+          return await repository.enqueue({
+            provider: enqueueInput.provider,
+            providerConnectionId: enqueueInput.providerConnectionId,
+            payload: enqueueInput.payload,
+            idempotencyKey: enqueueInput.idempotencyKey,
+          });
+        },
+      });
+    },
+  };
+
+  async function toRoutingRecoveryRequest(request: unknown): Promise<RoutingRecoveryRequest> {
+    if (isRecord(request) && Object.keys(request).length === 1 && typeof request.changeRequestUrl === "string") {
+      const parsed = parseGitHubPullRequestUrl(request.changeRequestUrl);
+      if (parsed === null) throw new RoutingRecoveryValidationError("Enter a valid GitHub pull request URL");
+      const activeRepository = await repository.findActiveRepository({
+        provider: "github",
+        owner: parsed.owner,
+        name: parsed.repo,
+      });
+      if (activeRepository === null) {
+        throw new RoutingRecoveryTargetUnavailableError("Routing recovery target is unavailable in this workspace");
+      }
+      return {
+        changeRequest: {
+          repository: activeRepository,
+          externalId: String(parsed.pullNumber),
+          number: parsed.pullNumber,
+        },
+      };
+    }
+    return request as RoutingRecoveryRequest;
+  }
 }
 
 function createSelfHostedConfigurationProbe(workspaceId: WorkspaceId): SelfHostedConfigurationProbe {

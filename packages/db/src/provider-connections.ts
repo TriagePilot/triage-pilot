@@ -392,7 +392,7 @@ async function upsertRepository(
   return row.id;
 }
 
-async function lockProviderConnectionProjection(
+export async function lockProviderConnectionProjection(
   trx: Transaction<Database>,
   workspaceId: WorkspaceId,
 ): Promise<void> {

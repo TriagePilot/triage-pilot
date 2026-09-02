@@ -7,6 +7,92 @@ import { createSelfHostedWebComposition } from "../src/composition/self-hosted";
 import { withPostgresTestDatabaseUrl } from "../../../packages/db/test/postgres";
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("self-hosted web composition", () => {
+  it("maps a GitHub pull-request URL into a provider-neutral operator recovery job", async () => {
+    await withPostgresTestDatabaseUrl(async (databaseUrl) => {
+      await runMigrations(databaseUrl);
+      const request = vi.fn().mockResolvedValueOnce({
+        data: {
+          state: "open",
+          draft: false,
+          base: { sha: "base-current" },
+          head: { sha: "head-current" },
+        },
+      });
+      const createRequester = vi.fn(async () => ({ request }));
+      const composition = await createSelfHostedWebComposition(webEnv(databaseUrl), {
+        createRequester: createRequester as never,
+        createRunId: () => "run-a91f5c",
+      });
+      try {
+        await composition.localRepositories.replaceProviderConnectionRepositories({
+          provider: "github",
+          externalConnectionId: "99",
+          workspaceLogin: "acme",
+          accountType: "Organization",
+          repositories: [{ provider: "github", externalRepositoryId: "101", owner: "AcMe", name: "api" }],
+        });
+
+        await expect(composition.routingRecovery.queue({
+          changeRequestUrl: "https://github.com/acme/API/pull/17",
+        })).resolves.toMatchObject({
+          jobId: expect.any(String),
+          routingKey: `routing:${composition.workspaceId}:github:101:17:base-current:head-current:ready:operator:run-a91f5c`,
+        });
+
+        expect(createRequester).toHaveBeenCalledWith({
+          appId: "123",
+          privateKey: "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
+          installationId: 99,
+        });
+        expect(request).toHaveBeenCalledWith("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
+          owner: "AcMe",
+          repo: "api",
+          pull_number: 17,
+        });
+        await expect(composition.db.selectFrom("webhook_receipts").select("id").execute()).resolves.toEqual([]);
+        await expect(composition.db.selectFrom("jobs").select(["provider", "provider_connection_id", "payload"]).execute())
+          .resolves.toEqual([expect.objectContaining({
+            provider: "github",
+            payload: expect.objectContaining({
+              deliveryId: "operator:run-a91f5c",
+              eventName: "operator.routing_recovery",
+              isDraft: false,
+              changeRequest: expect.objectContaining({
+                repository: { provider: "github", externalId: "101", owner: "AcMe", name: "api" },
+                externalId: "17",
+                number: 17,
+                baseRevision: "base-current",
+                headRevision: "head-current",
+              }),
+            }),
+          })]);
+      } finally {
+        await composition.close();
+      }
+    });
+  });
+
+  it("rejects invalid or inactive self-hosted recovery targets before provider access", async () => {
+    await withPostgresTestDatabaseUrl(async (databaseUrl) => {
+      await runMigrations(databaseUrl);
+      const createRequester = vi.fn();
+      const composition = await createSelfHostedWebComposition(webEnv(databaseUrl), {
+        createRequester: createRequester as never,
+        createRunId: () => "run-c91e46",
+      });
+      try {
+        await expect(composition.routingRecovery.queue({ changeRequestUrl: "https://example.test/acme/api/pull/17" }))
+          .rejects.toMatchObject({ code: "invalid_target" });
+        await expect(composition.routingRecovery.queue({ changeRequestUrl: "https://github.com/acme/api/pull/17" }))
+          .rejects.toMatchObject({ code: "not_found_or_inactive" });
+        expect(createRequester).not.toHaveBeenCalled();
+        await expect(composition.db.selectFrom("jobs").select("id").execute()).resolves.toEqual([]);
+      } finally {
+        await composition.close();
+      }
+    });
+  });
+
   it("resolves the persisted local workspace before exposing web services", async () => {
     await withPostgresTestDatabaseUrl(async (databaseUrl) => {
       await runMigrations(databaseUrl);

@@ -29,6 +29,9 @@ importers:
       '@hono/node-server':
         specifier: ^1.19.15
         version: 1.19.15(hono@4.12.34)
+      '@triagepilot/application':
+        specifier: workspace:*
+        version: link:../../packages/application
       '@triagepilot/config':
         specifier: workspace:*
         version: link:../../packages/config

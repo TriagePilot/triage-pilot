@@ -4,10 +4,12 @@ export {
   GitHubConfigurationSource,
   githubChangeRequestUrl,
   githubRepositoryUrl,
+  parseGitHubPullRequestUrl,
   type CheckRunRef,
   type PullRequestRef,
   type PullRequestReview,
   type GitHubReviewerReplacementState,
+  type GitHubRoutingRecoveryState,
   type ReviewerReplacementErrorClassification,
   type RepositoryRef,
 } from "./adapter.js";

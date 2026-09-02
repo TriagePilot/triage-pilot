@@ -7,12 +7,39 @@ import {
   ReviewerAbsenceRevisionError,
   createJobClaimer,
   createWorkspaceRepositories,
+  createWorkspaceRoutingRecoveryRepository,
   createWorkspaceReviewerAvailability,
   ensureLocalWorkspace,
 } from "../src";
 import { withPostgresTestDatabase } from "./postgres";
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace persistence isolation", () => {
+  it("keeps routing recovery decisions scoped to their owning workspace", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const workspaceA = await ensureLocalWorkspace(db);
+      const workspaceB = await createWorkspace(db, "recovery-workspace-b");
+      await seedConnectionAndRepository(db, workspaceA, "github", "recovery-a", "recovery-repository", "api");
+      await seedConnectionAndRepository(db, workspaceB, "github", "recovery-b", "recovery-repository", "api");
+      const repositoryA = await repositoryId(db, workspaceA, "github", "recovery-repository");
+      const repositoryB = await repositoryId(db, workspaceB, "github", "recovery-repository");
+      const decisionA = await createWorkspaceRepositories(db, workspaceA)
+        .persistDecision(decision(repositoryA, "recovery-delivery-a", "recovery-routing-a"));
+      const decisionB = await createWorkspaceRepositories(db, workspaceB)
+        .persistDecision(decision(repositoryB, "recovery-delivery-b", "recovery-routing-b"));
+      const recoveryA = createWorkspaceRoutingRecoveryRepository(db, workspaceA);
+      const recoveryB = createWorkspaceRoutingRecoveryRepository(db, workspaceB);
+
+      await expect(recoveryA.findTarget({ decisionId: decisionB.decisionId })).resolves.toBeNull();
+      await expect(recoveryB.findTarget({ decisionId: decisionA.decisionId })).resolves.toBeNull();
+      await expect(recoveryA.findTarget({ decisionId: decisionA.decisionId })).resolves.toMatchObject({
+        repository: { externalId: "recovery-repository" },
+      });
+      await expect(recoveryB.findTarget({ decisionId: decisionB.decisionId })).resolves.toMatchObject({
+        repository: { externalId: "recovery-repository" },
+      });
+    });
+  });
+
   it("allows provider-qualified identities to repeat only in their proper scope", async () => {
     await withPostgresTestDatabase(async (db) => {
       const workspaceA = await ensureLocalWorkspace(db);

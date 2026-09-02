@@ -1,8 +1,76 @@
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 
-import { GitHubAdapter } from "../src/adapter";
+import { GitHubAdapter, parseGitHubPullRequestUrl } from "../src/adapter";
 
 describe("GitHubAdapter", () => {
+  it("parses an exact public GitHub pull-request URL", () => {
+    expect(parseGitHubPullRequestUrl("https://github.com/AcMe/api-service/pull/17"))
+      .toEqual({ owner: "AcMe", repo: "api-service", pullNumber: 17 });
+    expect(parseGitHubPullRequestUrl("https://github.com/AcMe/api-service/pull/17/"))
+      .toEqual({ owner: "AcMe", repo: "api-service", pullNumber: 17 });
+  });
+
+  it.each([
+    "http://github.com/acme/api/pull/17",
+    "https://github.example/acme/api/pull/17",
+    "https://github.com/acme/api/issues/17",
+    "https://github.com/acme/api/pull/0",
+    "https://github.com/acme/api/pull/2147483648",
+    "https://github.com/acme/api/pull/17?diff=split",
+    "https://token@github.com/acme/api/pull/17",
+    "not-a-url",
+  ])("rejects a non-canonical pull-request URL: %s", (value) => {
+    expect(parseGitHubPullRequestUrl(value)).toBeNull();
+  });
+
+  it("reads current routing state from the GitHub pull request", async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: {
+        state: "open",
+        draft: true,
+        base: { sha: "base-current" },
+        head: { sha: "head-current" },
+      },
+    });
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await expect(adapter.fetchRoutingRecoveryState({
+      pullRequest: { owner: "acme", repo: "api", pullNumber: 17 },
+    })).resolves.toEqual({
+      state: "open",
+      baseRevision: "base-current",
+      headRevision: "head-current",
+      isDraft: true,
+    });
+    expect(request).toHaveBeenCalledWith("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
+      owner: "acme",
+      repo: "api",
+      pull_number: 17,
+    });
+  });
+
+  it("returns no current routing state when GitHub cannot find the pull request", async () => {
+    const request = vi.fn().mockRejectedValueOnce(Object.assign(new Error("Not Found"), { status: 404 }));
+    const adapter = new GitHubAdapter({ request } as never);
+
+    await expect(adapter.fetchRoutingRecoveryState({
+      pullRequest: { owner: "acme", repo: "api", pullNumber: 17 },
+    })).resolves.toBeNull();
+  });
+
+  it.each([
+    [{ draft: false, base: { sha: "base-current" }, head: { sha: "head-current" } }],
+    [{ state: "open", draft: "false", base: { sha: "base-current" }, head: { sha: "head-current" } }],
+    [{ state: "open", draft: false, base: {}, head: { sha: "head-current" } }],
+    [{ state: "open", draft: false, base: { sha: "base-current" }, head: {} }],
+  ])("fails closed on malformed current routing state", async (data) => {
+    const adapter = new GitHubAdapter({ request: vi.fn().mockResolvedValueOnce({ data }) } as never);
+
+    await expect(adapter.fetchRoutingRecoveryState({
+      pullRequest: { owner: "acme", repo: "api", pullNumber: 17 },
+    })).rejects.toThrow("GitHub pull request routing state is unavailable");
+  });
+
   it("inspects current replacement state with normalized provider actors", async () => {
     const request = vi
       .fn()

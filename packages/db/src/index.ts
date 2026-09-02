@@ -72,6 +72,17 @@ export {
 } from "./deliveries.js";
 export { readWorkerHeartbeat, updateWorkerHeartbeat, type WorkerHeartbeat } from "./heartbeat.js";
 export {
+  createWorkspaceRoutingRecoveryRepository,
+  enqueueRoutingRecovery,
+  findActiveExternalConnectionId,
+  findActiveRecoveryRepository,
+  findRoutingRecoveryTarget,
+  type RoutingRecoveryEnqueueInput,
+  type RoutingRecoveryTarget,
+  type RoutingRecoveryTargetRequest,
+  type WorkspaceRoutingRecoveryRepository,
+} from "./routing-recovery.js";
+export {
   findRepositoryConfigurationTarget,
   readOperationsOverview,
   type ActionFailureOverview,

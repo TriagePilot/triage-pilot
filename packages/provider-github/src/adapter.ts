@@ -90,6 +90,13 @@ export interface GitHubReviewerReplacementState {
   }>;
 }
 
+export interface GitHubRoutingRecoveryState {
+  state: string;
+  baseRevision: string;
+  headRevision: string;
+  isDraft: boolean;
+}
+
 export interface ReviewerReplacementErrorClassification {
   kind: "permanent" | "retryable";
   message: string;
@@ -122,6 +129,34 @@ export class GitHubAdapter {
       ref: defaultBranch,
     });
     return readRequiredString(commitResponse.data, "sha", "GitHub default branch revision");
+  }
+
+  async fetchRoutingRecoveryState(input: { pullRequest: PullRequestRef }): Promise<GitHubRoutingRecoveryState | null> {
+    let response: { data: unknown };
+    try {
+      response = await this.octokit.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
+        ...toPullParams(input.pullRequest),
+      });
+    } catch (error) {
+      if (isGitHubStatus(error, 404)) return null;
+      throw error;
+    }
+    if (!isRecord(response.data)
+      || !isRecord(response.data.base)
+      || !isRecord(response.data.head)
+      || typeof response.data.draft !== "boolean") {
+      throw new GitHubReviewerReplacementProtocolError("GitHub pull request routing state is unavailable");
+    }
+    try {
+      return {
+        state: readRequiredString(response.data, "state", "GitHub pull request state").toLowerCase(),
+        baseRevision: readRequiredString(response.data.base, "sha", "GitHub pull request base revision"),
+        headRevision: readRequiredString(response.data.head, "sha", "GitHub pull request head revision"),
+        isDraft: response.data.draft,
+      };
+    } catch {
+      throw new GitHubReviewerReplacementProtocolError("GitHub pull request routing state is unavailable");
+    }
   }
 
   async inspectReviewerReplacement(input: {
@@ -502,6 +537,27 @@ export function githubChangeRequestUrl(
   changeRequestNumber: number,
 ): string {
   return `${githubRepositoryUrl(repository)}/pull/${changeRequestNumber}`;
+}
+
+export function parseGitHubPullRequestUrl(value: unknown): PullRequestRef | null {
+  if (typeof value !== "string" || value.trim() !== value || value.length === 0) return null;
+  try {
+    const url = new URL(value);
+    const match = /^\/([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9._-]+)\/pull\/([1-9][0-9]*)\/?$/.exec(url.pathname);
+    if (url.protocol !== "https:"
+      || url.hostname !== "github.com"
+      || url.port !== ""
+      || url.username !== ""
+      || url.password !== ""
+      || url.search !== ""
+      || url.hash !== ""
+      || match === null) return null;
+    const pullNumber = Number(match[3]);
+    if (!Number.isSafeInteger(pullNumber) || pullNumber > 2_147_483_647) return null;
+    return { owner: match[1]!, repo: match[2]!, pullNumber };
+  } catch {
+    return null;
+  }
 }
 
 function toRepositoryParams(ref: RepositoryRef) {
