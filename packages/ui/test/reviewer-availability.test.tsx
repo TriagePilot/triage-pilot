@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
 import { act } from "react";
+import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -138,6 +139,112 @@ describe("reusable reviewer availability", () => {
     });
     expect(onUnauthorized).toHaveBeenCalledWith("The administrator session has expired.");
     expect(input(container, "availability-timezone")?.value).toBe("America/New_York");
+  });
+
+  it("clears fetched workspace data, drafts, and errors before the next workspace data arrives", async () => {
+    let resolveBSettings: ((value: typeof settings) => void) | undefined;
+    let resolveBAbsences: ((value: ReviewerAbsenceOverview[]) => void) | undefined;
+    let resolveBHistory: ((value: ReviewerReplacementOverview[]) => void) | undefined;
+    const bSettings = new Promise<typeof settings>((resolve) => { resolveBSettings = resolve; });
+    const bAbsences = new Promise<ReviewerAbsenceOverview[]>((resolve) => { resolveBAbsences = resolve; });
+    const bHistory = new Promise<ReviewerReplacementOverview[]>((resolve) => { resolveBHistory = resolve; });
+    const client = api({
+      readAvailabilitySettings: vi.fn((activeWorkspace: WorkspaceContext) => activeWorkspace.id === workspace.id ? Promise.resolve(settings) : bSettings),
+      listReviewerAbsences: vi.fn((activeWorkspace: WorkspaceContext) => activeWorkspace.id === workspace.id ? Promise.resolve([absence]) : bAbsences),
+      listReviewerReplacementHistory: vi.fn((activeWorkspace: WorkspaceContext) => activeWorkspace.id === workspace.id ? Promise.resolve([replacement]) : bHistory),
+      scheduleReviewerAbsence: vi.fn(async () => { throw new Error("workspace A form error"); }),
+    });
+    const container = await mount(<ReviewerAvailability api={client} workspace={workspace} authorization={authorization} />);
+    await act(async () => {
+      setValue(container, "absence-actor", "@workspace-a-draft");
+      setValue(container, "absence-start", "2026-09-03T08:00");
+      setValue(container, "absence-end", "2026-09-03T17:00");
+      formFor(container, "absence-actor")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("workspace A form error");
+
+    const workspaceB = { id: "workspace-2", displayName: "Workspace two" };
+    await act(async () => {
+      flushSync(() => {
+        root?.render(<ReviewerAvailability api={client} workspace={workspaceB} authorization={authorization} />);
+      });
+    });
+
+    expect(container.textContent).toContain("Loading reviewer availability");
+    expect(container.textContent).not.toContain("@user-d82a5f");
+    expect(container.textContent).not.toContain("@user-c91e46");
+    expect(container.textContent).not.toContain("workspace A form error");
+    expect(input(container, "absence-actor")).toBeNull();
+
+    await act(async () => {
+      resolveBSettings?.({ timezone: "UTC", updatedAt: "2026-09-02T00:00:00.000Z" });
+      resolveBAbsences?.([{ ...absence, id: "absence-b", externalActorId: "@workspace-b" }]);
+      resolveBHistory?.([]);
+      await Promise.all([bSettings, bAbsences, bHistory]);
+    });
+    expect(container.textContent).toContain("@workspace-b");
+  });
+
+  it("replaces complete initial availability when the workspace identity changes", async () => {
+    const container = await mount(<ReviewerAvailability
+      api={api()}
+      workspace={workspace}
+      authorization={authorization}
+      initialSettings={settings}
+      initialAbsences={[absence]}
+      initialReplacementHistory={[replacement]}
+    />);
+    await act(async () => setValue(container, "absence-actor", "@workspace-a-draft"));
+
+    await act(async () => root?.render(<ReviewerAvailability
+      api={api()}
+      workspace={{ id: "workspace-2", displayName: "Workspace two" }}
+      authorization={authorization}
+      initialSettings={{ timezone: "UTC", updatedAt: "2026-09-02T00:00:00.000Z" }}
+      initialAbsences={[{ ...absence, id: "absence-b", externalActorId: "@workspace-b" }]}
+      initialReplacementHistory={[]}
+    />));
+
+    expect(container.textContent).toContain("@workspace-b");
+    expect(container.textContent).not.toContain("@user-d82a5f");
+    expect(container.textContent).not.toContain("@user-c91e46");
+    expect(input(container, "absence-actor")?.value).toBe("");
+  });
+
+  it("blocks timezone changes during an edit and serializes its original UTC offsets", async () => {
+    const client = api();
+    const container = await mount(<ReviewerAvailability
+      api={client}
+      workspace={workspace}
+      authorization={authorization}
+      initialSettings={settings}
+      initialAbsences={[absence]}
+      initialReplacementHistory={[]}
+    />);
+    await act(async () => button(container, "Edit")?.click());
+
+    expect(input(container, "availability-timezone")?.disabled).toBe(true);
+    expect(input(container, "absence-start")?.value).toBe("2026-09-01T08:00");
+    expect(input(container, "absence-start-offset")?.value).toBe("+02:00");
+    await act(async () => {
+      formFor(container, "availability-timezone")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    expect(client.updateAvailabilityTimezone).not.toHaveBeenCalled();
+
+    await act(async () => {
+      formFor(container, "absence-actor")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    expect(client.reviseReviewerAbsence).toHaveBeenCalledWith(workspace, "absence-1", {
+      externalActorId: "@user-d82a5f",
+      startLocal: "2026-09-01T08:00",
+      endLocal: "2026-09-01T17:00",
+      startUtcOffset: "+02:00",
+      endUtcOffset: "+02:00",
+      expectedRevision: 2,
+    });
   });
 });
 

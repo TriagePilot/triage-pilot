@@ -23,6 +23,12 @@ export interface ReviewerAvailabilityProps {
 const emptyForm: ReviewerAbsenceMutation = { externalActorId: "", startLocal: "", endLocal: "" };
 
 export function ReviewerAvailability({
+  ...props
+}: ReviewerAvailabilityProps) {
+  return <ReviewerAvailabilityWorkspace key={props.workspace.id} {...props} />;
+}
+
+function ReviewerAvailabilityWorkspace({
   api,
   workspace,
   authorization,
@@ -93,6 +99,7 @@ export function ReviewerAvailability({
 
   async function submitTimezone(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (editing !== null) return;
     await mutate("timezone", async () => {
       const next = await api.updateAvailabilityTimezone(workspace, timezone);
       setSettings(next);
@@ -130,6 +137,8 @@ export function ReviewerAvailability({
       externalActorId: absence.externalActorId,
       startLocal: toLocalDateTime(absence.startAt, settings!.timezone),
       endLocal: toLocalDateTime(absence.endAt, settings!.timezone),
+      startUtcOffset: toUtcOffset(absence.startAt, settings!.timezone),
+      endUtcOffset: toUtcOffset(absence.endAt, settings!.timezone),
     });
   }
 
@@ -146,9 +155,9 @@ export function ReviewerAvailability({
         <>
           <form className="availability-form" onSubmit={(event) => void submitTimezone(event)}>
             <label htmlFor="availability-timezone">Workspace timezone</label>
-            <input id="availability-timezone" value={timezone} onChange={(event) => setTimezone(event.target.value)} disabled={busy} required />
-            <small>Use an IANA timezone, for example Europe/Bratislava.</small>
-            <button type="submit" disabled={busy}>{pending === "timezone" ? "Saving…" : "Save timezone"}</button>
+            <input id="availability-timezone" value={timezone} onChange={(event) => setTimezone(event.target.value)} disabled={busy || editing !== null} required />
+            <small>{editing ? "Finish or discard the active edit before changing timezone." : "Use an IANA timezone, for example Europe/Bratislava."}</small>
+            <button type="submit" disabled={busy || editing !== null}>{pending === "timezone" ? "Saving…" : "Save timezone"}</button>
           </form>
           <form className="availability-form" onSubmit={(event) => void submitAbsence(event)}>
             <h3>{editing ? `Edit absence for ${editing.externalActorId}` : "Record reviewer absence"}</h3>
@@ -213,6 +222,19 @@ function toLocalDateTime(value: string, timezone: string): string {
     timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
   }).formatToParts(new Date(value)).filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
   return `${fields.year}-${fields.month}-${fields.day}T${fields.hour}:${fields.minute}`;
+}
+
+function toUtcOffset(value: string, timezone: string): string {
+  const instant = new Date(value);
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(instant);
+  const read = (type: Intl.DateTimeFormatPartTypes) => Number(parts.find((part) => part.type === type)?.value);
+  const localAsUtc = Date.UTC(read("year"), read("month") - 1, read("day"), read("hour"), read("minute"));
+  const offsetMinutes = Math.round((localAsUtc - instant.getTime()) / 60_000);
+  const sign = offsetMinutes < 0 ? "-" : "+";
+  const absolute = Math.abs(offsetMinutes);
+  return `${sign}${String(Math.floor(absolute / 60)).padStart(2, "0")}:${String(absolute % 60).padStart(2, "0")}`;
 }
 
 function capitalize(value: string): string {
