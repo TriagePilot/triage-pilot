@@ -278,6 +278,7 @@ function api(overrides: Partial<OperationsApiClient> = {}): OperationsApiClient 
     reviseReviewerAbsence: vi.fn(async () => absence),
     cancelReviewerAbsence: vi.fn(async () => ({ ...absence, status: "cancelled" as const })),
     listReviewerReplacementHistory: vi.fn(async () => [replacement]),
+    queueRoutingRecovery: vi.fn(async () => ({ jobId: "job-recovery-1" })),
     ...overrides,
   } as OperationsApiClient & Record<string, ReturnType<typeof vi.fn>>;
 }

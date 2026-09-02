@@ -30,7 +30,7 @@ describe("admin application", () => {
     expect(html).not.toContain("Webhook secret");
   });
 
-  it("renders the read-only operational chain and semantic data tables", () => {
+  it("renders the operational chain, recovery controls, and semantic data tables", () => {
     const html = renderToStaticMarkup(
       <Dashboard username="admin" overview={overview} onLogout={async () => {}} />,
     );
@@ -62,8 +62,10 @@ describe("admin application", () => {
     expect(html).toContain('aria-labelledby="decisions-heading"');
     expect(html).toContain('aria-labelledby="job-failures-heading"');
     expect(html).toContain('aria-labelledby="action-failures-heading"');
-    expect(html.match(/<button/g)).toHaveLength(1);
-    expect(html).not.toContain("<input");
+    expect(html.match(/<button/g)).toHaveLength(3);
+    expect(html).toContain("Run missing change request");
+    expect(html).toContain("Re-run routing");
+    expect(html).toContain('id="routing-recovery-url"');
     expect(html).not.toContain("<select");
   });
 

@@ -62,6 +62,7 @@ export function buildServices(overrides: Partial<WebServices> = {}): WebServices
       cancelledAt: input.now.toISOString(), createdAt: input.now.toISOString(), updatedAt: input.now.toISOString(),
     }),
     listReviewerReplacementHistory: async () => [],
+    queueRoutingRecovery: async () => ({ jobId: "job-recovery-1" }),
     ...overrides,
   };
 }

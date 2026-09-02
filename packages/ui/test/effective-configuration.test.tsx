@@ -96,6 +96,7 @@ const api: OperationsApiClient = {
       ],
     };
   },
+  async queueRoutingRecovery() { return { jobId: "job-recovery-1" }; },
 };
 
 function buttonNamed(container: HTMLElement, label: RegExp): HTMLButtonElement | null {

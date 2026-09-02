@@ -5,6 +5,23 @@ import { createWebRuntimeServices } from "../src/runtime-services";
 import { withPostgresTestDatabase } from "../../../packages/db/test/postgres";
 
 describe("web runtime services", () => {
+  it("delegates routing recovery to the provider-aware self-hosted composition", async () => {
+    const db = new NoAccessDb();
+    const queueRoutingRecovery = vi.fn(async () => ({ jobId: "job-recovery-1", routingKey: "routing-key-1" }));
+    const services = createWebRuntimeServices({
+      ...runtimeInput(db as never, () => new Date()),
+      queueRoutingRecovery,
+    });
+
+    await expect(services.queueRoutingRecovery({
+      changeRequestUrl: "https://github.com/acme/api/pull/7",
+    })).resolves.toEqual({ jobId: "job-recovery-1" });
+    expect(queueRoutingRecovery).toHaveBeenCalledWith({
+      changeRequestUrl: "https://github.com/acme/api/pull/7",
+    });
+    expect(db.accessedTables).toEqual([]);
+  });
+
   it("delegates review policy acceptance to the database service", async () => {
     const db = new NoAccessDb();
     const acceptHumanReviewPolicyDelivery = vi.fn(async () => ({ inserted: true, jobId: "job-review-1" }));
@@ -252,6 +269,7 @@ function runtimeInput(
       effectiveHash: "a".repeat(64),
       values: [],
     }),
+    queueRoutingRecovery: async () => ({ jobId: "job-recovery-1", routingKey: "routing-key-1" }),
   };
 }
 

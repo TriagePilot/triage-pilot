@@ -2,7 +2,7 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { OperationsDashboard, type OperationsApiClient, type WorkspaceContext } from "@triagepilot/ui";
 
@@ -76,7 +76,95 @@ describe("OperationsDashboard", () => {
     });
 
     expect(buttonNamed(container, /edit configuration/i)).toBeNull();
+    expect(buttonNamed(container, /re-run routing/i)).toBeNull();
+    expect(container.textContent).not.toContain("Run missing change request");
     expect(container.textContent).toContain("Operations ledger");
+  });
+
+  it("queues recovery for a displayed decision and refreshes the ledger after success", async () => {
+    const client = apiClient();
+    const refreshed = { ...overview, decisions: [{ ...overview.decisions[0]!, riskScore: 77 }] };
+    client.readOperationsOverview.mockResolvedValue(refreshed);
+    const container = await mountDashboard(client);
+
+    await act(async () => {
+      buttonNamed(container, /re-run routing/i)?.click();
+      await flushAsyncWork();
+    });
+    expect(client.queueRoutingRecovery).toHaveBeenCalledWith(workspace, { decisionId: "decision-1" });
+    expect(container.textContent).toContain("Routing run queued");
+
+    await act(async () => {
+      buttonNamed(container, /refresh ledger/i)?.click();
+      await flushAsyncWork();
+    });
+    expect(client.readOperationsOverview).toHaveBeenCalledWith(workspace);
+    expect(container.textContent).toContain("77");
+  });
+
+  it("queues a missing change request, retains errors, and clears the input only after success", async () => {
+    const client = apiClient();
+    client.queueRoutingRecovery
+      .mockRejectedValueOnce(Object.assign(new Error("Enter a valid provider change-request URL."), { status: 422 }))
+      .mockResolvedValueOnce({ jobId: "job-recovery-1" });
+    const container = await mountDashboard(client);
+    await act(async () => setValue(container, "routing-recovery-url", "https://provider.example/acme/api/changes/7"));
+
+    await act(async () => {
+      formFor(container, "routing-recovery-url")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await flushAsyncWork();
+    });
+    expect(container.textContent).toContain("Enter a valid provider change-request URL.");
+    expect(input(container, "routing-recovery-url")?.value).toBe("https://provider.example/acme/api/changes/7");
+
+    await act(async () => {
+      formFor(container, "routing-recovery-url")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await flushAsyncWork();
+    });
+    expect(client.queueRoutingRecovery).toHaveBeenLastCalledWith(workspace, {
+      changeRequestUrl: "https://provider.example/acme/api/changes/7",
+    });
+    expect(input(container, "routing-recovery-url")?.value).toBe("");
+  });
+
+  it("serializes recovery mutations across decision and missing-request controls", async () => {
+    let resolveQueue: ((value: { jobId: string }) => void) | undefined;
+    const pendingQueue = new Promise<{ jobId: string }>((resolve) => { resolveQueue = resolve; });
+    const client = apiClient();
+    client.queueRoutingRecovery.mockImplementation(() => pendingQueue);
+    const container = await mountDashboard(client);
+    await act(async () => setValue(container, "routing-recovery-url", "https://provider.example/acme/api/changes/7"));
+
+    await act(async () => {
+      buttonNamed(container, /re-run routing/i)?.click();
+      formFor(container, "routing-recovery-url")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(client.queueRoutingRecovery).toHaveBeenCalledTimes(1);
+    expect(buttonNamed(container, /queueing/i)?.disabled).toBe(true);
+    expect(input(container, "routing-recovery-url")?.disabled).toBe(true);
+
+    await act(async () => {
+      resolveQueue?.({ jobId: "job-recovery-1" });
+      await pendingQueue;
+    });
+    expect(buttonNamed(container, /re-run routing/i)?.disabled).toBe(false);
+  });
+
+  it("returns recovery session expiry to the host without rendering it as an operation error", async () => {
+    const onUnauthorized = vi.fn();
+    const client = apiClient();
+    client.queueRoutingRecovery.mockRejectedValue(Object.assign(
+      new Error("The administrator session has expired."),
+      { status: 401 },
+    ));
+    const container = await mountDashboard(client, onUnauthorized);
+
+    await act(async () => {
+      buttonNamed(container, /re-run routing/i)?.click();
+      await flushAsyncWork();
+    });
+    expect(onUnauthorized).toHaveBeenCalledWith("The administrator session has expired.");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
   });
 });
 
@@ -150,7 +238,40 @@ const api: OperationsApiClient = {
   async readEffectiveConfiguration() {
     throw new Error("not used by OperationsDashboard");
   },
+  async queueRoutingRecovery() {
+    return { jobId: "job-recovery-1" };
+  },
 };
+
+const overview = await api.readOperationsOverview(workspace);
+
+function apiClient() {
+  return {
+    ...api,
+    readOperationsOverview: vi.fn(async () => overview),
+    queueRoutingRecovery: vi.fn(async () => ({ jobId: "job-recovery-1" })),
+  } as OperationsApiClient & {
+    readOperationsOverview: ReturnType<typeof vi.fn>;
+    queueRoutingRecovery: ReturnType<typeof vi.fn>;
+  };
+}
+
+async function mountDashboard(client: OperationsApiClient, onUnauthorized?: (message: string) => void) {
+  const container = document.createElement("div");
+  document.body.append(container);
+  await act(async () => {
+    root = createRoot(container);
+    root.render(<OperationsDashboard
+      api={client}
+      workspace={workspace}
+      authorization={{ canViewOperations: true, canManageConfiguration: false, canManageReviewerAvailability: false, canRunRoutingRecovery: true }}
+      navigation={{ hrefFor: (target) => `/ops/${target}` }}
+      initialOverview={overview}
+      {...(onUnauthorized ? { onUnauthorized } : {})}
+    />);
+  });
+  return container;
+}
 
 function buttonNamed(container: HTMLElement, label: RegExp): HTMLButtonElement | null {
   return (
@@ -158,6 +279,23 @@ function buttonNamed(container: HTMLElement, label: RegExp): HTMLButtonElement |
       label.test(button.textContent?.trim() ?? ""),
     ) ?? null
   );
+}
+
+function input(container: HTMLElement, id: string): HTMLInputElement | null {
+  return container.querySelector(`#${id}`);
+}
+
+function setValue(container: HTMLElement, id: string, value: string) {
+  const control = input(container, id);
+  if (!control) throw new Error(`missing input ${id}`);
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  setter?.call(control, value);
+  control.dispatchEvent(new Event("input", { bubbles: true }));
+  control.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function formFor(container: HTMLElement, id: string): HTMLFormElement | null {
+  return input(container, id)?.closest("form") ?? null;
 }
 
 async function flushAsyncWork(): Promise<void> {

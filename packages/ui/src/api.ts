@@ -54,6 +54,10 @@ export interface OperationsApiClient {
     workspace: WorkspaceContext,
     absenceId?: string,
   ): Promise<ReviewerReplacementOverview[]>;
+  queueRoutingRecovery(
+    workspace: WorkspaceContext,
+    request: { decisionId: string } | { changeRequestUrl: string },
+  ): Promise<{ jobId: string }>;
 }
 
 export interface AvailabilitySettingsOverview {

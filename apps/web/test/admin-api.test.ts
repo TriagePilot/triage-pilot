@@ -175,6 +175,44 @@ describe("admin API", () => {
     await expect(client.listReviewerAbsences(workspace)).rejects.toMatchObject({ status: 401 });
     expect(onUnauthorized).toHaveBeenCalledOnce();
   });
+
+  it("queues workspace-scoped routing recovery and maps operation errors", async () => {
+    const calls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    const onUnauthorized = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push([input, init]);
+      return Response.json({ status: "queued", jobId: "job-recovery-1" }, { status: 202 });
+    }));
+    const client = createSelfHostedOperationsApi({ onUnauthorized });
+
+    await expect(client.queueRoutingRecovery(workspace, {
+      decisionId: "00000000-0000-4000-8000-000000000010",
+    })).resolves.toEqual({ jobId: "job-recovery-1" });
+    expect(calls).toEqual([["/api/operations/routing-runs", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "content-type": "application/json",
+        "x-triagepilot-workspace": workspace.id,
+      },
+      body: JSON.stringify({ decisionId: "00000000-0000-4000-8000-000000000010" }),
+    }]]);
+    expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+
+  it("surfaces routing recovery response messages and returns 401 to the host", async () => {
+    const onUnauthorized = vi.fn();
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(Response.json({ error: "change_request_closed", message: "Only an open change request can be routed again" }, { status: 409 }))
+      .mockResolvedValueOnce(Response.json({ error: "unauthorized" }, { status: 401 })));
+    const client = createSelfHostedOperationsApi({ onUnauthorized });
+
+    await expect(client.queueRoutingRecovery(workspace, { changeRequestUrl: "https://provider.example/change/7" }))
+      .rejects.toMatchObject({ status: 409, message: "Only an open change request can be routed again" });
+    await expect(client.queueRoutingRecovery(workspace, { decisionId: "00000000-0000-4000-8000-000000000010" }))
+      .rejects.toMatchObject({ status: 401, message: "The administrator session has expired." });
+    expect(onUnauthorized).toHaveBeenCalledWith("The administrator session has expired.");
+  });
 });
 
 const emptyOverview = {

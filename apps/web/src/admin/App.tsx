@@ -26,7 +26,7 @@ const selfHostedAuthorization: AuthorizationCapabilities = {
   canViewOperations: true,
   canManageConfiguration: false,
   canManageReviewerAvailability: true,
-  canRunRoutingRecovery: false,
+  canRunRoutingRecovery: true,
 };
 const localNavigation: NavigationHost = {
   hrefFor: (target) => `#${target}`,
@@ -158,6 +158,7 @@ export function App() {
       {...(effectiveConfiguration === null ? {} : { effectiveConfiguration })}
       error={error}
       api={api}
+      onUnauthorized={showSignedOut}
       onLogout={handleLogout}
     />
   );
@@ -279,6 +280,7 @@ export function Dashboard({
             </button>
           </div>
         }
+        {...(onUnauthorized ? { onUnauthorized } : {})}
       />
       <ReviewerAvailability
         api={api}
@@ -338,6 +340,7 @@ function fixedOverviewApi(overview: OperationsOverview): OperationsApiClient {
       return { ...fixtureAbsence("", "1970-01-01T00:00", "1970-01-01T00:01"), id: absenceId, status: "cancelled", revision: expectedRevision + 1 };
     },
     async listReviewerReplacementHistory() { return []; },
+    async queueRoutingRecovery() { return { jobId: "fixture-job" }; },
   };
 }
 

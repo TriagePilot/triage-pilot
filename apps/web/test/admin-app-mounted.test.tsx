@@ -184,6 +184,55 @@ describe("mounted admin application", () => {
       ],
     ]);
   });
+
+  it("moves a routing-recovery session expiry back to administrator sign in", async () => {
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      if (input === "/api/auth/session") {
+        return Response.json({
+          authenticated: true,
+          username: "admin",
+          workspaceId: "00000000-0000-4000-8000-000000000001",
+        });
+      }
+      if (input === "/api/operations/overview") return Response.json(emptyOverview);
+      if (input === "/api/operations/effective-configuration?repositoryId=repo-1") {
+        return Response.json({
+          repository: { label: "acme/api", href: "https://github.com/acme/api" },
+          trustedPath: null,
+          trustedRevision: "self-hosted-probe",
+          repositoryRevision: null,
+          inheritanceMode: "defaults",
+          effectiveHash: "a".repeat(64),
+          values: [],
+        });
+      }
+      if (input === "/api/operations/availability/timezone") {
+        return Response.json({ timezone: "UTC", updatedAt: "2026-08-18T10:00:00.000Z" });
+      }
+      if (input === "/api/operations/availability/absences") return Response.json([]);
+      if (input === "/api/operations/availability/replacements") return Response.json([]);
+      if (input === "/api/operations/routing-runs") {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
+      }
+      throw new Error(`unexpected request to ${String(input)}`);
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<App />);
+      await flushAsyncWork();
+    });
+    await act(async () => {
+      buttonNamed(container, "Re-run routing")?.click();
+      await flushAsyncWork();
+    });
+
+    expect(container.textContent).toContain("Administrator sign in");
+    expect(container.textContent).toContain("The administrator session has expired.");
+    expect(container.textContent).not.toContain("Operations ledger");
+  });
 });
 
 function buttonNamed(container: HTMLElement, label: string): HTMLButtonElement | null {

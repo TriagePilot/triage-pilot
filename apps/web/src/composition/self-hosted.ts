@@ -99,6 +99,7 @@ export async function createSelfHostedWebComposition(
       github: env.github,
       ...(dependencies.createRequester === undefined ? {} : { createRequester: dependencies.createRequester }),
     }),
+    queueRoutingRecovery: (request) => routingRecovery.queue(request),
   });
 
   return {

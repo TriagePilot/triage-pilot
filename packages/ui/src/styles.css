@@ -315,6 +315,39 @@ time,
   gap: 18px;
 }
 
+.routing-recovery-form {
+  display: grid;
+  grid-template-columns: minmax(16rem, 1fr) minmax(18rem, 2fr) auto;
+  align-items: end;
+  gap: 12px;
+  border-bottom: 1px solid var(--rule);
+  padding: 16px;
+  background: color-mix(in srgb, var(--canvas) 48%, var(--surface));
+}
+
+.routing-recovery-form label {
+  display: block;
+  font-size: 0.82rem;
+  font-weight: 750;
+}
+
+.routing-recovery-form input {
+  width: 100%;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  padding: 9px 10px;
+}
+
+.routing-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  border-right: 0;
+  border-left: 0;
+}
+
 .availability-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -425,6 +458,7 @@ time,
   .status-ledger,
   .failure-grid,
   .availability-grid,
+  .routing-recovery-form,
   .configuration-provenance {
     grid-template-columns: 1fr;
   }

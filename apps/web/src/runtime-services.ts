@@ -35,6 +35,9 @@ interface WebRuntimeServicesInput {
   verifySignature: WebServices["verifySignature"];
   normalizeGitHubWebhook: WebServices["normalizeGitHubWebhook"];
   readEffectiveConfiguration: (repositoryId: string) => Promise<EffectiveConfigurationOverview>;
+  queueRoutingRecovery(
+    request: { decisionId: string } | { changeRequestUrl: string },
+  ): Promise<{ jobId: string; routingKey: string }>;
 }
 
 export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebServices {
@@ -148,6 +151,11 @@ export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebSer
 
     async readEffectiveConfiguration(repositoryId) {
       return await input.readEffectiveConfiguration(repositoryId);
+    },
+
+    async queueRoutingRecovery(request) {
+      const queued = await input.queueRoutingRecovery(request);
+      return { jobId: queued.jobId };
     },
 
     async readAvailabilitySettings() {

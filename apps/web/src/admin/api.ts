@@ -101,6 +101,28 @@ export function createSelfHostedOperationsApi(input: {
       const query = absenceId === undefined ? "" : `?${new URLSearchParams({ absenceId })}`;
       return withUnauthorized(input.onUnauthorized, () => requestAvailability<ReviewerReplacementOverview[]>(workspace, `/replacements${query}`));
     },
+    async queueRoutingRecovery(workspace, request) {
+      return withUnauthorized(input.onUnauthorized, async () => {
+        const response = await fetch("/api/operations/routing-runs", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            "content-type": "application/json",
+            ...workspaceHeaders(workspace),
+          },
+          body: JSON.stringify(request),
+        });
+        if (response.status === 401) {
+          throw new AdminApiError("The administrator session has expired.", 401);
+        }
+        if (!response.ok) {
+          const body = await response.json().catch(() => null) as { message?: string } | null;
+          throw new AdminApiError(body?.message ?? "Could not queue the routing run.", response.status);
+        }
+        const queued = await response.json() as { jobId: string };
+        return { jobId: queued.jobId };
+      });
+    },
   };
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import type {
   AuthorizationCapabilities,
@@ -15,6 +15,7 @@ export interface OperationsDashboardProps {
   navigation: NavigationHost;
   initialOverview?: OperationsOverview;
   headerActions?: ReactNode;
+  onUnauthorized?(message: string): void;
 }
 
 type LoadState =
@@ -23,16 +24,27 @@ type LoadState =
   | { status: "failed"; message: string };
 
 export function OperationsDashboard({
+  ...props
+}: OperationsDashboardProps) {
+  return <OperationsDashboardWorkspace key={props.workspace.id} {...props} />;
+}
+
+function OperationsDashboardWorkspace({
   api,
   workspace,
   authorization,
   navigation,
   initialOverview,
   headerActions,
+  onUnauthorized,
 }: OperationsDashboardProps) {
   const [state, setState] = useState<LoadState>(
     initialOverview ? { status: "ready", overview: initialOverview } : { status: "loading" },
   );
+  const [recoveryUrl, setRecoveryUrl] = useState("");
+  const [pendingRecovery, setPendingRecovery] = useState<string | null>(null);
+  const [recoveryNotice, setRecoveryNotice] = useState<{ tone: "success" | "danger"; message: string } | null>(null);
+  const recoveryInFlight = useRef(false);
 
   async function loadOverview() {
     if (!authorization.canViewOperations) {
@@ -43,6 +55,10 @@ export function OperationsDashboard({
     try {
       setState({ status: "ready", overview: await api.readOperationsOverview(workspace) });
     } catch (caught) {
+      if (isUnauthorized(caught)) {
+        onUnauthorized?.(messageFrom(caught, "The operations session has expired."));
+        return;
+      }
       setState({ status: "failed", message: messageFrom(caught, "Could not load the operations overview.") });
     }
   }
@@ -54,6 +70,39 @@ export function OperationsDashboard({
     }
     void loadOverview();
   }, [api, workspace.id, authorization.canViewOperations, initialOverview]);
+
+  async function queueRecovery(
+    request: { decisionId: string } | { changeRequestUrl: string },
+    key: string,
+  ) {
+    if (recoveryInFlight.current || !authorization.canRunRoutingRecovery) return;
+    recoveryInFlight.current = true;
+    setPendingRecovery(key);
+    setRecoveryNotice(null);
+    try {
+      await api.queueRoutingRecovery(workspace, request);
+      if ("changeRequestUrl" in request) setRecoveryUrl("");
+      setRecoveryNotice({
+        tone: "success",
+        message: "Routing run queued. The new revision will appear after the worker processes it.",
+      });
+    } catch (caught) {
+      const message = messageFrom(caught, "Could not queue the routing run.");
+      if (isUnauthorized(caught)) {
+        onUnauthorized?.(message);
+        return;
+      }
+      setRecoveryNotice({ tone: "danger", message });
+    } finally {
+      recoveryInFlight.current = false;
+      setPendingRecovery(null);
+    }
+  }
+
+  async function submitMissingRequest(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await queueRecovery({ changeRequestUrl: recoveryUrl }, "missing-request");
+  }
 
   if (state.status === "loading") {
     return (
@@ -163,6 +212,44 @@ export function OperationsDashboard({
       </DataSection>
 
       <DataSection id="decisions" title="Recent routing decisions" count={overview.decisions.length}>
+        {authorization.canRunRoutingRecovery ? (
+          <form className="routing-recovery-form" onSubmit={(event) => void submitMissingRequest(event)}>
+            <div>
+              <label htmlFor="routing-recovery-url">Run missing change request</label>
+              <span className="cell-detail">Use its provider URL or reference when no routing decision exists yet.</span>
+            </div>
+            <input
+              id="routing-recovery-url"
+              type="url"
+              required
+              placeholder="https://provider.example/owner/repository/change/123"
+              value={recoveryUrl}
+              onChange={(event) => setRecoveryUrl(event.target.value)}
+              disabled={pendingRecovery !== null}
+            />
+            <button type="submit" disabled={pendingRecovery !== null}>
+              {pendingRecovery === "missing-request" ? "Queueing…" : "Run routing"}
+            </button>
+          </form>
+        ) : null}
+        {recoveryNotice ? (
+          <div
+            role={recoveryNotice.tone === "danger" ? "alert" : "status"}
+            className={`notice notice--${recoveryNotice.tone} routing-notice`}
+          >
+            <span>{recoveryNotice.message}</span>
+            {recoveryNotice.tone === "success" ? (
+              <button
+                className="button--quiet button--compact"
+                type="button"
+                disabled={pendingRecovery !== null}
+                onClick={() => void loadOverview()}
+              >
+                Refresh ledger
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         <TableRegion labelledBy="decisions-heading">
           <table>
             <caption className="sr-only">Recent routing decisions</caption>
@@ -175,11 +262,14 @@ export function OperationsDashboard({
                 <th scope="col">Outcome</th>
                 <th scope="col">Reviewers</th>
                 <th scope="col">Recorded</th>
+                {authorization.canRunRoutingRecovery ? <th scope="col">Action</th> : null}
               </tr>
             </thead>
             <tbody>
               {overview.decisions.length === 0 ? (
-                <EmptyRow columns={7}>No routing decisions have been recorded yet.</EmptyRow>
+                <EmptyRow columns={authorization.canRunRoutingRecovery ? 8 : 7}>
+                  No routing decisions have been recorded yet.
+                </EmptyRow>
               ) : (
                 overview.decisions.map((decision) => (
                   <tr key={decision.id}>
@@ -215,6 +305,22 @@ export function OperationsDashboard({
                     <td>
                       <time dateTime={decision.createdAt}>{formatDate(decision.createdAt)}</time>
                     </td>
+                    {authorization.canRunRoutingRecovery ? (
+                      <td>
+                        {decision.changeRequest === null ? (
+                          <span className="cell-detail">—</span>
+                        ) : (
+                          <button
+                            className="button--compact"
+                            type="button"
+                            disabled={pendingRecovery !== null}
+                            onClick={() => void queueRecovery({ decisionId: decision.id }, decision.id)}
+                          >
+                            {pendingRecovery === decision.id ? "Queueing…" : "Re-run routing"}
+                          </button>
+                        )}
+                      </td>
+                    ) : null}
                   </tr>
                 ))
               )}
@@ -443,4 +549,8 @@ function formatDate(value: string): string {
 
 function messageFrom(caught: unknown, fallback: string): string {
   return caught instanceof Error ? caught.message : fallback;
+}
+
+function isUnauthorized(caught: unknown): boolean {
+  return typeof caught === "object" && caught !== null && "status" in caught && caught.status === 401;
 }
