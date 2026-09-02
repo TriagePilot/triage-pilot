@@ -91,3 +91,34 @@ git diff --check
 
 - No known Task 10 blocker or deferred behavior.
 - The repository-wide non-database test command intentionally skips integration suites without `TEST_DATABASE_URL`; the availability and self-hosted composition suites were run separately against disposable PostgreSQL as recorded above.
+
+## Independent-review fix round 1
+
+Review-fix commit: `488f7b8c370509ccc1388db99147edcb0f38a4cf` (`fix: isolate reviewer availability workspace state`)
+
+Addressed both Important findings:
+
+- `ReviewerAvailability` now keys its stateful implementation by `workspace.id`. A workspace change synchronously replaces every cached projection, draft, pending confirmation, and error before the next workspace is painted. This covers both API-fetched data and complete initial props.
+- Timezone mutation is blocked while an absence edit is active. Beginning an edit derives and includes the exact UTC offsets for both persisted instants, so submitting an untouched edit has explicit DST semantics and cannot reinterpret the wall times in another zone.
+
+Review-fix RED:
+
+```text
+pnpm vitest run packages/ui/test/reviewer-availability.test.tsx
+```
+
+- 3 tests failed as expected: fetched workspace A remained visible during the synchronous switch to B, complete B initial props retained A indefinitely, and timezone remained editable while edit payloads omitted UTC offsets.
+
+Review-fix GREEN and focused gate:
+
+```text
+pnpm --filter @triagepilot/ui build
+pnpm vitest run packages/ui/test/reviewer-availability.test.tsx packages/ui/test/operations-dashboard.test.tsx packages/ui/test/effective-configuration.test.tsx apps/web/test/admin-app-mounted.test.tsx apps/web/test/admin-api.test.ts apps/web/test/availability.test.ts apps/web/test/availability-input.test.ts
+pnpm --filter @triagepilot/web check
+pnpm check:package-boundary
+git diff --check
+```
+
+- 7 files passed, 37 tests passed, 0 failed, with no warnings.
+- Public UI build, web type-check, package-boundary, and whitespace checks passed.
+- No backend, API, persistence, migration, or authorization behavior changed in this fix round.
