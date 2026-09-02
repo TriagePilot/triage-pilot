@@ -7,6 +7,7 @@
 - [Backups and restore](self-hosting/backups.md)
 - [Upgrades](self-hosting/upgrades.md)
 - [Retention](operations/retention.md)
+- [Reviewer availability](operations/reviewer-availability.md)
 - [Job troubleshooting](troubleshooting/jobs.md)
 - [Release checklist](self-hosting/release-checklist.md)
 

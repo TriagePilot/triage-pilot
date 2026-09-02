@@ -20,6 +20,8 @@ Set native required approvals to `0`. GitHub's numeric approval requirement is g
 
 TriagePilot never creates, edits, or manages this ruleset. Self-hosters choose the protected branches and required checks in GitHub.
 
+Reviewer availability is centrally administered. It may change future selected cohorts and outstanding cohorts without an effective approval, but it cannot expand repository-configured eligibility or revoke an effective GitHub approval.
+
 ## Check lifecycle
 
 - A no-human route completes the check successfully.

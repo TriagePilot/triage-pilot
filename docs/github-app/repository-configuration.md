@@ -62,6 +62,8 @@ Every resolved configuration includes a SHA-256 hash of canonical JSON and leaf-
 
 Reviewer values must be individual GitHub user handles such as `@sasha`; organization team handles are not supported. Path patterns use glob syntax.
 
+Reviewer availability is set centrally by the administrator, not in this repository file. It may change future selected cohorts and outstanding cohorts without an effective approval, but it cannot expand this configuration's eligibility or revoke an effective GitHub approval.
+
 Reaching either `risk.size.high_changed_files` or `risk.size.high_changed_lines` marks a pull request high risk after test files are excluded. The defaults are 100 changed files and 5,000 changed lines.
 
 Routing is intentionally bounded by risk tier:
@@ -71,6 +73,8 @@ Routing is intentionally bounded by risk tier:
 - high risk requests one human reviewer by default, or up to two when `routing.high_risk_reviewers: 2` is set.
 
 `high_risk_reviewers` accepts only `1` or `2`. When equally loaded candidates are available, TriagePilot uses a stable pull-request-specific ordering instead of always favoring the alphabetically first handle. If fewer reviewers are eligible than requested, it records the shortfall and requests only the available reviewers. TriagePilot never requests more than two human reviewers for one decision.
+
+The pull-request author never counts toward this reviewer quota. Reviewers from matching ownership rules are selected first; when author exclusion, reviewer absence, or a small matched ownership set leaves the quota unfilled, TriagePilot supplements the remaining slots from `ownership.fallback_reviewers`. A fallback reviewer never displaces an available reviewer from a matching ownership rule.
 
 In enforce mode, TriagePilot also synchronizes one risk label on each routed pull request: `triagepilot:risk-low`, `triagepilot:risk-medium`, or `triagepilot:risk-high`. It creates these labels with green, amber, and red colors when needed. On a later routing decision it replaces only an older `triagepilot:risk-*` label; labels managed by the repository team are left unchanged. Shadow mode never creates or changes labels.
 
