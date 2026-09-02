@@ -60,7 +60,7 @@ Cleanup retries at worker startup and during maintenance. If `cleanup_completed_
 
 ## Recover missing or stalled routing
 
-In the administrator operations ledger, routing decisions are grouped by pull request. Expand a group to inspect its recent revisions, or use **Re-run routing** to fetch the pull request's current GitHub state and enqueue a new routing revision. If the pull request has no recorded decision, paste its GitHub URL into **Run missing pull request**. The administrator session and bound workspace are required; an expired session returns control to the login flow.
+In the administrator operations dashboard, each recorded routing decision appears as a separate row in the **Recent routing decisions** table. Use **Re-run routing** on the relevant row to fetch the pull request's current GitHub state and enqueue a new routing revision. If the pull request has no recorded decision, paste its GitHub URL into **Run missing change request**, then select **Run routing**. The administrator session and bound workspace are required; an expired session returns control to the login flow.
 
 Recovery is available only for open pull requests in active configured repositories. Unknown, cross-workspace, and inactive targets share the same not-found response so target existence is not leaked. A closed pull request is rejected explicitly. Recovery reads the pull request's current base, head, and draft state, then creates a fresh operator run identity. It creates an ordinary routing job, not a synthetic webhook receipt, and does not reuse the earlier delivery or routing key.
 

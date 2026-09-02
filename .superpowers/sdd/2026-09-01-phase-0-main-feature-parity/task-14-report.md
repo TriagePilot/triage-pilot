@@ -137,6 +137,31 @@ The verified local bundle remains outside the checkout at `/tmp/triagepilot-task
 
 These values are local review evidence only. They are not release publication timestamps or promises about future published bytes. Task 15 must regenerate evidence after its final branch-wide verification/fix state.
 
+## Review fix
+
+The Task 14 review found that the routing-recovery troubleshooting paragraph described expandable pull-request revision groups and a **Run missing pull request** control that the public operations UI does not provide. The paragraph now matches the executable UI: the **Recent routing decisions** table renders one row per recorded decision, row recovery uses **Re-run routing**, and a request without a decision uses **Run missing change request** followed by **Run routing**.
+
+There is no documentation-specific test harness in the repository. The component source and its behavioral suite were therefore used as the executable reference. Verification after the documentation-only correction:
+
+```text
+pnpm exec vitest run packages/ui/test/operations-dashboard.test.tsx
+PASS: 1 file, 7 tests.
+
+pnpm exec vitest run \
+  test/create-release-manifest.test.ts \
+  test/release-manifest.test.ts \
+  test/verify-release-artifacts.test.ts \
+  test/publish-release-artifacts.test.ts \
+  test/workflow-release.test.ts
+PASS: 5 files, 61 tests.
+
+pnpm check:public-boundary
+git diff --check
+PASS.
+```
+
+The correction does not alter or regenerate the retained dry-run artifact bundle or its recorded hashes.
+
 ## Concerns
 
 - The final report commit necessarily follows the exact source commit used for the dry-run bundle. Task 15 must regenerate evidence from the final reviewed branch head rather than reuse these hashes.
