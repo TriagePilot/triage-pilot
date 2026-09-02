@@ -29,8 +29,9 @@ import {
 } from "./operations.js";
 import {
   activateConfiguredProviderConnection,
-  deleteConfiguredProviderConnection,
+  cleanupRevokedProviderConnections,
   replaceProviderConnectionRepositories,
+  revokeConfiguredProviderConnection,
   suspendConfiguredProviderConnection,
   updateProviderConnectionRepositories,
   upsertConfiguredProviderConnection,
@@ -74,7 +75,8 @@ export interface WorkspaceRepositories {
   replaceProviderConnectionRepositories(input: ConfiguredProviderConnectionInput): Promise<void>;
   updateProviderConnectionRepositories(input: ProviderConnectionRepositoryUpdateInput): Promise<void>;
   suspendConfiguredProviderConnection(input: ProviderConnectionMetadata): Promise<void>;
-  deleteConfiguredProviderConnection(input: Pick<ProviderConnectionMetadata, "provider" | "externalConnectionId">): Promise<void>;
+  revokeConfiguredProviderConnection(input: Pick<ProviderConnectionMetadata, "provider" | "externalConnectionId">): Promise<void>;
+  cleanupRevokedProviderConnections(now: Date): Promise<number>;
 }
 
 export function createWorkspaceRepositories(
@@ -102,6 +104,7 @@ export function createWorkspaceRepositories(
     replaceProviderConnectionRepositories: (input) => replaceProviderConnectionRepositories(db, workspaceId, input),
     updateProviderConnectionRepositories: (input) => updateProviderConnectionRepositories(db, workspaceId, input),
     suspendConfiguredProviderConnection: (input) => suspendConfiguredProviderConnection(db, workspaceId, input),
-    deleteConfiguredProviderConnection: (input) => deleteConfiguredProviderConnection(db, workspaceId, input),
+    revokeConfiguredProviderConnection: (input) => revokeConfiguredProviderConnection(db, workspaceId, input),
+    cleanupRevokedProviderConnections: (now) => cleanupRevokedProviderConnections(db, workspaceId, now),
   };
 }

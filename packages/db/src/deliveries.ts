@@ -30,12 +30,14 @@ export async function acceptRoutingDelivery(
   input: RoutingDeliveryInput,
 ): Promise<{ inserted: boolean; jobId: string | null }> {
   return await db.transaction().execute(async (trx) => {
-    const { providerConnectionId, repositoryId } = await upsertDeliveryRepository(
+    const projection = await upsertDeliveryRepository(
       trx,
       workspaceId,
       input.connection,
       input.repository,
     );
+    if (projection === null) return { inserted: false, jobId: null };
+    const { providerConnectionId, repositoryId } = projection;
     const receipt = await trx
       .insertInto("webhook_receipts")
       .values({
@@ -78,12 +80,14 @@ export async function acceptHumanReviewPolicyDelivery(
   input: HumanReviewPolicyDeliveryInput,
 ): Promise<{ inserted: boolean; jobId: string | null }> {
   return await db.transaction().execute(async (trx) => {
-    const { providerConnectionId, repositoryId } = await upsertDeliveryRepository(
+    const projection = await upsertDeliveryRepository(
       trx,
       workspaceId,
       input.connection,
       input.repository,
     );
+    if (projection === null) return { inserted: false, jobId: null };
+    const { providerConnectionId, repositoryId } = projection;
     const receipt = await trx
       .insertInto("webhook_receipts")
       .values({

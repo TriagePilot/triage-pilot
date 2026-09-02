@@ -28,10 +28,19 @@ export interface ProviderConnectionsTable {
   external_connection_id: string;
   workspace_login: string;
   account_type: string;
-  status: string;
+  status: "active" | "suspended" | "revoked";
   permissions: Json;
   created_at: Timestamp;
   updated_at: Timestamp;
+}
+
+export interface ProviderConnectionRevocationsTable {
+  workspace_id: string;
+  provider: ProviderKind;
+  external_connection_id: string;
+  revoked_connection_id: string;
+  revoked_at: Timestamp;
+  cleanup_completed_at: NullableTimestamp;
 }
 
 export interface RepositoriesTable {
@@ -195,6 +204,7 @@ export interface WorkerHeartbeatTable {
 export interface Database {
   workspaces: WorkspacesTable;
   provider_connections: ProviderConnectionsTable;
+  provider_connection_revocations: ProviderConnectionRevocationsTable;
   repositories: RepositoriesTable;
   webhook_receipts: WebhookReceiptsTable;
   jobs: JobsTable;

@@ -179,7 +179,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("delivery ingestion", () 
     });
   });
 
-  it("suspends and deletes only the configured provider connection", async () => {
+  it("suspends then durably revokes a provider connection before deferred cleanup", async () => {
     await withPostgresTestDatabase(async (db) => {
       const repositories = createWorkspaceRepositories(db, await ensureLocalWorkspace(db));
       await repositories.upsertConfiguredProviderConnection({
@@ -191,8 +191,94 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("delivery ingestion", () 
       await expect(db.selectFrom("provider_connections").select("status").executeTakeFirstOrThrow())
         .resolves.toEqual({ status: "suspended" });
 
-      await repositories.deleteConfiguredProviderConnection({ provider: "github", externalConnectionId: "99" });
-      await expectCounts(db, { provider_connections: 0, repositories: 0 });
+      await repositories.revokeConfiguredProviderConnection({ provider: "github", externalConnectionId: "99" });
+      await expect(db.selectFrom("provider_connections")
+        .select("status").executeTakeFirstOrThrow()).resolves.toEqual({ status: "revoked" });
+      await expectCounts(db, { provider_connections: 1, repositories: 1 });
+      await expect(db.selectFrom("provider_connection_revocations")
+        .select(["external_connection_id", "cleanup_completed_at"])
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+        external_connection_id: "99",
+        cleanup_completed_at: null,
+      });
+
+      await repositories.activateConfiguredProviderConnection(connection("99", "stale-unsuspend"));
+      await repositories.suspendConfiguredProviderConnection(connection("99", "stale-suspend"));
+      await expect(db.selectFrom("provider_connections")
+        .select(["workspace_login", "status"]).executeTakeFirstOrThrow()).resolves.toEqual({
+        workspace_login: "acme",
+        status: "revoked",
+      });
+    });
+  });
+
+  it("fails closed for a reused external ID and preserves a reconnect with a new external ID", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const repositories = createWorkspaceRepositories(db, await ensureLocalWorkspace(db));
+      await repositories.upsertConfiguredProviderConnection({
+        ...connection("99", "old-generation"),
+        repositories: [repository("101", "old-api")],
+      });
+      const oldConnection = await db.selectFrom("provider_connections").select("id").executeTakeFirstOrThrow();
+      await repositories.jobs.enqueue({
+        provider: "github",
+        providerConnectionId: oldConnection.id,
+        kind: "process_pull_request",
+        payload: { staleGeneration: true },
+        idempotencyKey: "stale-generation-job",
+        runAt: new Date("2100-01-01T00:00:00.000Z"),
+      });
+      await repositories.revokeConfiguredProviderConnection({ provider: "github", externalConnectionId: "99" });
+
+      await repositories.replaceProviderConnectionRepositories({
+        ...connection("99", "new-generation"),
+        repositories: [repository("201", "new-api")],
+      });
+
+      await expect(db.selectFrom("provider_connections")
+        .select(["id", "workspace_login", "status"]).execute()).resolves.toEqual([
+        { id: oldConnection.id, workspace_login: "old-generation", status: "revoked" },
+      ]);
+      await expect(db.selectFrom("repositories")
+        .select("external_repository_id").execute()).resolves.toEqual([
+        { external_repository_id: "101" },
+      ]);
+
+      await repositories.replaceProviderConnectionRepositories({
+        ...connection("100", "new-generation"),
+        repositories: [repository("201", "new-api")],
+      });
+      const newConnection = await db.selectFrom("provider_connections").select("id")
+        .where("external_connection_id", "=", "100").executeTakeFirstOrThrow();
+      expect(newConnection.id).not.toBe(oldConnection.id);
+
+      await expect(db.selectFrom("provider_connections")
+        .select(["id", "workspace_login", "status"])
+        .orderBy("external_connection_id", "desc").execute()).resolves.toEqual([
+        { id: oldConnection.id, workspace_login: "old-generation", status: "revoked" },
+        { id: newConnection.id, workspace_login: "new-generation", status: "active" },
+      ]);
+      await expect(repositories.cleanupRevokedProviderConnections(new Date("2100-01-01T00:00:00.000Z")))
+        .resolves.toBe(0);
+      await db.updateTable("jobs").set({ status: "failed" })
+        .where("provider_connection_id", "=", oldConnection.id).execute();
+      await expect(repositories.cleanupRevokedProviderConnections(new Date("2100-01-01T00:00:00.000Z")))
+        .resolves.toBe(1);
+      await expect(repositories.cleanupRevokedProviderConnections(new Date("2100-01-01T00:00:00.000Z")))
+        .resolves.toBe(0);
+      await repositories.activateConfiguredProviderConnection(connection("99", "late-stale-created"));
+      await expect(db.selectFrom("provider_connections")
+        .select(["id", "workspace_login", "status"]).execute()).resolves.toEqual([
+        { id: newConnection.id, workspace_login: "new-generation", status: "active" },
+      ]);
+      await expect(db.selectFrom("repositories")
+        .select(["provider_connection_id", "external_repository_id"]).execute()).resolves.toEqual([
+        { provider_connection_id: newConnection.id, external_repository_id: "201" },
+      ]);
+      await expect(db.selectFrom("provider_connection_revocations")
+        .select("cleanup_completed_at").executeTakeFirstOrThrow()).resolves.toEqual({
+        cleanup_completed_at: expect.any(Date),
+      });
     });
   });
 });

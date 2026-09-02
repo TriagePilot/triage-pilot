@@ -117,6 +117,9 @@ export async function createSelfHostedWorkerComposition(
     async recoverStaleJobs(now: Date) {
       await localRepositories.recoverStaleJobs(now);
     },
+    async cleanupRevokedProviderConnections(now: Date) {
+      await localRepositories.cleanupRevokedProviderConnections(now);
+    },
     async applyRetention(now: Date) {
       await localRepositories.applyFixedRetention(now);
     },

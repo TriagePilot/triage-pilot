@@ -495,8 +495,12 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace persistence is
         workspace_login: "acme",
         status: "active",
       });
-      await repositoriesA.deleteConfiguredProviderConnection({ provider: "github", externalConnectionId: "103" });
-      await expect(providerConnectionState(db, workspaceA)).resolves.toBeUndefined();
+      await repositoriesA.revokeConfiguredProviderConnection({ provider: "github", externalConnectionId: "103" });
+      await expect(providerConnectionState(db, workspaceA)).resolves.toEqual({
+        external_connection_id: "103",
+        workspace_login: "a-suspend",
+        status: "revoked",
+      });
       await expect(providerConnectionState(db, workspaceB)).resolves.toEqual({
         external_connection_id: "99",
         workspace_login: "acme",

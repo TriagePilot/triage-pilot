@@ -54,6 +54,7 @@ export async function replaceProviderConnectionRepositories(
   assertRepositoryProviders(input.provider, input.repositories);
   await db.transaction().execute(async (trx) => {
     const providerConnectionId = await upsertActiveProviderConnection(trx, workspaceId, input);
+    if (providerConnectionId === null) return;
     for (const repository of input.repositories) {
       await upsertRepository(trx, workspaceId, providerConnectionId, repository);
     }
@@ -135,23 +136,121 @@ export async function suspendConfiguredProviderConnection(
       .where("workspace_id", "=", workspaceId)
       .where("provider", "=", input.provider)
       .where("external_connection_id", "=", input.externalConnectionId)
+      .where("status", "=", "active")
       .execute();
   });
 }
 
-export async function deleteConfiguredProviderConnection(
+export async function revokeConfiguredProviderConnection(
   db: Kysely<Database>,
   workspaceId: WorkspaceId,
   input: Pick<ProviderConnectionMetadata, "provider" | "externalConnectionId">,
 ): Promise<void> {
   await db.transaction().execute(async (trx) => {
     await lockProviderConnectionProjection(trx, workspaceId);
-    await trx
-      .deleteFrom("provider_connections")
+    const connection = await trx
+      .selectFrom("provider_connections")
+      .select(["id", "status"])
       .where("workspace_id", "=", workspaceId)
       .where("provider", "=", input.provider)
       .where("external_connection_id", "=", input.externalConnectionId)
+      .where("status", "!=", "revoked")
+      .forUpdate()
+      .executeTakeFirst();
+    if (connection === undefined) return;
+    const revokedAt = new Date();
+    await trx.insertInto("provider_connection_revocations").values({
+      workspace_id: workspaceId,
+      provider: input.provider,
+      external_connection_id: input.externalConnectionId,
+      revoked_connection_id: connection.id,
+      revoked_at: revokedAt,
+      cleanup_completed_at: null,
+    }).onConflict((conflict) => conflict
+      .columns(["workspace_id", "provider", "revoked_connection_id"])
+      .doNothing()).execute();
+    await trx.updateTable("provider_connections").set({
+      status: "revoked",
+      updated_at: revokedAt,
+    }).where("workspace_id", "=", workspaceId)
+      .where("provider", "=", input.provider)
+      .where("id", "=", connection.id)
       .execute();
+  });
+}
+
+export async function cleanupRevokedProviderConnections(
+  db: Kysely<Database>,
+  workspaceId: WorkspaceId,
+  now: Date,
+  limit = 25,
+): Promise<number> {
+  if (!Number.isSafeInteger(limit) || limit <= 0) {
+    throw new Error("provider connection cleanup limit must be a positive integer");
+  }
+  const pending = await db.selectFrom("provider_connection_revocations")
+    .select(["provider", "revoked_connection_id"])
+    .where("workspace_id", "=", workspaceId)
+    .where("cleanup_completed_at", "is", null)
+    .orderBy("revoked_at")
+    .orderBy("revoked_connection_id")
+    .limit(limit)
+    .execute();
+  let cleaned = 0;
+  for (const candidate of pending) {
+    const completed = await cleanupRevokedProviderConnection(db, workspaceId, candidate, now);
+    if (completed) cleaned += 1;
+  }
+  return cleaned;
+}
+
+async function cleanupRevokedProviderConnection(
+  db: Kysely<Database>,
+  workspaceId: WorkspaceId,
+  candidate: { provider: ProviderKind; revoked_connection_id: string },
+  now: Date,
+): Promise<boolean> {
+  return await db.transaction().execute(async (trx) => {
+    const revocation = await trx.selectFrom("provider_connection_revocations")
+      .select("revoked_connection_id")
+      .where("workspace_id", "=", workspaceId)
+      .where("provider", "=", candidate.provider)
+      .where("revoked_connection_id", "=", candidate.revoked_connection_id)
+      .where("cleanup_completed_at", "is", null)
+      .forUpdate()
+      .executeTakeFirst();
+    if (revocation === undefined) return false;
+
+    const deleted = await trx.deleteFrom("provider_connections")
+      .where("workspace_id", "=", workspaceId)
+      .where("provider", "=", candidate.provider)
+      .where("id", "=", candidate.revoked_connection_id)
+      .where("status", "=", "revoked")
+      .where(({ not, exists, selectFrom }) => not(exists(
+        selectFrom("jobs").select("id")
+          .where("workspace_id", "=", workspaceId)
+          .where("provider", "=", candidate.provider)
+          .where("provider_connection_id", "=", candidate.revoked_connection_id)
+          .where("status", "in", ["queued", "running"]),
+      )))
+      .returning("id")
+      .executeTakeFirst();
+    if (deleted === undefined) {
+      const connection = await trx.selectFrom("provider_connections").select("status")
+        .where("workspace_id", "=", workspaceId)
+        .where("provider", "=", candidate.provider)
+        .where("id", "=", candidate.revoked_connection_id)
+        .executeTakeFirst();
+      if (connection !== undefined) return false;
+    }
+    await trx.updateTable("provider_connection_revocations")
+      .set({ cleanup_completed_at: now })
+      .where("workspace_id", "=", workspaceId)
+      .where("provider", "=", candidate.provider)
+      .where("revoked_connection_id", "=", candidate.revoked_connection_id)
+      .where("cleanup_completed_at", "is", null)
+      .execute();
+    return true;
   });
 }
 
@@ -160,9 +259,10 @@ export async function upsertDeliveryRepository(
   workspaceId: WorkspaceId,
   connection: ProviderConnectionMetadata,
   repository: ProviderRepositoryMetadata,
-): Promise<{ providerConnectionId: ProviderConnectionId; repositoryId: string }> {
+): Promise<{ providerConnectionId: ProviderConnectionId; repositoryId: string } | null> {
   assertRepositoryProviders(connection.provider, [repository]);
   const providerConnectionId = await upsertActiveProviderConnection(trx, workspaceId, connection);
+  if (providerConnectionId === null) return null;
   const repositoryId = await upsertRepository(trx, workspaceId, providerConnectionId, repository);
   return { providerConnectionId, repositoryId };
 }
@@ -171,8 +271,40 @@ async function upsertActiveProviderConnection(
   trx: Transaction<Database>,
   workspaceId: WorkspaceId,
   input: ProviderConnectionMetadata,
-): Promise<ProviderConnectionId> {
+): Promise<ProviderConnectionId | null> {
   await lockProviderConnectionProjection(trx, workspaceId);
+  const now = new Date();
+  const revocation = await trx.selectFrom("provider_connection_revocations")
+    .select("revoked_connection_id")
+    .where("workspace_id", "=", workspaceId)
+    .where("provider", "=", input.provider)
+    .where("external_connection_id", "=", input.externalConnectionId)
+    .forUpdate()
+    .executeTakeFirst();
+  if (revocation !== undefined) return null;
+
+  const exact = await trx.selectFrom("provider_connections")
+    .select(["id", "status"])
+    .where("workspace_id", "=", workspaceId)
+    .where("provider", "=", input.provider)
+    .where("external_connection_id", "=", input.externalConnectionId)
+    .where("status", "!=", "revoked")
+    .forUpdate()
+    .executeTakeFirst();
+  if (exact !== undefined) {
+    const updated = await trx.updateTable("provider_connections").set({
+      workspace_login: input.workspaceLogin,
+      account_type: input.accountType,
+      status: "active",
+      updated_at: now,
+    }).where("workspace_id", "=", workspaceId)
+      .where("provider", "=", input.provider)
+      .where("id", "=", exact.id)
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    return updated.id;
+  }
+
   const active = await trx
     .selectFrom("provider_connections")
     .select("id")
@@ -180,7 +312,6 @@ async function upsertActiveProviderConnection(
     .where("status", "=", "active")
     .forUpdate()
     .executeTakeFirst();
-  const now = new Date();
 
   if (active) {
     const updated = await trx
@@ -211,14 +342,6 @@ async function upsertActiveProviderConnection(
       status: "active",
       permissions: {},
     })
-    .onConflict((conflict) =>
-      conflict.columns(["workspace_id", "provider", "external_connection_id"]).doUpdateSet({
-        workspace_login: input.workspaceLogin,
-        account_type: input.accountType,
-        status: "active",
-        updated_at: now,
-      }),
-    )
     .returning("id")
     .executeTakeFirstOrThrow();
   return inserted.id;
@@ -260,6 +383,9 @@ async function lockProviderConnectionProjection(
   trx: Transaction<Database>,
   workspaceId: WorkspaceId,
 ): Promise<void> {
+  // Lifecycle projection changes serialize on this workspace lock before taking a provider row lock.
+  // Worker authority keeps its canonical job -> absence -> provider row order. Revocation never locks
+  // child rows, and deferred cleanup cascades only after no queued/running job references the generation.
   await sql`select pg_advisory_xact_lock(hashtextextended(${workspaceId}, 764737450))`.execute(trx);
 }
 

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createWorkspaceJobQueue,
+  createWorkspaceRepositories,
   createWorkspaceReviewerAvailability,
   ensureLocalWorkspace,
   persistDecision,
@@ -18,6 +19,52 @@ const unavailableActor = "@user-d82a5f";
 const eligibleActors = [unavailableActor, "@user-c91e46", "@user-f37a82"];
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker reviewer availability runtime crash recovery", () => {
+  it("commits revocation promptly while provider authority is blocked on its child-first lock order", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedActivation(db, "disconnect-provider-first");
+      const remote = new ReviewerRemote();
+      const hold = holdAbsenceLock(db, fixture);
+      await hold.acquired;
+      const processing = processReviewerAbsenceActivationJob(fixture.message, fixture.buildServices(remote));
+      await waitForBlockedAbsenceAuthority(db);
+
+      const disconnect = createWorkspaceRepositories(db, fixture.message.workspaceId)
+        .revokeConfiguredProviderConnection({ provider: "github", externalConnectionId: "99" });
+      const disconnectedPromptly = await settlesWithin(disconnect, 500);
+      hold.release();
+      await hold.transaction;
+      await Promise.allSettled([disconnect, processing]);
+
+      expect(disconnectedPromptly).toBe(true);
+      expect(remote.deleteCount).toBe(0);
+      expect(remote.postCount).toBe(0);
+      await expect(db.selectFrom("provider_connections")
+        .select("status").where("id", "=", fixture.connectionId)
+        .executeTakeFirstOrThrow()).resolves.toEqual({ status: "revoked" });
+      await expect(db.selectFrom("reviewer_replacements").select("id").execute()).resolves.toEqual([]);
+    });
+  });
+
+  it("rejects provider authority obtained after durable revocation without false history", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedActivation(db, "disconnect-revocation-first");
+      const repositories = createWorkspaceRepositories(db, fixture.message.workspaceId);
+      await repositories.revokeConfiguredProviderConnection({ provider: "github", externalConnectionId: "99" });
+      await expect(db.selectFrom("provider_connections")
+        .select("status").where("id", "=", fixture.connectionId)
+        .executeTakeFirstOrThrow()).resolves.toEqual({ status: "revoked" });
+
+      const remote = new ReviewerRemote();
+      await expect(processReviewerAbsenceActivationJob(fixture.message, fixture.buildServices(remote)))
+        .resolves.toBeNull();
+
+      expect(remote.deleteCount).toBe(0);
+      expect(remote.postCount).toBe(0);
+      await expect(db.selectFrom("reviewer_replacements").select("id").execute()).resolves.toEqual([]);
+      await expect(db.selectFrom("reviewer_mutation_intents").select("id").execute()).resolves.toEqual([]);
+    });
+  });
+
   it("treats an old claim rejected behind a new claim as obsolete without terminal history", async () => {
     await withPostgresTestDatabase(async (db) => {
       const fixture = await seedActivation(db, "obsolete-behind-new-claim");
@@ -438,6 +485,45 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker reviewer availabi
     },
   );
 });
+
+function holdAbsenceLock(
+  db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0],
+  fixture: Awaited<ReturnType<typeof seedActivation>>,
+) {
+  let release!: () => void;
+  let acquired!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const locked = new Promise<void>((resolve) => { acquired = resolve; });
+  const transaction = db.transaction().execute(async (trx) => {
+    await trx.selectFrom("reviewer_absences").select("id")
+      .where("id", "=", fixture.absence.id).forUpdate().executeTakeFirstOrThrow();
+    acquired();
+    await gate;
+  });
+  return { acquired: locked, release, transaction };
+}
+
+async function waitForBlockedAbsenceAuthority(
+  db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0],
+): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const activity = await db.selectFrom("pg_stat_activity" as "jobs").selectAll().execute() as unknown as Array<{
+      wait_event_type: string | null;
+      query: string;
+    }>;
+    if (activity.some((row) => row.wait_event_type === "Lock" && row.query.includes("reviewer_absences"))) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("provider authority did not block on the reviewer absence lock");
+}
+
+async function settlesWithin(operation: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  return await Promise.race([
+    operation.then(() => true, () => true),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+  ]);
+}
 
 async function seedActivation(
   db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0],

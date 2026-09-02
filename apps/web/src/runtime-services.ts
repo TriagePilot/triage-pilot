@@ -97,7 +97,7 @@ export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebSer
     },
 
     async deleteConfiguredInstallation(installation) {
-      await repositories.deleteConfiguredProviderConnection({
+      await repositories.revokeConfiguredProviderConnection({
         provider: "github",
         externalConnectionId: installation.githubInstallationId,
       });

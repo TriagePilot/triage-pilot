@@ -84,8 +84,9 @@ export {
 } from "./operations.js";
 export {
   activateConfiguredProviderConnection,
-  deleteConfiguredProviderConnection,
+  cleanupRevokedProviderConnections,
   replaceProviderConnectionRepositories,
+  revokeConfiguredProviderConnection,
   suspendConfiguredProviderConnection,
   updateProviderConnectionRepositories,
   upsertConfiguredProviderConnection,

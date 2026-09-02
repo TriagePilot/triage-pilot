@@ -17,6 +17,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
       expect(result.rows.map((row) => row.table_name)).toEqual([
         "decision_outbox",
         "jobs",
+        "provider_connection_revocations",
         "provider_connections",
         "repositories",
         "reviewer_absences",
@@ -147,6 +148,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         { name: "0006_decision_outbox.sql" },
         { name: "0007_workspace_reviewer_availability.sql" },
         { name: "0008_reviewer_mutation_intents.sql" },
+        { name: "0009_provider_connection_revocations.sql" },
       ]);
     });
   });
