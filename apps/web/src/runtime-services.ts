@@ -1,5 +1,9 @@
 import {
+  createWorkspaceReviewerAvailability,
   createWorkspaceRepositories,
+  ProviderConnectionUnavailableError,
+  type ReviewerAbsence,
+  type ReviewerReplacement,
   type createDatabase,
   type OperationsOverview as DatabaseOperationsOverview,
   type WorkspaceRepositories,
@@ -35,6 +39,22 @@ interface WebRuntimeServicesInput {
 
 export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebServices {
   const repositories = input.repositories ?? createWorkspaceRepositories(input.db, input.workspaceId);
+  const availability = createWorkspaceReviewerAvailability(input.db, input.workspaceId);
+
+  async function activeAvailabilityScope() {
+    const connections = await input.db
+      .selectFrom("provider_connections")
+      .select(["id", "provider"])
+      .where("workspace_id", "=", input.workspaceId)
+      .where("provider", "=", "github")
+      .where("status", "=", "active")
+      .limit(2)
+      .execute();
+    if (connections.length !== 1) {
+      throw new ProviderConnectionUnavailableError("Provider connection is not active in this workspace");
+    }
+    return connections[0]!;
+  }
   return {
     adminUsername: input.adminUsername,
     adminPassword: input.adminPassword,
@@ -129,6 +149,99 @@ export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebSer
     async readEffectiveConfiguration(repositoryId) {
       return await input.readEffectiveConfiguration(repositoryId);
     },
+
+    async readAvailabilitySettings() {
+      await activeAvailabilityScope();
+      return toAvailabilitySettings(await availability.readSettings());
+    },
+
+    async updateAvailabilityTimezone({ timezone, now }) {
+      await activeAvailabilityScope();
+      return toAvailabilitySettings(await availability.updateTimezone(timezone, now));
+    },
+
+    async listReviewerAbsences() {
+      const scope = await activeAvailabilityScope();
+      const now = input.now();
+      return (await availability.listAbsences())
+        .filter((absence) => absence.provider === scope.provider && absence.providerConnectionId === scope.id)
+        .map((absence) => toReviewerAbsenceOverview(absence, now));
+    },
+
+    async scheduleReviewerAbsence(availabilityInput) {
+      const scope = await activeAvailabilityScope();
+      return toReviewerAbsenceOverview(await availability.scheduleAbsence({
+        ...availabilityInput,
+        provider: scope.provider,
+        providerConnectionId: scope.id,
+      }), availabilityInput.now);
+    },
+
+    async reviseReviewerAbsence(availabilityInput) {
+      const scope = await activeAvailabilityScope();
+      return toReviewerAbsenceOverview(await availability.reviseAbsence({
+        ...availabilityInput,
+        provider: scope.provider,
+        providerConnectionId: scope.id,
+      }), availabilityInput.now);
+    },
+
+    async cancelReviewerAbsence(availabilityInput) {
+      const scope = await activeAvailabilityScope();
+      return toReviewerAbsenceOverview(await availability.cancelAbsence({
+        ...availabilityInput,
+        provider: scope.provider,
+        providerConnectionId: scope.id,
+      }), availabilityInput.now);
+    },
+
+    async listReviewerReplacementHistory(absenceId) {
+      const scope = await activeAvailabilityScope();
+      return (await availability.listReplacementHistory(absenceId))
+        .filter((replacement) => replacement.provider === scope.provider && replacement.providerConnectionId === scope.id)
+        .map(toReviewerReplacementOverview);
+    },
+  };
+}
+
+function toAvailabilitySettings(input: { timezone: string; updatedAt: Date }) {
+  return { timezone: input.timezone, updatedAt: input.updatedAt.toISOString() };
+}
+
+function toReviewerAbsenceOverview(absence: ReviewerAbsence, now: Date) {
+  const status = absence.status === "cancelled"
+    ? "cancelled" as const
+    : absence.endAt <= now
+      ? "ended" as const
+      : absence.startAt <= now
+        ? "active" as const
+        : "upcoming" as const;
+  return {
+    id: absence.id,
+    externalActorId: absence.externalActorId,
+    startAt: absence.startAt.toISOString(),
+    endAt: absence.endAt.toISOString(),
+    status,
+    revision: absence.revision,
+    cancelledAt: absence.cancelledAt?.toISOString() ?? null,
+    createdAt: absence.createdAt.toISOString(),
+    updatedAt: absence.updatedAt.toISOString(),
+  };
+}
+
+function toReviewerReplacementOverview(replacement: ReviewerReplacement) {
+  return {
+    id: replacement.id,
+    absenceId: replacement.absenceId,
+    absenceRevision: replacement.absenceRevision,
+    decisionId: replacement.decisionId,
+    unavailableActorId: replacement.unavailableActorId,
+    replacementActorId: replacement.replacementActorId,
+    outcome: replacement.outcome,
+    reason: replacement.reason,
+    state: replacement.state,
+    lastError: replacement.lastError,
+    completedAt: replacement.completedAt.toISOString(),
   };
 }
 

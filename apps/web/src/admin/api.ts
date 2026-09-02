@@ -1,7 +1,11 @@
 import type {
+  AvailabilitySettingsOverview,
   EffectiveConfigurationOverview,
   OperationsApiClient,
   OperationsOverview,
+  ReviewerAbsenceMutation,
+  ReviewerAbsenceOverview,
+  ReviewerReplacementOverview,
   RepositoryContext,
   WorkspaceContext,
 } from "@triagepilot/ui";
@@ -67,7 +71,64 @@ export function createSelfHostedOperationsApi(input: {
         throw caught;
       }
     },
+    async readAvailabilitySettings(workspace) {
+      return withUnauthorized(input.onUnauthorized, () => requestAvailability<AvailabilitySettingsOverview>(workspace, "/timezone"));
+    },
+    async updateAvailabilityTimezone(workspace, timezone) {
+      return withUnauthorized(input.onUnauthorized, () => requestAvailability<AvailabilitySettingsOverview>(workspace, "/timezone", {
+        method: "PUT", body: JSON.stringify({ timezone }),
+      }));
+    },
+    async listReviewerAbsences(workspace) {
+      return withUnauthorized(input.onUnauthorized, () => requestAvailability<ReviewerAbsenceOverview[]>(workspace, "/absences"));
+    },
+    async scheduleReviewerAbsence(workspace, availability) {
+      return withUnauthorized(input.onUnauthorized, () => requestAvailability<ReviewerAbsenceOverview>(workspace, "/absences", {
+        method: "POST", body: JSON.stringify(availability),
+      }));
+    },
+    async reviseReviewerAbsence(workspace, absenceId, availability) {
+      return withUnauthorized(input.onUnauthorized, () => requestAvailability<ReviewerAbsenceOverview>(workspace, `/absences/${encodeURIComponent(absenceId)}`, {
+        method: "PUT", body: JSON.stringify(availability),
+      }));
+    },
+    async cancelReviewerAbsence(workspace, absenceId, expectedRevision) {
+      return withUnauthorized(input.onUnauthorized, () => requestAvailability<ReviewerAbsenceOverview>(workspace, `/absences/${encodeURIComponent(absenceId)}/cancel`, {
+        method: "POST", body: JSON.stringify({ expectedRevision }),
+      }));
+    },
+    async listReviewerReplacementHistory(workspace, absenceId) {
+      const query = absenceId === undefined ? "" : `?${new URLSearchParams({ absenceId })}`;
+      return withUnauthorized(input.onUnauthorized, () => requestAvailability<ReviewerReplacementOverview[]>(workspace, `/replacements${query}`));
+    },
   };
+}
+
+async function requestAvailability<T>(workspace: WorkspaceContext, path: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetch(`/api/operations/availability${path}`, {
+    ...init,
+    credentials: "same-origin",
+    headers: {
+      ...(init.body === undefined ? {} : { "content-type": "application/json" }),
+      ...workspaceHeaders(workspace),
+      ...init.headers,
+    },
+  });
+  if (response.status === 401) throw new AdminApiError("The administrator session has expired.", 401);
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { message?: string; issues?: Array<{ message?: string }> } | null;
+    throw new AdminApiError(body?.issues?.[0]?.message ?? body?.message ?? "Could not update reviewer availability.", response.status);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function withUnauthorized<T>(onUnauthorized: ((message: string) => void) | undefined, action: () => Promise<T>): Promise<T> {
+  try {
+    return await action();
+  } catch (caught) {
+    notifyUnauthorized(caught, onUnauthorized);
+    throw caught;
+  }
 }
 
 export async function fetchOperationsOverviewForWorkspace(

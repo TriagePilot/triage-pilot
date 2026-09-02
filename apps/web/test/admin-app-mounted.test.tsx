@@ -42,8 +42,9 @@ describe("mounted admin application", () => {
       "Recent routing decisions",
       "Permanent job failures",
       "Action failures",
+      "Absence history",
     ]);
-    expect(new Set(names).size).toBe(4);
+    expect(new Set(names).size).toBe(5);
     expect(regions.every((region) => region.getAttribute("role") === "region")).toBe(true);
     expect(regions.every((region) => region.tabIndex === 0)).toBe(true);
     expect(container.textContent).toContain("1 of 2 required · shortfall 1");
@@ -120,6 +121,11 @@ describe("mounted admin application", () => {
           ],
         });
       }
+      if (input === "/api/operations/availability/timezone") {
+        return Response.json({ timezone: "Europe/Bratislava", updatedAt: "2026-08-18T10:00:00.000Z" });
+      }
+      if (input === "/api/operations/availability/absences") return Response.json([]);
+      if (input === "/api/operations/availability/replacements") return Response.json([]);
       throw new Error(`unexpected request to ${String(input)}`);
     });
     const container = document.createElement("div");
@@ -136,6 +142,8 @@ describe("mounted admin application", () => {
     expect(container.textContent).toContain("Trusted path");
     expect(container.textContent).toContain(".triagepilot.yml");
     expect(container.textContent).toContain("repository source");
+    expect(container.textContent).toContain("Reviewer availability");
+    expect(container.textContent).toContain("Europe/Bratislava");
     expect(container.textContent).not.toContain("Effective configuration is unavailable");
     expect(calls).toMatchObject([
       ["/api/auth/session", { credentials: "same-origin" }],
@@ -148,6 +156,27 @@ describe("mounted admin application", () => {
       ],
       [
         "/api/operations/effective-configuration?repositoryId=repo-1",
+        {
+          credentials: "same-origin",
+          headers: { "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
+        },
+      ],
+      [
+        "/api/operations/availability/timezone",
+        {
+          credentials: "same-origin",
+          headers: { "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
+        },
+      ],
+      [
+        "/api/operations/availability/absences",
+        {
+          credentials: "same-origin",
+          headers: { "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
+        },
+      ],
+      [
+        "/api/operations/availability/replacements",
         {
           credentials: "same-origin",
           headers: { "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },

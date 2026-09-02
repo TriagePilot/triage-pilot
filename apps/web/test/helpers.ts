@@ -43,6 +43,25 @@ export function buildServices(overrides: Partial<WebServices> = {}): WebServices
       effectiveHash: "a".repeat(64),
       values: [],
     }),
+    readAvailabilitySettings: async () => ({ timezone: "UTC", updatedAt: "2026-08-18T10:00:00.000Z" }),
+    updateAvailabilityTimezone: async ({ timezone }) => ({ timezone, updatedAt: "2026-08-18T10:00:00.000Z" }),
+    listReviewerAbsences: async () => [],
+    scheduleReviewerAbsence: async (input) => ({
+      id: "absence-1", externalActorId: input.externalActorId, startAt: input.startAt.toISOString(),
+      endAt: input.endAt.toISOString(), status: "upcoming", revision: 1, cancelledAt: null,
+      createdAt: input.now.toISOString(), updatedAt: input.now.toISOString(),
+    }),
+    reviseReviewerAbsence: async (input) => ({
+      id: input.absenceId, externalActorId: input.externalActorId, startAt: input.startAt.toISOString(),
+      endAt: input.endAt.toISOString(), status: "upcoming", revision: input.expectedRevision + 1, cancelledAt: null,
+      createdAt: input.now.toISOString(), updatedAt: input.now.toISOString(),
+    }),
+    cancelReviewerAbsence: async (input) => ({
+      id: input.absenceId, externalActorId: "@user-d82a5f", startAt: input.now.toISOString(),
+      endAt: new Date(input.now.getTime() + 3_600_000).toISOString(), status: "cancelled", revision: input.expectedRevision + 1,
+      cancelledAt: input.now.toISOString(), createdAt: input.now.toISOString(), updatedAt: input.now.toISOString(),
+    }),
+    listReviewerReplacementHistory: async () => [],
     ...overrides,
   };
 }

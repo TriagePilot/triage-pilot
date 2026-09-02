@@ -18,6 +18,37 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("self-hosted web composit
     });
   });
 
+  it("binds availability reads and mutations to the active workspace provider connection", async () => {
+    await withPostgresTestDatabaseUrl(async (databaseUrl) => {
+      await runMigrations(databaseUrl);
+      const composition = await createSelfHostedWebComposition(webEnv(databaseUrl));
+      try {
+        await expect(composition.services.readAvailabilitySettings()).rejects.toThrow(
+          "Provider connection is not active in this workspace",
+        );
+        await composition.services.activateConfiguredInstallation({ githubInstallationId: "99", accountLogin: "acme" });
+
+        await expect(composition.services.readAvailabilitySettings()).resolves.toMatchObject({ timezone: "UTC" });
+        await composition.services.updateAvailabilityTimezone({ timezone: "Europe/Bratislava", now: new Date("2026-09-01T05:00:00.000Z") });
+        const scheduled = await composition.services.scheduleReviewerAbsence({
+          externalActorId: "@user-d82a5f",
+          startAt: new Date("2030-09-01T06:00:00.000Z"),
+          endAt: new Date("2030-09-01T15:00:00.000Z"),
+          now: new Date("2026-09-01T05:00:00.000Z"),
+        });
+        expect(scheduled).toMatchObject({ externalActorId: "@user-d82a5f", status: "upcoming", revision: 1 });
+        await expect(composition.services.listReviewerAbsences()).resolves.toMatchObject([{ id: scheduled.id }]);
+
+        await composition.services.deleteConfiguredInstallation({ githubInstallationId: "99" });
+        await expect(composition.services.listReviewerAbsences()).rejects.toThrow(
+          "Provider connection is not active in this workspace",
+        );
+      } finally {
+        await composition.close();
+      }
+    });
+  });
+
   it("keeps self-hosted configuration shadow-only without a trusted repository document", async () => {
     await withPostgresTestDatabaseUrl(async (databaseUrl) => {
       await runMigrations(databaseUrl);

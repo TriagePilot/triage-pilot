@@ -6,8 +6,13 @@ export {
   EffectiveConfiguration,
   type EffectiveConfigurationProps,
 } from "./components/EffectiveConfiguration.js";
+export {
+  ReviewerAvailability,
+  type ReviewerAvailabilityProps,
+} from "./components/ReviewerAvailability.js";
 export type {
   ActionFailureOverview,
+  AvailabilitySettingsOverview,
   AuthorizationCapabilities,
   DecisionOverview,
   EffectiveConfigurationOverview,
@@ -22,5 +27,8 @@ export type {
   RepositoryContext,
   RepositoryOverview,
   RiskBreakdown,
+  ReviewerAbsenceMutation,
+  ReviewerAbsenceOverview,
+  ReviewerReplacementOverview,
   WorkspaceContext,
 } from "./api.js";

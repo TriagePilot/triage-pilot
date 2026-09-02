@@ -29,7 +29,7 @@ describe("OperationsDashboard", () => {
         <OperationsDashboard
           api={api}
           workspace={workspace}
-          authorization={{ canViewOperations: true, canManageConfiguration: true }}
+          authorization={{ canViewOperations: true, canManageConfiguration: true, canManageReviewerAvailability: true, canRunRoutingRecovery: false }}
           navigation={{ hrefFor: (target) => `/ops/${target}` }}
         />,
       );
@@ -68,7 +68,7 @@ describe("OperationsDashboard", () => {
         <OperationsDashboard
           api={api}
           workspace={workspace}
-          authorization={{ canViewOperations: true, canManageConfiguration: false }}
+          authorization={{ canViewOperations: true, canManageConfiguration: false, canManageReviewerAvailability: false, canRunRoutingRecovery: false }}
           navigation={{ hrefFor: (target) => `/ops/${target}` }}
         />,
       );

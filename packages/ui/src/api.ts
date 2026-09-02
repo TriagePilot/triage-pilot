@@ -1,4 +1,10 @@
-import type { ActionStatus, RepositoryMode, RiskTier, RoutingAction } from "@triagepilot/contracts";
+import type {
+  ActionStatus,
+  RepositoryMode,
+  ReviewerReplacementOutcome,
+  RiskTier,
+  RoutingAction,
+} from "@triagepilot/contracts";
 
 export interface WorkspaceContext {
   id: string;
@@ -8,6 +14,8 @@ export interface WorkspaceContext {
 export interface AuthorizationCapabilities {
   canViewOperations: boolean;
   canManageConfiguration: boolean;
+  canManageReviewerAvailability: boolean;
+  canRunRoutingRecovery: boolean;
 }
 
 export type NavigationTarget = "configuration";
@@ -22,6 +30,69 @@ export interface OperationsApiClient {
     workspace: WorkspaceContext,
     repository: RepositoryContext,
   ): Promise<EffectiveConfigurationOverview>;
+  readAvailabilitySettings(workspace: WorkspaceContext): Promise<AvailabilitySettingsOverview>;
+  updateAvailabilityTimezone(
+    workspace: WorkspaceContext,
+    timezone: string,
+  ): Promise<AvailabilitySettingsOverview>;
+  listReviewerAbsences(workspace: WorkspaceContext): Promise<ReviewerAbsenceOverview[]>;
+  scheduleReviewerAbsence(
+    workspace: WorkspaceContext,
+    input: ReviewerAbsenceMutation,
+  ): Promise<ReviewerAbsenceOverview>;
+  reviseReviewerAbsence(
+    workspace: WorkspaceContext,
+    absenceId: string,
+    input: ReviewerAbsenceMutation & { expectedRevision: number },
+  ): Promise<ReviewerAbsenceOverview>;
+  cancelReviewerAbsence(
+    workspace: WorkspaceContext,
+    absenceId: string,
+    expectedRevision: number,
+  ): Promise<ReviewerAbsenceOverview>;
+  listReviewerReplacementHistory(
+    workspace: WorkspaceContext,
+    absenceId?: string,
+  ): Promise<ReviewerReplacementOverview[]>;
+}
+
+export interface AvailabilitySettingsOverview {
+  timezone: string;
+  updatedAt: string;
+}
+
+export interface ReviewerAbsenceMutation {
+  externalActorId: string;
+  startLocal: string;
+  endLocal: string;
+  startUtcOffset?: string;
+  endUtcOffset?: string;
+}
+
+export interface ReviewerAbsenceOverview {
+  id: string;
+  externalActorId: string;
+  startAt: string;
+  endAt: string;
+  status: "active" | "upcoming" | "ended" | "cancelled";
+  revision: number;
+  cancelledAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReviewerReplacementOverview {
+  id: string;
+  absenceId: string;
+  absenceRevision: number;
+  decisionId: string;
+  unavailableActorId: string;
+  replacementActorId: string | null;
+  outcome: ReviewerReplacementOutcome;
+  reason: string;
+  state: "finalizer_pending" | "completed" | "permanent_failure";
+  lastError: string | null;
+  completedAt: string;
 }
 
 export interface ProviderLink {

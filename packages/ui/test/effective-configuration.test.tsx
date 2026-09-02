@@ -30,7 +30,7 @@ describe("EffectiveConfiguration", () => {
           api={api}
           workspace={workspace}
           repository={repository}
-          authorization={{ canViewOperations: true, canManageConfiguration: false }}
+          authorization={{ canViewOperations: true, canManageConfiguration: false, canManageReviewerAvailability: false, canRunRoutingRecovery: false }}
           navigation={{ hrefFor: (target) => `/ops/${target}` }}
         />,
       );

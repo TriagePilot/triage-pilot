@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   EffectiveConfiguration,
   OperationsDashboard,
+  ReviewerAvailability,
   type AuthorizationCapabilities,
   type EffectiveConfigurationOverview,
   type NavigationHost,
@@ -21,9 +22,11 @@ import {
 type AuthState = "checking" | "signed-out" | "signed-in";
 
 const localWorkspaceDisplayName = "Self-hosted";
-const readOnlyAuthorization: AuthorizationCapabilities = {
+const selfHostedAuthorization: AuthorizationCapabilities = {
   canViewOperations: true,
   canManageConfiguration: false,
+  canManageReviewerAvailability: true,
+  canRunRoutingRecovery: false,
 };
 const localNavigation: NavigationHost = {
   hrefFor: (target) => `#${target}`,
@@ -36,6 +39,7 @@ export function App() {
   const [overview, setOverview] = useState<OperationsOverview | null>(null);
   const [effectiveConfiguration, setEffectiveConfiguration] = useState<EffectiveConfigurationOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const api = useMemo(() => createSelfHostedOperationsApi({ onUnauthorized: showSignedOut }), []);
 
   useEffect(() => {
     void loadSession();
@@ -64,7 +68,6 @@ export function App() {
     setOverview(null);
     setEffectiveConfiguration(null);
     try {
-      const api = createSelfHostedOperationsApi({ onUnauthorized: showSignedOut });
       const nextOverview = await api.readOperationsOverview(activeWorkspace);
       const repository = nextOverview.repositories[0];
       const nextEffectiveConfiguration = repository
@@ -154,6 +157,7 @@ export function App() {
       overview={overview}
       {...(effectiveConfiguration === null ? {} : { effectiveConfiguration })}
       error={error}
+      api={api}
       onLogout={handleLogout}
     />
   );
@@ -232,6 +236,7 @@ interface DashboardProps {
   error?: string | null;
   onLogout(): Promise<void>;
   onUnauthorized?(message: string): void;
+  api?: OperationsApiClient;
 }
 
 export function Dashboard({
@@ -242,12 +247,13 @@ export function Dashboard({
   error,
   onLogout,
   onUnauthorized,
+  api: providedApi,
 }: DashboardProps) {
   const api = useMemo(
-    () => overview
+    () => providedApi ?? (overview
       ? fixedOverviewApi(overview)
-      : createSelfHostedOperationsApi(onUnauthorized ? { onUnauthorized } : {}),
-    [overview, onUnauthorized],
+      : createSelfHostedOperationsApi(onUnauthorized ? { onUnauthorized } : {})),
+    [providedApi, overview, onUnauthorized],
   );
   const effectiveRepository = overview?.repositories[0];
 
@@ -262,7 +268,7 @@ export function Dashboard({
       <OperationsDashboard
         api={api}
         workspace={workspace}
-        authorization={readOnlyAuthorization}
+        authorization={selfHostedAuthorization}
         navigation={localNavigation}
         {...(overview ? { initialOverview: overview } : {})}
         headerActions={
@@ -274,12 +280,18 @@ export function Dashboard({
           </div>
         }
       />
+      <ReviewerAvailability
+        api={api}
+        workspace={workspace}
+        authorization={selfHostedAuthorization}
+        {...(onUnauthorized ? { onUnauthorized } : {})}
+      />
       {effectiveConfiguration && effectiveRepository ? (
         <EffectiveConfiguration
           api={api}
           workspace={workspace}
           repository={effectiveRepository}
-          authorization={readOnlyAuthorization}
+          authorization={selfHostedAuthorization}
           navigation={localNavigation}
           initialConfiguration={effectiveConfiguration}
         />
@@ -309,6 +321,31 @@ function fixedOverviewApi(overview: OperationsOverview): OperationsApiClient {
     async readEffectiveConfiguration() {
       throw new Error("Effective configuration is unavailable in this view.");
     },
+    async readAvailabilitySettings() {
+      return { timezone: "UTC", updatedAt: new Date(0).toISOString() };
+    },
+    async updateAvailabilityTimezone(_workspace, timezone) {
+      return { timezone, updatedAt: new Date(0).toISOString() };
+    },
+    async listReviewerAbsences() { return []; },
+    async scheduleReviewerAbsence(_workspace, input) {
+      return fixtureAbsence(input.externalActorId, input.startLocal, input.endLocal);
+    },
+    async reviseReviewerAbsence(_workspace, absenceId, input) {
+      return { ...fixtureAbsence(input.externalActorId, input.startLocal, input.endLocal), id: absenceId, revision: input.expectedRevision + 1 };
+    },
+    async cancelReviewerAbsence(_workspace, absenceId, expectedRevision) {
+      return { ...fixtureAbsence("", "1970-01-01T00:00", "1970-01-01T00:01"), id: absenceId, status: "cancelled", revision: expectedRevision + 1 };
+    },
+    async listReviewerReplacementHistory() { return []; },
+  };
+}
+
+function fixtureAbsence(externalActorId: string, startLocal: string, endLocal: string) {
+  return {
+    id: "fixture-absence", externalActorId, startAt: `${startLocal}:00.000Z`, endAt: `${endLocal}:00.000Z`,
+    status: "upcoming" as const, revision: 1, cancelledAt: null,
+    createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(),
   };
 }
 
