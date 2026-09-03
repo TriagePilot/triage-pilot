@@ -67,7 +67,6 @@ interface WorkerServiceFactoryInput {
   createAdapter?: AdapterFactory;
   createConfigurationSource?: ConfigurationSourceFactory;
   clock?: Clock;
-  allowInactiveProviderConnection?: boolean;
   providerMutationTimeoutMs?: number;
 }
 
@@ -122,11 +121,7 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
     }
 
     async function knownRepository(): Promise<KnownRepository> {
-      knownRepositoryPromise ??= findKnownRepository(
-        input.db,
-        message,
-        !input.allowInactiveProviderConnection,
-      );
+      knownRepositoryPromise ??= findKnownRepository(input.db, message);
       return knownRepositoryPromise;
     }
 
@@ -699,21 +694,42 @@ export function createWorkerReviewerAvailabilityServiceFactory(input: WorkerServ
       finalizers: {
         async run(finalizer) {
           assertAvailabilityScope(message, finalizer.workspaceId, finalizer.providerConnectionId);
+          if (lease === undefined) {
+            throw new PermanentJobError("reviewer replacement policy finalizer requires a claimed activation lease");
+          }
           const policyMessage = await loadReviewerReplacementPolicyMessage(input.db, message, finalizer.decisionId);
-          const policyServices = createWorkerHumanReviewPolicyServiceFactory({
-            ...input,
-            credentialProvider,
-            createAdapter,
-            allowInactiveProviderConnection: true,
-          })(policyMessage);
-          if (finalizer.action === "reevaluate_policy") {
-            await processHumanReviewPolicyJob(policyMessage, policyServices);
-            return;
+          try {
+            await runClaimedReviewerProviderMutation(input.db, lease, message, async (authority) => {
+              const baseRequester = input.createRequester ?? createInstallationRequester;
+              const policyServices = createWorkerHumanReviewPolicyServiceFactory({
+                ...input,
+                credentialProvider,
+                createAdapter,
+                createRequester: async (credentials) => authorizedRequester(
+                  await baseRequester(credentials),
+                  authority,
+                ),
+              })(policyMessage);
+              if (finalizer.action === "reevaluate_policy") {
+                await processHumanReviewPolicyJob(policyMessage, policyServices);
+                return;
+              }
+              if (!policyServices.failPolicyCheck || finalizer.summary === null) {
+                throw new PermanentJobError("reviewer replacement policy failure finalizer is not configured");
+              }
+              await policyServices.failPolicyCheck(finalizer.summary, finalizer.decisionId);
+            }, input.providerMutationTimeoutMs === undefined
+              ? {}
+              : { timeoutMs: input.providerMutationTimeoutMs });
+          } catch (error) {
+            if (error instanceof ReviewerMutationLeaseUnavailableError) {
+              const status = await providerConnectionStatus(input.db, message);
+              if (status === null || status === "revoked") {
+                throw new PermanentJobError("reviewer replacement policy finalizer rejected revoked provider connection");
+              }
+            }
+            throw error;
           }
-          if (!policyServices.failPolicyCheck || finalizer.summary === null) {
-            throw new PermanentJobError("reviewer replacement policy failure finalizer is not configured");
-          }
-          await policyServices.failPolicyCheck(finalizer.summary, finalizer.decisionId);
         },
         classifyError(error) {
           const classified = classifyWorkerError(error);
@@ -789,11 +805,7 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: WorkerService
     }
 
     async function knownRepository(): Promise<KnownRepository> {
-      knownRepositoryPromise ??= findKnownRepository(
-        input.db,
-        message,
-        !input.allowInactiveProviderConnection,
-      );
+      knownRepositoryPromise ??= findKnownRepository(input.db, message);
       return knownRepositoryPromise;
     }
 
@@ -1228,7 +1240,6 @@ async function findKnownRepository(
     providerConnectionId: string;
     changeRequest: { repository: RepositoryRef };
   },
-  requireActive = true,
 ): Promise<KnownRepository> {
   const repository = await db
     .selectFrom("repositories")
@@ -1249,13 +1260,49 @@ async function findKnownRepository(
     .where((eb) => eb.and([
       eb("provider_connections.id", "=", message.providerConnectionId),
       eb("provider_connections.provider", "=", message.changeRequest.repository.provider),
-      ...(requireActive ? [eb("provider_connections.status", "=", "active")] : []),
+      eb("provider_connections.status", "=", "active"),
     ]))
     .executeTakeFirst();
   if (!repository) {
     throw new Error(`repository ${message.changeRequest.repository.externalId} is not known`);
   }
   return repository;
+}
+
+function authorizedRequester(
+  requester: Requester,
+  authority: { signal: AbortSignal; assertActive(): Promise<void> },
+): Requester {
+  return {
+    async request(route, parameters) {
+      await authority.assertActive();
+      authority.signal.throwIfAborted();
+      const existingRequest = typeof parameters.request === "object" && parameters.request !== null
+        ? parameters.request as Record<string, unknown>
+        : {};
+      return await requester.request(route, {
+        ...parameters,
+        request: { ...existingRequest, signal: authority.signal },
+      });
+    },
+  };
+}
+
+async function providerConnectionStatus(
+  db: DatabaseClient,
+  message: {
+    workspaceId: string;
+    provider: ProviderKind;
+    providerConnectionId: string;
+  },
+): Promise<"active" | "suspended" | "revoked" | null> {
+  const connection = await db.selectFrom("provider_connections")
+    .select("status")
+    .where("workspace_id", "=", message.workspaceId)
+    .where("provider", "=", message.provider)
+    .where("id", "=", message.providerConnectionId)
+    .executeTakeFirst();
+  return connection?.status ?? null;
 }
 
 interface KnownRepository {

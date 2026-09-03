@@ -355,6 +355,270 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker reviewer availabi
     });
   });
 
+  it("terminates a pending policy finalizer locally after provider revocation", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedActivation(db, "revoked-policy-finalizer");
+      const remote = new ReviewerRemote();
+      const first = fixture.buildServices(remote);
+      first.finalizers.run = vi.fn(async () => {
+        throw new Error("process terminated before policy finalization");
+      });
+      const recovery = await processReviewerAbsenceActivationJob(fixture.message, first);
+      expect(recovery).toMatchObject({ phase: "run_finalizer", retryable: true });
+      const providerCallsBeforeRevocation = remote.request.mock.calls.length;
+
+      await createWorkspaceRepositories(db, fixture.message.workspaceId)
+        .revokeConfiguredProviderConnection({ provider: "github", externalConnectionId: "99" });
+      const nextRecovery = await recoverReviewerReplacementFinalizer(
+        recovery!,
+        fixture.buildServices(remote),
+      );
+
+      expect(nextRecovery).toMatchObject({
+        phase: "run_finalizer",
+        retryable: false,
+        lastError: expect.stringMatching(/revoked|inactive provider connection/i),
+      });
+      expect(remote.request).toHaveBeenCalledTimes(providerCallsBeforeRevocation);
+      await expect(db.selectFrom("reviewer_replacements")
+        .select(["id", "state", "last_error as lastError"])
+        .executeTakeFirstOrThrow()).resolves.toMatchObject({
+        id: recovery!.replacementId,
+        state: "finalizer_pending",
+        lastError: null,
+      });
+
+      await expect(createWorkspaceJobQueue(db, fixture.message.workspaceId)
+        .exhaustReviewerAbsenceActivation(fixture.lease, nextRecovery!.lastError, now))
+        .resolves.toEqual({ updated: true });
+      await expect(db.selectFrom("reviewer_replacements")
+        .select(["id", "state", "last_error as lastError"])
+        .execute()).resolves.toEqual([{
+        id: recovery!.replacementId,
+        state: "permanent_failure",
+        lastError: nextRecovery!.lastError,
+      }]);
+      expect(remote.request).toHaveBeenCalledTimes(providerCallsBeforeRevocation);
+    });
+  });
+
+  it("blocks a pending failure-check finalizer after provider revocation", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedActivation(db, "revoked-failure-finalizer", [unavailableActor]);
+      const remote = new ReviewerRemote();
+      const first = fixture.buildServices(remote);
+      first.finalizers.run = vi.fn(async () => {
+        throw new Error("process terminated before failure-check finalization");
+      });
+      const recovery = await processReviewerAbsenceActivationJob(fixture.message, first);
+      expect(recovery).toMatchObject({
+        phase: "run_finalizer",
+        outcome: "no_replacement_available",
+        finalizer: { action: "fail_policy" },
+      });
+      const providerCallsBeforeRevocation = remote.request.mock.calls.length;
+
+      await createWorkspaceRepositories(db, fixture.message.workspaceId)
+        .revokeConfiguredProviderConnection({ provider: "github", externalConnectionId: "99" });
+      const nextRecovery = await recoverReviewerReplacementFinalizer(
+        recovery!,
+        fixture.buildServices(remote),
+      );
+
+      expect(nextRecovery).toMatchObject({ phase: "run_finalizer", retryable: false });
+      expect(remote.request).toHaveBeenCalledTimes(providerCallsBeforeRevocation);
+      await expect(db.selectFrom("reviewer_replacements")
+        .select(["state", "last_error as lastError"])
+        .executeTakeFirstOrThrow()).resolves.toEqual({ state: "finalizer_pending", lastError: null });
+    });
+  });
+
+  it("keeps a suspended pending policy finalizer retryable without provider access", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedActivation(db, "suspended-policy-finalizer");
+      const remote = new ReviewerRemote();
+      const first = fixture.buildServices(remote);
+      first.finalizers.run = vi.fn(async () => {
+        throw new Error("process terminated before policy finalization");
+      });
+      const recovery = await processReviewerAbsenceActivationJob(fixture.message, first);
+      const providerCallsBeforeSuspension = remote.request.mock.calls.length;
+      await db.updateTable("provider_connections")
+        .set({ status: "suspended" })
+        .where("id", "=", fixture.connectionId)
+        .execute();
+
+      const suspendedRecovery = await recoverReviewerReplacementFinalizer(
+        recovery!,
+        fixture.buildServices(remote),
+      );
+
+      expect(suspendedRecovery).toMatchObject({
+        phase: "run_finalizer",
+        retryable: true,
+        lastError: expect.stringMatching(/suspended|inactive provider connection/i),
+      });
+      expect(remote.request).toHaveBeenCalledTimes(providerCallsBeforeSuspension);
+      await expect(db.selectFrom("reviewer_replacements")
+        .select(["state", "last_error as lastError"])
+        .executeTakeFirstOrThrow()).resolves.toEqual({ state: "finalizer_pending", lastError: null });
+      await expect(db.selectFrom("jobs")
+        .select("status")
+        .where("id", "=", fixture.lease.jobId)
+        .executeTakeFirstOrThrow()).resolves.toEqual({ status: "running" });
+
+      await db.updateTable("provider_connections")
+        .set({ status: "active" })
+        .where("id", "=", fixture.connectionId)
+        .execute();
+      await expect(recoverReviewerReplacementFinalizer(
+        suspendedRecovery!,
+        fixture.buildServices(remote),
+      )).resolves.toBeNull();
+      expect(remote.policyWriteCount).toBe(1);
+      await expect(db.selectFrom("reviewer_replacements")
+        .select(["state", "last_error as lastError"])
+        .executeTakeFirstOrThrow()).resolves.toEqual({ state: "completed", lastError: null });
+    });
+  });
+
+  it.each(["suspended", "revoked"] as const)(
+    "completes local-only replacement finalization after the connection is %s",
+    async (status) => {
+      await withPostgresTestDatabase(async (db) => {
+        const fixture = await seedActivation(db, `local-completion-${status}`);
+        const remote = new ReviewerRemote();
+        const first = fixture.buildServices(remote);
+        first.finalizers.run = vi.fn(async () => {
+          throw new Error("process terminated after policy finalization");
+        });
+        const recovery = await processReviewerAbsenceActivationJob(fixture.message, first);
+        if (recovery?.phase !== "run_finalizer") {
+          throw new Error("expected a pending provider-facing finalizer recovery");
+        }
+        const providerCallsBeforeStatusChange = remote.request.mock.calls.length;
+        if (status === "revoked") {
+          await createWorkspaceRepositories(db, fixture.message.workspaceId)
+            .revokeConfiguredProviderConnection({ provider: "github", externalConnectionId: "99" });
+        } else {
+          await db.updateTable("provider_connections")
+            .set({ status: "suspended" })
+            .where("id", "=", fixture.connectionId)
+            .execute();
+        }
+
+        await expect(recoverReviewerReplacementFinalizer({
+          ...recovery,
+          phase: "complete_replacement",
+        }, fixture.buildServices(remote))).resolves.toBeNull();
+
+        expect(remote.request).toHaveBeenCalledTimes(providerCallsBeforeStatusChange);
+        await expect(db.selectFrom("reviewer_replacements")
+          .select(["id", "state", "last_error as lastError"])
+          .execute()).resolves.toEqual([{
+          id: recovery.replacementId,
+          state: "completed",
+          lastError: null,
+        }]);
+      });
+    },
+  );
+
+  it.each(["suspended", "revoked"] as const)(
+    "serializes a pending policy finalizer ahead of concurrent connection %s",
+    async (status) => {
+      await withPostgresTestDatabase(async (db) => {
+        const fixture = await seedActivation(db, `concurrent-finalizer-${status}`);
+        const remote = new ReviewerRemote();
+        const first = fixture.buildServices(remote);
+        first.finalizers.run = vi.fn(async () => {
+          throw new Error("process terminated before policy finalization");
+        });
+        const recovery = await processReviewerAbsenceActivationJob(fixture.message, first);
+        let releaseProvider!: () => void;
+        let providerReached!: () => void;
+        const release = new Promise<void>((resolve) => { releaseProvider = resolve; });
+        const reached = new Promise<void>((resolve) => { providerReached = resolve; });
+        remote.beforeRequest = async () => {
+          remote.beforeRequest = null;
+          providerReached();
+          await release;
+        };
+
+        const finalizing = recoverReviewerReplacementFinalizer(recovery!, fixture.buildServices(remote));
+        await reached;
+        const statusChange = status === "revoked"
+          ? createWorkspaceRepositories(db, fixture.message.workspaceId)
+              .revokeConfiguredProviderConnection({ provider: "github", externalConnectionId: "99" })
+          : db.updateTable("provider_connections")
+              .set({ status: "suspended" })
+              .where("id", "=", fixture.connectionId)
+              .execute();
+
+        expect(await settlesWithin(statusChange, 100)).toBe(false);
+        await expect(db.selectFrom("provider_connections")
+          .select("status")
+          .where("id", "=", fixture.connectionId)
+          .executeTakeFirstOrThrow()).resolves.toEqual({ status: "active" });
+        releaseProvider();
+        await expect(finalizing).resolves.toBeNull();
+        await statusChange;
+
+        expect(remote.policyWriteCount).toBe(1);
+        await expect(db.selectFrom("provider_connections")
+          .select("status")
+          .where("id", "=", fixture.connectionId)
+          .executeTakeFirstOrThrow()).resolves.toEqual({ status });
+        await expect(db.selectFrom("reviewer_replacements")
+          .select(["state", "last_error as lastError"])
+          .executeTakeFirstOrThrow()).resolves.toEqual({ state: "completed", lastError: null });
+      });
+    },
+  );
+
+  it("prevents later policy requests after finalizer authority ends and revocation commits", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedActivation(db, "timed-out-policy-finalizer");
+      const remote = new ReviewerRemote();
+      const first = fixture.buildServices(remote);
+      first.finalizers.run = vi.fn(async () => {
+        throw new Error("process terminated before policy finalization");
+      });
+      const recovery = await processReviewerAbsenceActivationJob(fixture.message, first);
+      let releaseProvider!: () => void;
+      let providerReached!: () => void;
+      const release = new Promise<void>((resolve) => { releaseProvider = resolve; });
+      const reached = new Promise<void>((resolve) => { providerReached = resolve; });
+      remote.beforeRequest = async () => {
+        remote.beforeRequest = null;
+        providerReached();
+        await release;
+      };
+
+      const finalizing = recoverReviewerReplacementFinalizer(
+        recovery!,
+        fixture.buildServices(remote, { providerMutationTimeoutMs: 50 }),
+      );
+      await reached;
+      await expect(finalizing).resolves.toMatchObject({
+        phase: "run_finalizer",
+        retryable: true,
+        lastError: expect.stringMatching(/deadline|authority/i),
+      });
+      await createWorkspaceRepositories(db, fixture.message.workspaceId)
+        .revokeConfiguredProviderConnection({ provider: "github", externalConnectionId: "99" });
+      const providerCallsAtRevocation = remote.request.mock.calls.length;
+      releaseProvider();
+      await new Promise((resolve) => setTimeout(resolve, 75));
+
+      expect(remote.request).toHaveBeenCalledTimes(providerCallsAtRevocation);
+      expect(remote.policyWriteCount).toBe(0);
+      await expect(db.selectFrom("reviewer_replacements")
+        .select(["state", "last_error as lastError"])
+        .executeTakeFirstOrThrow()).resolves.toEqual({ state: "finalizer_pending", lastError: null });
+    });
+  });
+
   it("continues the same activation from recovered A to fresh B without replaying A provider effects", async () => {
     await withPostgresTestDatabase(async (db) => {
       const fixture = await seedActivation(db, "continue-fresh");
@@ -528,6 +792,7 @@ async function settlesWithin(operation: Promise<unknown>, timeoutMs: number): Pr
 async function seedActivation(
   db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0],
   suffix: string,
+  originalActors = eligibleActors,
 ) {
   const workspaceId = await ensureLocalWorkspace(db);
   const connection = await db.insertInto("provider_connections").values({
@@ -572,8 +837,8 @@ async function seedActivation(
     selectedReviewers: [unavailableActor],
     details: {
       ownership: {
-        preferredReviewers: eligibleActors,
-        eligibleReviewers: eligibleActors,
+        preferredReviewers: originalActors,
+        eligibleReviewers: originalActors,
       },
       routing: { requestedReviewerCount: 1 },
     },
@@ -684,10 +949,13 @@ class ReviewerRemote {
   readonly requestedByPull = new Map<number, Set<string>>([[7, new Set([unavailableActor])]]);
   deleteCount = 0;
   postCount = 0;
+  policyWriteCount = 0;
   failAfterNextDelete = false;
   beforeDelete: ((signal?: AbortSignal) => Promise<void>) | null = null;
+  beforeRequest: (() => Promise<void>) | null = null;
 
   readonly request = vi.fn(async (route: string, parameters: Record<string, unknown>) => {
+    await this.beforeRequest?.();
     const pullNumber = Number(parameters.pull_number);
     const requested = this.reviewers(pullNumber);
     if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
@@ -701,6 +969,17 @@ class ReviewerRemote {
       return { data: { users: [...requested].map((actor) => ({ login: actor.slice(1) })), teams: [] } };
     }
     if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") return { data: [] };
+    if (route === "GET /repos/{owner}/{repo}/commits/{ref}/check-runs") {
+      return { data: { check_runs: [] } };
+    }
+    if (route === "POST /repos/{owner}/{repo}/check-runs") {
+      this.policyWriteCount += 1;
+      return { data: { id: 72 } };
+    }
+    if (route === "PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}") {
+      this.policyWriteCount += 1;
+      return { data: {} };
+    }
     if (route === "DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers") {
       const signal = (parameters.request as { signal?: AbortSignal } | undefined)?.signal;
       if (this.beforeDelete !== null) await this.beforeDelete(signal);

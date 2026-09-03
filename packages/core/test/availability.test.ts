@@ -8,6 +8,7 @@ describe("core availability exports", () => {
     expect(core).not.toHaveProperty("normalizeReviewer");
     expect(core).not.toHaveProperty("uniqueReviewers");
     expect(core).not.toHaveProperty("selectLowestLoadReviewers");
+    expect(core).not.toHaveProperty("selectTieredReviewers");
   });
 });
 

@@ -59,6 +59,30 @@ describe("OperationsDashboard", () => {
     expect(container.innerHTML).not.toContain("github.com");
   });
 
+  it.each([
+    ["zero", 0, 0],
+    ["null", null, null],
+  ] as const)("hides reviewer quota for an explicit %s requested count", (_label, requested, shortfall) => {
+    const html = renderToStaticMarkup(<OperationsDashboard
+      api={api}
+      workspace={workspace}
+      authorization={{ canViewOperations: true, canManageConfiguration: false, canManageReviewerAvailability: false, canRunRoutingRecovery: false }}
+      navigation={{ hrefFor: (target) => `/ops/${target}` }}
+      initialOverview={{
+        ...overview,
+        decisions: [{
+          ...overview.decisions[0]!,
+          requestedReviewerCount: requested,
+          reviewerShortfall: shortfall,
+        }],
+      }}
+    />);
+
+    expect(html).not.toContain("of 0 required");
+    expect(html).not.toContain("of null required");
+    expect(html).not.toContain("shortfall 0");
+  });
+
   it("does not expose configuration editing when the host denies that capability", async () => {
     const container = document.createElement("div");
     document.body.append(container);
