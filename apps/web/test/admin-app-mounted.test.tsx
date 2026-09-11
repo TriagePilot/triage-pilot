@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AvailabilityOverview, OperationsOverview } from "@triagepilot/db";
+import type { OperationsOverview } from "@triagepilot/db";
 
 import { App, Dashboard } from "../src/admin/App";
 
@@ -21,57 +21,13 @@ afterEach(async () => {
 });
 
 describe("mounted admin application", () => {
-  it("expands grouped routing history and queues a run from the PR group", async () => {
-    const requests: unknown[] = [];
-    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (input === "/api/operations/routing-runs") {
-        requests.push(JSON.parse(String(init?.body)));
-        return Response.json({ status: "queued", jobId: "job-recovery-1" }, { status: 202 });
-      }
-      throw new Error(`unexpected request to ${String(input)}`);
-    });
-    const groupedOverview: OperationsOverview = {
-      ...emptyOverview,
-      decisions: [
-        decision({ id: "new", headSha: "head-new", riskScore: 40, createdAt: "2026-08-18T12:00:00.000Z" }),
-        decision({ id: "old", headSha: "head-old", riskScore: 20, createdAt: "2026-08-18T11:00:00.000Z" }),
-      ],
-    };
-    const refreshOverview = vi.fn(async () => {});
-    const container = document.createElement("div");
-    document.body.append(container);
-
-    await act(async () => {
-      root = createRoot(container);
-      root.render(<Dashboard username="admin" overview={groupedOverview} availability={emptyAvailability} onAvailabilityChange={() => {}} onOverviewRefresh={refreshOverview} onLogout={async () => {}} />);
-    });
-
-    expect(container.textContent).toContain("2 runs");
-    expect(container.textContent).not.toContain("head-old");
-    await act(async () => {
-      buttonNamed(container, "Show history")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-    expect(container.textContent).toContain("head-old");
-
-    await act(async () => {
-      buttonNamed(container, "Re-run routing")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      await flushAsyncWork();
-    });
-    expect(requests).toEqual([{ decisionId: "new" }]);
-    expect(container.textContent).toContain("Routing run queued");
-    await act(async () => {
-      buttonNamed(container, "Refresh ledger")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      await flushAsyncWork();
-    });
-    expect(refreshOverview).toHaveBeenCalledTimes(1);
-  });
   it("exposes exactly one uniquely named region for each scrollable table", async () => {
     const container = document.createElement("div");
     document.body.append(container);
 
     await act(async () => {
       root = createRoot(container);
-      root.render(<Dashboard username="admin" overview={emptyOverview} availability={emptyAvailability} onAvailabilityChange={() => {}} onLogout={async () => {}} />);
+      root.render(<Dashboard username="admin" overview={emptyOverview} onLogout={async () => {}} />);
     });
 
     const regions = Array.from(
@@ -82,22 +38,27 @@ describe("mounted admin application", () => {
     const names = regions.map(accessibleName);
 
     expect(names).toEqual([
-      "Absence history",
       "Connected repositories",
       "Recent routing decisions",
       "Permanent job failures",
       "Action failures",
+      "Absence history",
     ]);
     expect(new Set(names).size).toBe(5);
     expect(regions.every((region) => region.getAttribute("role") === "region")).toBe(true);
     expect(regions.every((region) => region.tabIndex === 0)).toBe(true);
+    expect(container.textContent).toContain("1 of 2 required · shortfall 1");
   });
 
   it("moves an expired overview session to login while retaining recovery for other errors", async () => {
     let overviewRequests = 0;
     vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
       if (input === "/api/auth/session") {
-        return Response.json({ authenticated: true, username: "admin" });
+        return Response.json({
+          authenticated: true,
+          username: "admin",
+          workspaceId: "00000000-0000-4000-8000-000000000001",
+        });
       }
       if (input === "/api/operations/overview") {
         overviewRequests += 1;
@@ -105,9 +66,6 @@ describe("mounted admin application", () => {
           return Response.json({ error: "database unavailable" }, { status: 503 });
         }
         return Response.json({ error: "unauthorized" }, { status: 401 });
-      }
-      if (input === "/api/operations/availability") {
-        return Response.json({ timezone: "UTC", absences: [] });
       }
       if (input === "/api/auth/logout") return new Response(null, { status: 204 });
       throw new Error(`unexpected request to ${String(input)}`);
@@ -138,45 +96,122 @@ describe("mounted admin application", () => {
     expect(container.textContent).not.toContain("Retry overview");
   });
 
-  it("moves an expired availability session to login even when the overview request also fails", async () => {
-    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+  it("mounts effective configuration after an authenticated self-hosted session", async () => {
+    const calls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push([input, init]);
       if (input === "/api/auth/session") {
-        return Response.json({ authenticated: true, username: "admin" });
+        return Response.json({
+          authenticated: true,
+          username: "admin",
+          workspaceId: "00000000-0000-4000-8000-000000000001",
+        });
       }
-      if (input === "/api/operations/overview") {
-        return Response.json({ error: "database unavailable" }, { status: 503 });
-      }
-      if (input === "/api/operations/availability") {
-        return Response.json({ error: "unauthorized" }, { status: 401 });
-      }
-      throw new Error(`unexpected request to ${String(input)}`);
-    });
-    const container = document.createElement("div");
-    document.body.append(container);
-
-    await act(async () => {
-      root = createRoot(container);
-      root.render(<App />);
-      await flushAsyncWork();
-    });
-
-    expect(container.textContent).toContain("Administrator sign in");
-    expect(container.textContent).toContain("The administrator session has expired.");
-    expect(container.textContent).not.toContain("The dashboard could not load");
-  });
-
-  it("moves a mutation-time availability session expiry to login", async () => {
-    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
-      if (input === "/api/auth/session") {
-        return Response.json({ authenticated: true, username: "admin" });
-      }
-      if (input === "/api/operations/overview") {
-        return Response.json(emptyOverview);
-      }
-      if (input === "/api/operations/availability") {
-        return Response.json(emptyAvailability);
+      if (input === "/api/operations/overview") return Response.json(emptyOverview);
+      if (input === "/api/operations/effective-configuration?repositoryId=repo-1") {
+        return Response.json({
+          repository: { label: "acme/api", href: "https://github.com/acme/api" },
+          trustedPath: ".triagepilot.yml",
+          trustedRevision: "trusted-base-sha",
+          repositoryRevision: "trusted-base-sha",
+          inheritanceMode: "replace",
+          effectiveHash: "a".repeat(64),
+          values: [
+            { path: "$.mode", label: "mode", value: "shadow", source: "repository" },
+          ],
+        });
       }
       if (input === "/api/operations/availability/timezone") {
+        return Response.json({ timezone: "Europe/Bratislava", updatedAt: "2026-08-18T10:00:00.000Z" });
+      }
+      if (input === "/api/operations/availability/absences") return Response.json([]);
+      if (input === "/api/operations/availability/replacements") return Response.json([]);
+      throw new Error(`unexpected request to ${String(input)}`);
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<App />);
+      await flushAsyncWork();
+    });
+
+    expect(container.textContent).toContain("Operations ledger");
+    expect(container.textContent).toContain("Effective configuration");
+    expect(container.textContent).toContain("Trusted path");
+    expect(container.textContent).toContain(".triagepilot.yml");
+    expect(container.textContent).toContain("repository source");
+    expect(container.textContent).toContain("Reviewer availability");
+    expect(container.textContent).toContain("Europe/Bratislava");
+    expect(container.textContent).not.toContain("Effective configuration is unavailable");
+    expect(calls).toMatchObject([
+      ["/api/auth/session", { credentials: "same-origin" }],
+      [
+        "/api/operations/overview",
+        {
+          credentials: "same-origin",
+          headers: { "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
+        },
+      ],
+      [
+        "/api/operations/effective-configuration?repositoryId=repo-1",
+        {
+          credentials: "same-origin",
+          headers: { "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
+        },
+      ],
+      [
+        "/api/operations/availability/timezone",
+        {
+          credentials: "same-origin",
+          headers: { "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
+        },
+      ],
+      [
+        "/api/operations/availability/absences",
+        {
+          credentials: "same-origin",
+          headers: { "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
+        },
+      ],
+      [
+        "/api/operations/availability/replacements",
+        {
+          credentials: "same-origin",
+          headers: { "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
+        },
+      ],
+    ]);
+  });
+
+  it("moves a routing-recovery session expiry back to administrator sign in", async () => {
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      if (input === "/api/auth/session") {
+        return Response.json({
+          authenticated: true,
+          username: "admin",
+          workspaceId: "00000000-0000-4000-8000-000000000001",
+        });
+      }
+      if (input === "/api/operations/overview") return Response.json(emptyOverview);
+      if (input === "/api/operations/effective-configuration?repositoryId=repo-1") {
+        return Response.json({
+          repository: { label: "acme/api", href: "https://github.com/acme/api" },
+          trustedPath: null,
+          trustedRevision: "self-hosted-probe",
+          repositoryRevision: null,
+          inheritanceMode: "defaults",
+          effectiveHash: "a".repeat(64),
+          values: [],
+        });
+      }
+      if (input === "/api/operations/availability/timezone") {
+        return Response.json({ timezone: "UTC", updatedAt: "2026-08-18T10:00:00.000Z" });
+      }
+      if (input === "/api/operations/availability/absences") return Response.json([]);
+      if (input === "/api/operations/availability/replacements") return Response.json([]);
+      if (input === "/api/operations/routing-runs") {
         return Response.json({ error: "unauthorized" }, { status: 401 });
       }
       throw new Error(`unexpected request to ${String(input)}`);
@@ -190,15 +225,13 @@ describe("mounted admin application", () => {
       await flushAsyncWork();
     });
     await act(async () => {
-      container.querySelector("#availability-timezone")?.closest("form")?.dispatchEvent(
-        new Event("submit", { bubbles: true, cancelable: true }),
-      );
+      buttonNamed(container, "Re-run routing")?.click();
       await flushAsyncWork();
     });
 
     expect(container.textContent).toContain("Administrator sign in");
     expect(container.textContent).toContain("The administrator session has expired.");
-    expect(container.textContent).not.toContain("Reviewer availability");
+    expect(container.textContent).not.toContain("Operations ledger");
   });
 });
 
@@ -229,35 +262,37 @@ async function flushAsyncWork(): Promise<void> {
 }
 
 const emptyOverview: OperationsOverview = {
-  organization: "acme",
-  githubApp: { appId: "123", configured: true, installationId: "99" },
-  repositories: [],
-  decisions: [],
+  statuses: [
+    { id: "workspace", label: "Organization", value: "acme" },
+    { id: "connection", label: "GitHub App", value: "App 123", detail: "Installation 99" },
+  ],
+  repositories: [
+    {
+      id: "repo-1",
+      repository: { label: "acme/api", href: "https://github.com/acme/api" },
+      configState: "valid",
+      mode: "shadow",
+    },
+  ],
+  decisions: [
+    {
+      id: "decision-1",
+      repository: { label: "acme/api", href: "https://github.com/acme/api" },
+      changeRequest: { label: "#7", href: "https://github.com/acme/api/pull/7" },
+      mode: "shadow",
+      action: "request_human_review",
+      actionStatus: "not_applied",
+      actionError: null,
+      policyCheckState: "not_started",
+      riskScore: 55,
+      riskBreakdown: null,
+      selectedReviewer: "@user-b4e82d",
+      selectedReviewers: ["@user-b4e82d"],
+      requestedReviewerCount: 2,
+      reviewerShortfall: 1,
+      createdAt: "2026-08-18T12:00:00.000Z",
+    },
+  ],
   failures: { jobs: [], actions: [] },
   worker: { available: true, workerId: "worker-1", lastHeartbeatAt: "2026-08-18T12:00:00.000Z" },
 };
-
-const emptyAvailability: AvailabilityOverview = { timezone: "UTC", absences: [] };
-
-function decision(overrides: Partial<OperationsOverview["decisions"][number]>): OperationsOverview["decisions"][number] {
-  return {
-    id: "decision-1",
-    repository: "acme/api",
-    pullNumber: 7,
-    headSha: "head-1",
-    runCount: 2,
-    mode: "shadow",
-    action: "request_human_review",
-    actionStatus: "not_applied",
-    actionError: null,
-    policyCheckState: "not_started",
-    riskScore: 20,
-    riskBreakdown: null,
-    selectedReviewer: null,
-    selectedReviewers: [],
-    requestedReviewerCount: null,
-    reviewerShortfall: null,
-    createdAt: "2026-08-18T11:00:00.000Z",
-    ...overrides,
-  };
-}

@@ -15,16 +15,20 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         order by table_name
       `.execute(db);
       expect(result.rows.map((row) => row.table_name)).toEqual([
-        "installations",
+        "decision_outbox",
         "jobs",
-        "organization_settings",
+        "provider_connection_revocations",
+        "provider_connections",
         "repositories",
         "reviewer_absences",
+        "reviewer_mutation_intents",
         "reviewer_replacements",
         "routing_decisions",
         "schema_migrations",
         "webhook_receipts",
         "worker_heartbeat",
+        "workspace_operational_settings",
+        "workspaces",
       ]);
       const repositories = await sql<{ column_name: string }>`
         select column_name from information_schema.columns
@@ -33,8 +37,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
       `.execute(db);
       expect(repositories.rows.map((row) => row.column_name)).toEqual([
         "id",
-        "installation_id",
-        "github_repository_id",
+        "provider_connection_id",
+        "external_repository_id",
         "owner",
         "name",
         "default_branch",
@@ -42,6 +46,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         "created_at",
         "updated_at",
         "last_config_mode",
+        "workspace_id",
+        "provider",
       ]);
       const decision = await sql<{ column_name: string }>`
         select column_name from information_schema.columns
@@ -58,10 +64,79 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
           "pull_number",
           "head_sha",
           "routing_key",
+          "change_request_id",
           "policy_check_run_id",
           "policy_check_state",
+          "workspace_id",
+          "effective_config_hash",
+          "inheritance_mode",
+          "config_diagnostics",
+          "config_sources",
         ]),
       );
+      const absences = await sql<{ column_name: string }>`
+        select column_name from information_schema.columns
+        where table_name = 'reviewer_absences'
+        order by ordinal_position
+      `.execute(db);
+      expect(absences.rows.map((row) => row.column_name)).toEqual([
+        "id",
+        "external_actor_id",
+        "start_at",
+        "end_at",
+        "status",
+        "revision",
+        "cancelled_at",
+        "created_at",
+        "updated_at",
+        "workspace_id",
+        "provider",
+        "provider_connection_id",
+      ]);
+      const replacements = await sql<{ column_name: string }>`
+        select column_name from information_schema.columns
+        where table_name = 'reviewer_replacements'
+        order by ordinal_position
+      `.execute(db);
+      expect(replacements.rows.map((row) => row.column_name)).toEqual([
+        "id",
+        "absence_id",
+        "absence_revision",
+        "decision_id",
+        "unavailable_actor_id",
+        "replacement_actor_id",
+        "outcome",
+        "reason",
+        "started_at",
+        "completed_at",
+        "workspace_id",
+        "provider",
+        "provider_connection_id",
+        "state",
+        "last_error",
+        "mutation_intent_id",
+      ]);
+      const mutationIntents = await sql<{ column_name: string }>`
+        select column_name from information_schema.columns
+        where table_name = 'reviewer_mutation_intents'
+        order by ordinal_position
+      `.execute(db);
+      expect(mutationIntents.rows.map((row) => row.column_name)).toEqual([
+        "id",
+        "workspace_id",
+        "provider",
+        "provider_connection_id",
+        "absence_id",
+        "absence_revision",
+        "decision_id",
+        "repository_record_id",
+        "repository_id",
+        "change_request_id",
+        "expected_head_revision",
+        "unavailable_actor_id",
+        "replacement_actor_id",
+        "created_at",
+      ]);
       const migrations = await sql<{ name: string }>`select name from schema_migrations order by name`.execute(db);
       expect(migrations.rows).toEqual([
         { name: "0001_initial.sql" },
@@ -69,18 +144,13 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         { name: "0003_human_review_policy.sql" },
         { name: "0004_semantic_routing_deduplication.sql" },
         { name: "0005_reviewer_availability.sql" },
+        { name: "0005_workspace_scope.sql" },
+        { name: "0006_decision_outbox.sql" },
+        { name: "0007_workspace_reviewer_availability.sql" },
+        { name: "0008_reviewer_mutation_intents.sql" },
+        { name: "0009_provider_connection_revocations.sql" },
+        { name: "0010_provider_connection_preemptive_revocations.sql" },
       ]);
-      expect(migrations.rows.at(-1)).toEqual({ name: "0005_reviewer_availability.sql" });
-      await expect(
-        db
-          .insertInto("reviewer_absences")
-          .values({
-            reviewer_handle: "@user-d82a5f",
-            start_at: new Date("2026-10-01T08:00:00.000Z"),
-            end_at: new Date("2026-10-01T08:00:00.000Z"),
-          })
-          .execute(),
-      ).rejects.toMatchObject({ constraint: "reviewer_absences_valid_interval" });
     });
   });
 

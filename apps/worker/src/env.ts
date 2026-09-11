@@ -1,4 +1,4 @@
-import { loadGitHubAppCredentials, type GitHubAppCredentials } from "@triagepilot/github";
+import { loadGitHubAppCredentials, type GitHubAppCredentials } from "@triagepilot/provider-github";
 
 export interface WorkerEnv {
   databaseUrl: string;

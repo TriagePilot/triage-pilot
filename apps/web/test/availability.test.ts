@@ -1,6 +1,6 @@
 import {
+  ProviderConnectionUnavailableError,
   ReviewerAbsenceConflictError,
-  ReviewerAbsenceNotFoundError,
   ReviewerAbsenceRevisionError,
 } from "@triagepilot/db";
 import { describe, expect, it, vi } from "vitest";
@@ -8,231 +8,137 @@ import { describe, expect, it, vi } from "vitest";
 import { createWebApp } from "../src/app";
 import { buildServices } from "./helpers";
 
-const overview = { timezone: "Europe/Bratislava", absences: [] };
+const workspaceId = "00000000-0000-4000-8000-000000000001";
+const scopeHeaders = { "x-triagepilot-workspace": workspaceId };
 
-describe("availability routes", () => {
+describe("workspace reviewer availability routes", () => {
   it.each([
-    ["GET", "/api/operations/availability"],
+    ["GET", "/api/operations/availability/timezone"],
     ["PUT", "/api/operations/availability/timezone"],
+    ["GET", "/api/operations/availability/absences"],
     ["POST", "/api/operations/availability/absences"],
     ["PUT", "/api/operations/availability/absences/absence-1"],
     ["POST", "/api/operations/availability/absences/absence-1/cancel"],
+    ["GET", "/api/operations/availability/replacements"],
   ] as const)("requires an administrator session for %s %s", async (method, path) => {
-    const app = createWebApp(buildServices());
-
-    const response = await app.request(path, method === "GET" ? { method } : {
+    const response = await createWebApp(buildServices()).request(path, {
       method,
-      headers: { "content-type": "application/json" },
-      body: "{}",
+      headers: { ...scopeHeaders, "content-type": "application/json" },
+      ...(method === "GET" ? {} : { body: "{}" }),
     });
-
     expect(response.status).toBe(401);
-    expect(await response.json()).toEqual({ error: "unauthorized" });
   });
 
-  it("returns the default UTC overview to an authenticated administrator", async () => {
-    const { app, cookie } = await authenticatedApp({
-      readAvailabilityOverview: async () => ({ timezone: "UTC", absences: [] }),
-    });
-
-    const response = await app.request("/api/operations/availability", { headers: { cookie } });
-
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ timezone: "UTC", absences: [] });
-  });
-
-  it("updates timezone and returns the persisted availability overview", async () => {
-    const updateOrganizationTimezone = vi.fn().mockResolvedValue(undefined);
-    const { app, cookie } = await authenticatedApp({
-      updateOrganizationTimezone,
-      readAvailabilityOverview: async () => overview,
-    });
-
-    const response = await app.request("/api/operations/availability/timezone", {
-      method: "PUT",
-      headers: { cookie, "content-type": "application/json" },
-      body: JSON.stringify({ timezone: "America/New_York" }),
-    });
-
-    expect(response.status).toBe(200);
-    expect(updateOrganizationTimezone).toHaveBeenCalledWith({
-      timezone: "America/New_York",
-      now: new Date("2026-08-18T10:00:00.000Z"),
-    });
-    expect(await response.json()).toEqual(overview);
-  });
-
-  it("creates an absence from the persisted timezone and returns the current overview", async () => {
-    const createReviewerAbsence = vi.fn().mockResolvedValue(undefined);
-    const { app, cookie } = await authenticatedApp({
-      createReviewerAbsence,
-      readAvailabilityOverview: vi.fn()
-        .mockResolvedValueOnce({ timezone: "Europe/Bratislava", absences: [] })
-        .mockResolvedValueOnce(overview),
-    });
-
+  it("rejects a workspace header outside the authenticated self-hosted workspace", async () => {
+    const { app, cookie } = await authenticatedApp();
     const response = await app.request("/api/operations/availability/absences", {
-      method: "POST",
-      headers: { cookie, "content-type": "application/json" },
-      body: JSON.stringify({
-        reviewerHandle: "@User-D82A5F",
-        startLocal: "2026-03-28T09:00",
-        endLocal: "2026-03-28T17:00",
-      }),
+      headers: { cookie, "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000002" },
     });
-
-    expect(response.status).toBe(200);
-    expect(createReviewerAbsence).toHaveBeenCalledWith({
-      reviewerHandle: "@user-d82a5f",
-      startAt: new Date("2026-03-28T08:00:00.000Z"),
-      endAt: new Date("2026-03-28T16:00:00.000Z"),
-      now: new Date("2026-08-18T10:00:00.000Z"),
-    });
-    expect(await response.json()).toEqual(overview);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "workspace_scope_mismatch" });
   });
 
-  it("edits and cancels an absence with optimistic revision values", async () => {
-    const updateReviewerAbsence = vi.fn().mockResolvedValue(undefined);
-    const cancelReviewerAbsence = vi.fn().mockResolvedValue(undefined);
+  it("reads timezone, absences, and scoped replacement history", async () => {
     const { app, cookie } = await authenticatedApp({
-      updateReviewerAbsence,
+      readAvailabilitySettings: async () => settings,
+      listReviewerAbsences: async () => [absence],
+      listReviewerReplacementHistory: async () => [replacement],
+    });
+    const headers = { cookie, ...scopeHeaders };
+    expect(await (await app.request("/api/operations/availability/timezone", { headers })).json()).toEqual(settings);
+    expect(await (await app.request("/api/operations/availability/absences", { headers })).json()).toEqual([absence]);
+    expect(await (await app.request("/api/operations/availability/replacements?absenceId=absence-1", { headers })).json())
+      .toEqual([replacement]);
+  });
+
+  it("updates timezone and schedules, revises, and cancels with parsed instants and revisions", async () => {
+    const updateAvailabilityTimezone = vi.fn(async () => settings);
+    const scheduleReviewerAbsence = vi.fn(async () => absence);
+    const reviseReviewerAbsence = vi.fn(async () => ({ ...absence, revision: 2 }));
+    const cancelReviewerAbsence = vi.fn(async () => ({ ...absence, status: "cancelled" as const, revision: 3 }));
+    const { app, cookie } = await authenticatedApp({
+      readAvailabilitySettings: async () => settings,
+      updateAvailabilityTimezone,
+      scheduleReviewerAbsence,
+      reviseReviewerAbsence,
       cancelReviewerAbsence,
-      readAvailabilityOverview: vi.fn().mockResolvedValue({ timezone: "Europe/Bratislava", absences: [] }),
+    });
+    const headers = { cookie, ...scopeHeaders, "content-type": "application/json" };
+    const body = JSON.stringify({
+      externalActorId: " @User-D82A5F ",
+      startLocal: "2026-03-28T09:00",
+      endLocal: "2026-03-28T17:00",
     });
 
-    const updateResponse = await app.request("/api/operations/availability/absences/absence-1", {
-      method: "PUT",
-      headers: { cookie, "content-type": "application/json" },
-      body: JSON.stringify({
-        reviewerHandle: "@User-D82A5F",
-        startLocal: "2026-03-28T09:00",
-        endLocal: "2026-03-28T17:00",
-        expectedRevision: 3,
-      }),
-    });
-    const cancelResponse = await app.request("/api/operations/availability/absences/absence-1/cancel", {
-      method: "POST",
-      headers: { cookie, "content-type": "application/json" },
-      body: JSON.stringify({ expectedRevision: 4 }),
-    });
+    expect((await app.request("/api/operations/availability/timezone", {
+      method: "PUT", headers, body: JSON.stringify({ timezone: "Europe/Bratislava" }),
+    })).status).toBe(200);
+    expect((await app.request("/api/operations/availability/absences", { method: "POST", headers, body })).status).toBe(201);
+    expect((await app.request("/api/operations/availability/absences/absence-1", {
+      method: "PUT", headers, body: JSON.stringify({ ...JSON.parse(body), expectedRevision: 1 }),
+    })).status).toBe(200);
+    expect((await app.request("/api/operations/availability/absences/absence-1/cancel", {
+      method: "POST", headers, body: JSON.stringify({ expectedRevision: 2 }),
+    })).status).toBe(200);
 
-    expect(updateResponse.status).toBe(200);
-    expect(updateReviewerAbsence).toHaveBeenCalledWith(expect.objectContaining({
-      absenceId: "absence-1",
-      expectedRevision: 3,
+    expect(updateAvailabilityTimezone).toHaveBeenCalledWith({ timezone: "Europe/Bratislava", now: fixedNow });
+    expect(scheduleReviewerAbsence).toHaveBeenCalledWith({
+      externalActorId: "@user-d82a5f",
       startAt: new Date("2026-03-28T08:00:00.000Z"),
       endAt: new Date("2026-03-28T16:00:00.000Z"),
-    }));
-    expect(cancelResponse.status).toBe(200);
-    expect(cancelReviewerAbsence).toHaveBeenCalledWith({
-      absenceId: "absence-1",
-      expectedRevision: 4,
-      now: new Date("2026-08-18T10:00:00.000Z"),
+      now: fixedNow,
     });
+    expect(reviseReviewerAbsence).toHaveBeenCalledWith(expect.objectContaining({ absenceId: "absence-1", expectedRevision: 1 }));
+    expect(cancelReviewerAbsence).toHaveBeenCalledWith({ absenceId: "absence-1", expectedRevision: 2, now: fixedNow });
   });
 
-  it("returns validation and conflict errors as 422", async () => {
-    const { app, cookie } = await authenticatedApp({
-      createReviewerAbsence: async () => {
-        throw new ReviewerAbsenceConflictError("Reviewer absence overlaps an existing absence");
-      },
-      readAvailabilityOverview: async () => ({ timezone: "Europe/Bratislava", absences: [] }),
-    });
-
+  it("maps validation, overlap, revision, and inactive-connection errors without leaking scope", async () => {
+    const headersFor = (cookie: string) => ({ cookie, ...scopeHeaders, "content-type": "application/json" });
+    const body = JSON.stringify({ externalActorId: "@user-d82a5f", startLocal: "2026-03-28T09:00", endLocal: "2026-03-28T17:00" });
+    for (const [error, status, code] of [
+      [new ReviewerAbsenceConflictError("overlap"), 422, "conflict"],
+      [new ReviewerAbsenceRevisionError("stale"), 409, "revision_conflict"],
+      [new ProviderConnectionUnavailableError("inactive"), 404, "availability_unavailable"],
+    ] as const) {
+      const { app, cookie } = await authenticatedApp({ scheduleReviewerAbsence: async () => { throw error; } });
+      const response = await app.request("/api/operations/availability/absences", {
+        method: "POST", headers: headersFor(cookie), body,
+      });
+      expect(response.status).toBe(status);
+      expect(await response.json()).toMatchObject({ error: code });
+    }
+    const { app, cookie } = await authenticatedApp();
     const invalid = await app.request("/api/operations/availability/absences", {
       method: "POST",
-      headers: { cookie, "content-type": "application/json" },
-      body: JSON.stringify({
-        reviewerHandle: "@user-d82a5f",
-        startLocal: "2026-03-28T09:00",
-        endLocal: "2026-03-28T09:00",
-      }),
+      headers: headersFor(cookie),
+      body: JSON.stringify({ externalActorId: "@user-d82a5f", startLocal: "2026-03-28T09:00", endLocal: "2026-03-28T09:00" }),
     });
-    const conflict = await app.request("/api/operations/availability/absences", {
-      method: "POST",
-      headers: { cookie, "content-type": "application/json" },
-      body: JSON.stringify({
-        reviewerHandle: "@user-d82a5f",
-        startLocal: "2026-03-28T09:00",
-        endLocal: "2026-03-28T17:00",
-      }),
-    });
-
     expect(invalid.status).toBe(422);
     expect(await invalid.json()).toEqual({
       error: "validation_failed",
       issues: [{ field: "endLocal", message: "End must be strictly after start." }],
     });
-    expect(conflict.status).toBe(422);
-    expect(await conflict.json()).toEqual({ error: "conflict", message: "Reviewer absence overlaps an existing absence" });
-  });
-
-  it("rejects unexpected absence request fields", async () => {
-    const { app, cookie } = await authenticatedApp({
-      readAvailabilityOverview: async () => ({ timezone: "Europe/Bratislava", absences: [] }),
-    });
-
-    const response = await app.request("/api/operations/availability/absences", {
-      method: "POST",
-      headers: { cookie, "content-type": "application/json" },
-      body: JSON.stringify({
-        reviewerHandle: "@user-d82a5f",
-        startLocal: "2026-03-28T09:00",
-        endLocal: "2026-03-28T17:00",
-        timezone: "UTC",
-      }),
-    });
-
-    expect(response.status).toBe(422);
-    expect(await response.json()).toEqual({
-      error: "validation_failed",
-      issues: [{ field: "timezone", message: "Unexpected field." }],
-    });
-  });
-
-  it("maps unknown absence and stale revisions to 404 and 409", async () => {
-    const { app, cookie } = await authenticatedApp({
-      cancelReviewerAbsence: async () => {
-        throw new ReviewerAbsenceNotFoundError("Reviewer absence was not found");
-      },
-      updateReviewerAbsence: async () => {
-        throw new ReviewerAbsenceRevisionError("Reviewer absence revision is stale");
-      },
-      readAvailabilityOverview: async () => ({ timezone: "Europe/Bratislava", absences: [] }),
-    });
-
-    const missing = await app.request("/api/operations/availability/absences/missing/cancel", {
-      method: "POST",
-      headers: { cookie, "content-type": "application/json" },
-      body: JSON.stringify({ expectedRevision: 1 }),
-    });
-    const stale = await app.request("/api/operations/availability/absences/absence-1", {
-      method: "PUT",
-      headers: { cookie, "content-type": "application/json" },
-      body: JSON.stringify({
-        reviewerHandle: "@user-d82a5f",
-        startLocal: "2026-03-28T09:00",
-        endLocal: "2026-03-28T17:00",
-        expectedRevision: 1,
-      }),
-    });
-
-    expect(missing.status).toBe(404);
-    expect(await missing.json()).toEqual({ error: "not_found", message: "Reviewer absence was not found" });
-    expect(stale.status).toBe(409);
-    expect(await stale.json()).toEqual({ error: "revision_conflict", message: "Reviewer absence revision is stale" });
   });
 });
 
-async function authenticatedApp(overrides: Parameters<typeof buildServices>[0]) {
+const fixedNow = new Date("2026-08-18T10:00:00.000Z");
+const settings = { timezone: "Europe/Bratislava", updatedAt: fixedNow.toISOString() };
+const absence = {
+  id: "absence-1", externalActorId: "@user-d82a5f", startAt: "2026-09-01T06:00:00.000Z",
+  endAt: "2026-09-01T15:00:00.000Z", status: "upcoming" as const, revision: 1, cancelledAt: null,
+  createdAt: fixedNow.toISOString(), updatedAt: fixedNow.toISOString(),
+};
+const replacement = {
+  id: "replacement-1", absenceId: "absence-1", absenceRevision: 1, decisionId: "decision-1",
+  unavailableActorId: "@user-d82a5f", replacementActorId: "@user-c91e46", outcome: "replaced" as const,
+  reason: "reviewer absence", state: "completed" as const, lastError: null, completedAt: fixedNow.toISOString(),
+};
+
+async function authenticatedApp(overrides: Parameters<typeof buildServices>[0] = {}) {
   const app = createWebApp(buildServices(overrides));
-  const loginResponse = await app.request("/api/auth/login", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
+  const response = await app.request("/api/auth/login", {
+    method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ username: "admin", password: "correct-password" }),
   });
-  return {
-    app,
-    cookie: (loginResponse.headers.get("set-cookie") ?? "").split(";", 1)[0] ?? "",
-  };
+  return { app, cookie: (response.headers.get("set-cookie") ?? "").split(";", 1)[0] ?? "" };
 }

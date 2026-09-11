@@ -60,9 +60,37 @@ describe("public boundary scan", () => {
     const repository = await mkdtemp(join(tmpdir(), "triagepilot-boundary-"));
     temporaryDirectories.push(repository);
     await execFileAsync("git", ["init", "-q"], { cwd: repository });
+    await mkdir(join(repository, ".github"), { recursive: true });
     await mkdir(join(repository, "docs", "specs"), { recursive: true });
     await mkdir(join(repository, "nested"), { recursive: true });
-    await writeFile(join(repository, "README.md"), ["Cloudflare", " Queues secret-payload-marker\n"].join(""));
+    await writeFile(
+      join(repository, "LICENSE"),
+      [
+        "Functional Source License, Version 1.1, Apache 2.0 Future License",
+        "FSL-1.1-Apache-2.0",
+        "Copyright 2026 Miroslav Babjak",
+        "",
+      ].join("\n"),
+    );
+    await writeFile(
+      join(repository, "README.md"),
+      [
+        "FSL-1.1-Apache-2.0",
+        "TriagePilot is Fair Source and source-available. Internal self-hosted use is permitted.",
+        "Each version converts to Apache 2.0 on its second anniversary.",
+        `The separate ${["Sa", "aS"].join("")} repository is proprietary.`,
+        ["Cloudflare", " Queues secret-payload-marker"].join(""),
+        "",
+      ].join("\n"),
+    );
+    await writeFile(
+      join(repository, "CONTRIBUTING.md"),
+      "External code and documentation contributions are not merged. Automated dependency updates require provenance and license-review.\n",
+    );
+    await writeFile(
+      join(repository, ".github", "PULL_REQUEST_TEMPLATE.md"),
+      "External code and documentation contributions are not merged.\n",
+    );
     await writeFile(join(repository, "local-path.md"), `Worktree: ${localWorkspacePath}\n`);
     await writeFile(join(repository, "wrangler" + ".toml"), "safe = true\n");
     await writeFile(join(repository, "pnpm-lock.yaml"), ["hyper", "drive\n"].join(""));

@@ -1,31 +1,29 @@
 import {
-  acceptHumanReviewPolicyDelivery,
-  acceptRoutingDelivery,
-  activateConfiguredInstallation,
-  cancelReviewerAbsence,
-  createReviewerAbsence,
-  deleteConfiguredInstallation,
-  readOperationsOverview,
-  replaceInstallationRepositories,
-  readAvailabilityOverview,
-  suspendConfiguredInstallation,
-  updateOrganizationTimezone,
-  updateReviewerAbsence,
-  updateInstallationRepositories,
-  createJobQueue,
-  findRoutingRecoveryTarget,
+  createWorkspaceReviewerAvailability,
+  createWorkspaceRepositories,
+  ProviderConnectionUnavailableError,
+  type ReviewerAbsence,
+  type ReviewerReplacement,
   type createDatabase,
+  type OperationsOverview as DatabaseOperationsOverview,
+  type WorkspaceRepositories,
 } from "@triagepilot/db";
-import { createInstallationRequester, type GitHubAppCredentialShape } from "@triagepilot/github";
-import { buildRoutingKey } from "@triagepilot/shared";
+import type { EffectiveConfigurationOverview, OperationsOverview, ProviderLink } from "@triagepilot/ui";
+import type { WorkspaceId } from "@triagepilot/contracts";
+import {
+  githubChangeRequestUrl,
+  githubRepositoryUrl,
+  type GitHubAppCredentialShape,
+} from "@triagepilot/provider-github";
+import { formatLog } from "@triagepilot/shared";
 import { sql } from "kysely";
-import { randomUUID } from "node:crypto";
 
 import type { WebServices } from "./app";
-import { parsePullRequestUrl, RoutingRunError } from "./routing-run";
 
 interface WebRuntimeServicesInput {
   db: ReturnType<typeof createDatabase>;
+  workspaceId: WorkspaceId;
+  repositories?: WorkspaceRepositories;
   adminUsername: string;
   adminPassword: string;
   sessionSecret: string;
@@ -35,11 +33,31 @@ interface WebRuntimeServicesInput {
   githubOrganization: string;
   github: GitHubAppCredentialShape;
   verifySignature: WebServices["verifySignature"];
-  createRequester?: typeof createInstallationRequester;
-  createId?: () => string;
+  normalizeGitHubWebhook: WebServices["normalizeGitHubWebhook"];
+  readEffectiveConfiguration: (repositoryId: string) => Promise<EffectiveConfigurationOverview>;
+  queueRoutingRecovery(
+    request: { decisionId: string } | { changeRequestUrl: string },
+  ): Promise<{ jobId: string; routingKey: string }>;
 }
 
 export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebServices {
+  const repositories = input.repositories ?? createWorkspaceRepositories(input.db, input.workspaceId);
+  const availability = createWorkspaceReviewerAvailability(input.db, input.workspaceId);
+
+  async function activeAvailabilityScope() {
+    const connections = await input.db
+      .selectFrom("provider_connections")
+      .select(["id", "provider"])
+      .where("workspace_id", "=", input.workspaceId)
+      .where("provider", "=", "github")
+      .where("status", "=", "active")
+      .limit(2)
+      .execute();
+    if (connections.length !== 1) {
+      throw new ProviderConnectionUnavailableError("Provider connection is not active in this workspace");
+    }
+    return connections[0]!;
+  }
   return {
     adminUsername: input.adminUsername,
     adminPassword: input.adminPassword,
@@ -48,7 +66,9 @@ export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebSer
     now: input.now,
     sourceAddress: input.sourceAddress,
     githubOrganization: input.githubOrganization,
+    workspaceId: input.workspaceId,
     verifySignature: input.verifySignature,
+    normalizeGitHubWebhook: input.normalizeGitHubWebhook,
 
     async checkDatabase() {
       await sql`select 1`.execute(input.db);
@@ -59,161 +79,256 @@ export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebSer
     },
 
     async acceptRoutingDelivery(delivery) {
-      return await acceptRoutingDelivery(input.db, delivery);
+      const { installation, repository, ...inputDelivery } = delivery;
+      return await repositories.acceptRoutingDelivery({
+        ...inputDelivery,
+        connection: toProviderConnection(installation),
+        repository: toProviderRepository(repository),
+      });
     },
 
     async acceptHumanReviewPolicyDelivery(delivery) {
-      return await acceptHumanReviewPolicyDelivery(input.db, delivery);
+      const { installation, repository, ...inputDelivery } = delivery;
+      return await repositories.acceptHumanReviewPolicyDelivery({
+        ...inputDelivery,
+        connection: toProviderConnection(installation),
+        repository: toProviderRepository(repository),
+      });
     },
 
     async activateConfiguredInstallation(installation) {
-      await activateConfiguredInstallation(input.db, installation);
+      await repositories.activateConfiguredProviderConnection(toProviderConnection(installation));
     },
 
     async replaceInstallationRepositories(installation) {
-      await replaceInstallationRepositories(input.db, installation);
+      await repositories.replaceProviderConnectionRepositories({
+        ...toProviderConnection(installation),
+        repositories: installation.repositories.map(toProviderRepository),
+      });
     },
 
     async updateInstallationRepositories(installation) {
-      await updateInstallationRepositories(input.db, installation);
+      await repositories.updateProviderConnectionRepositories({
+        ...toProviderConnection(installation),
+        repositoriesAdded: installation.repositoriesAdded.map(toProviderRepository),
+        repositoryIdsRemoved: installation.repositoryIdsRemoved,
+      });
     },
 
     async suspendConfiguredInstallation(installation) {
-      await suspendConfiguredInstallation(input.db, installation);
+      await repositories.suspendConfiguredProviderConnection(toProviderConnection(installation));
     },
 
     async deleteConfiguredInstallation(installation) {
-      await deleteConfiguredInstallation(input.db, installation);
+      await repositories.revokeConfiguredProviderConnection({
+        provider: "github",
+        externalConnectionId: installation.githubInstallationId,
+      });
     },
 
     logIgnoredWebhook(metadata) {
-      console.warn(JSON.stringify({ message: "ignored out-of-scope GitHub webhook", ...metadata }));
+      console.warn(formatLog({
+        level: "warn",
+        event: "ignored_out_of_scope_github_webhook",
+        service: "web",
+        workspaceId: input.workspaceId,
+        provider: "github",
+        deliveryId: metadata.deliveryId,
+        providerAccountType: metadata.accountType,
+        providerAccountLogin: metadata.accountLogin,
+      }));
     },
 
     async listOperationsOverview() {
-      return await readOperationsOverview(input.db, {
+      const overview = await repositories.readOperations({
         githubOrganization: input.githubOrganization,
         githubAppId: input.github.appId,
         now: input.now(),
         heartbeatStaleAfterMs: 30_000,
       });
+      return toGitHubOperationsOverview(overview);
     },
 
-    async rerunRouting(request) {
-      const lookup = "decisionId" in request
-        ? { githubOrganization: input.githubOrganization, decisionId: request.decisionId }
-        : (() => {
-            const pullRequest = parsePullRequestUrl(request.pullRequestUrl);
-            if (!pullRequest) {
-              throw new RoutingRunError("Enter a valid GitHub pull request URL.", 422, "invalid_pull_request");
-            }
-            return { githubOrganization: input.githubOrganization, ...pullRequest };
-          })();
-      const target = await findRoutingRecoveryTarget(input.db, lookup);
-      if (!target) {
-        throw new RoutingRunError("The pull request is not part of an active configured repository.", 404, "not_found");
-      }
-      const requester = await (input.createRequester ?? createInstallationRequester)({
-        appId: input.github.appId,
-        privateKey: input.github.privateKey,
-        installationId: toSafeInteger(target.githubInstallationId),
-      });
-      const response = await requester.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
-        owner: target.owner,
-        repo: target.repo,
-        pull_number: target.pullNumber,
-      }).catch((error: unknown) => {
-        if (hasStatus(error, 404)) {
-          throw new RoutingRunError("GitHub could not find that pull request.", 404, "not_found");
-        }
-        throw error;
-      });
-      const pullRequest = readPullRequestState(response.data);
-      if (!pullRequest) {
-        throw new RoutingRunError("GitHub returned an incomplete pull request state.", 422, "invalid_pull_request");
-      }
-      if (pullRequest.state !== "open") {
-        throw new RoutingRunError("Only an open pull request can be routed again.", 409, "pull_request_closed");
-      }
-      const runId = (input.createId ?? randomUUID)();
-      const semanticKey = buildRoutingKey({
-        repositoryId: target.githubRepositoryId,
-        pullNumber: target.pullNumber,
-        baseSha: pullRequest.baseSha,
-        headSha: pullRequest.headSha,
-        isDraft: pullRequest.isDraft,
-      });
-      const routingKey = `${semanticKey}:rerun:${runId}`;
-      const queued = await createJobQueue(input.db).enqueue({
-        kind: "process_pull_request",
-        idempotencyKey: routingKey,
-        payload: {
-          kind: "process_pull_request",
-          deliveryId: `operator-rerun:${runId}`,
-          installationId: target.githubInstallationId,
-          repositoryId: target.githubRepositoryId,
-          owner: target.owner,
-          repo: target.repo,
-          pullNumber: target.pullNumber,
-          baseSha: pullRequest.baseSha,
-          headSha: pullRequest.headSha,
-          isDraft: pullRequest.isDraft,
-          eventName: "operator.rerun",
-          routingKey,
-        },
-      });
+    async readEffectiveConfiguration(repositoryId) {
+      return await input.readEffectiveConfiguration(repositoryId);
+    },
+
+    async queueRoutingRecovery(request) {
+      const queued = await input.queueRoutingRecovery(request);
       return { jobId: queued.jobId };
     },
 
-    async readAvailabilityOverview(availability) {
-      return await readAvailabilityOverview(input.db, availability);
+    async readAvailabilitySettings() {
+      await activeAvailabilityScope();
+      return toAvailabilitySettings(await availability.readSettings());
     },
 
-    async updateOrganizationTimezone(availability) {
-      await updateOrganizationTimezone(input.db, availability);
+    async updateAvailabilityTimezone({ timezone, now }) {
+      await activeAvailabilityScope();
+      return toAvailabilitySettings(await availability.updateTimezone(timezone, now));
     },
 
-    async createReviewerAbsence(absence) {
-      return await createReviewerAbsence(input.db, absence);
+    async listReviewerAbsences() {
+      const scope = await activeAvailabilityScope();
+      const now = input.now();
+      return (await availability.listAbsences())
+        .filter((absence) => absence.provider === scope.provider && absence.providerConnectionId === scope.id)
+        .map((absence) => toReviewerAbsenceOverview(absence, now));
     },
 
-    async updateReviewerAbsence(absence) {
-      return await updateReviewerAbsence(input.db, absence);
+    async scheduleReviewerAbsence(availabilityInput) {
+      const scope = await activeAvailabilityScope();
+      return toReviewerAbsenceOverview(await availability.scheduleAbsence({
+        ...availabilityInput,
+        provider: scope.provider,
+        providerConnectionId: scope.id,
+      }), availabilityInput.now);
     },
 
-    async cancelReviewerAbsence(absence) {
-      return await cancelReviewerAbsence(input.db, absence);
+    async reviseReviewerAbsence(availabilityInput) {
+      const scope = await activeAvailabilityScope();
+      return toReviewerAbsenceOverview(await availability.reviseAbsence({
+        ...availabilityInput,
+        provider: scope.provider,
+        providerConnectionId: scope.id,
+      }), availabilityInput.now);
+    },
+
+    async cancelReviewerAbsence(availabilityInput) {
+      const scope = await activeAvailabilityScope();
+      return toReviewerAbsenceOverview(await availability.cancelAbsence({
+        ...availabilityInput,
+        provider: scope.provider,
+        providerConnectionId: scope.id,
+      }), availabilityInput.now);
+    },
+
+    async listReviewerReplacementHistory(absenceId) {
+      const scope = await activeAvailabilityScope();
+      return (await availability.listReplacementHistory(absenceId))
+        .filter((replacement) => replacement.provider === scope.provider && replacement.providerConnectionId === scope.id)
+        .map(toReviewerReplacementOverview);
     },
   };
 }
 
-function readPullRequestState(value: unknown): {
-  state: string;
-  baseSha: string;
-  headSha: string;
-  isDraft: boolean;
-} | null {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
-  const baseSha = readNestedString(record, "base", "sha");
-  const headSha = readNestedString(record, "head", "sha");
-  if (typeof record.state !== "string" || typeof record.draft !== "boolean" || !baseSha || !headSha) return null;
-  return { state: record.state, baseSha, headSha, isDraft: record.draft };
+function toAvailabilitySettings(input: { timezone: string; updatedAt: Date }) {
+  return { timezone: input.timezone, updatedAt: input.updatedAt.toISOString() };
 }
 
-function readNestedString(value: Record<string, unknown>, parent: string, child: string): string {
-  const nested = value[parent];
-  if (nested === null || typeof nested !== "object" || Array.isArray(nested)) return "";
-  const result = (nested as Record<string, unknown>)[child];
-  return typeof result === "string" ? result : "";
+function toReviewerAbsenceOverview(absence: ReviewerAbsence, now: Date) {
+  const status = absence.status === "cancelled"
+    ? "cancelled" as const
+    : absence.endAt <= now
+      ? "ended" as const
+      : absence.startAt <= now
+        ? "active" as const
+        : "upcoming" as const;
+  return {
+    id: absence.id,
+    externalActorId: absence.externalActorId,
+    startAt: absence.startAt.toISOString(),
+    endAt: absence.endAt.toISOString(),
+    status,
+    revision: absence.revision,
+    cancelledAt: absence.cancelledAt?.toISOString() ?? null,
+    createdAt: absence.createdAt.toISOString(),
+    updatedAt: absence.updatedAt.toISOString(),
+  };
 }
 
-function toSafeInteger(value: string): number {
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error("GitHub installation ID is invalid");
-  return parsed;
+function toReviewerReplacementOverview(replacement: ReviewerReplacement) {
+  return {
+    id: replacement.id,
+    absenceId: replacement.absenceId,
+    absenceRevision: replacement.absenceRevision,
+    decisionId: replacement.decisionId,
+    unavailableActorId: replacement.unavailableActorId,
+    replacementActorId: replacement.replacementActorId,
+    outcome: replacement.outcome,
+    reason: replacement.reason,
+    state: replacement.state,
+    lastError: replacement.lastError,
+    completedAt: replacement.completedAt.toISOString(),
+  };
 }
 
-function hasStatus(error: unknown, status: number): boolean {
-  return typeof error === "object" && error !== null && "status" in error && error.status === status;
+function toGitHubOperationsOverview(overview: DatabaseOperationsOverview): OperationsOverview {
+  return {
+    statuses: [
+      { id: "workspace", label: "Organization", value: overview.organization },
+      {
+        id: "connection",
+        label: "GitHub App",
+        value: overview.githubApp.configured ? `App ${overview.githubApp.appId}` : "Not configured",
+        detail: overview.githubApp.installationId
+          ? `Installation ${overview.githubApp.installationId}`
+          : "No active installation",
+      },
+    ],
+    repositories: overview.repositories.map((repository) => ({
+      id: repository.id,
+      repository: githubLink(repository.owner, repository.name),
+      configState: repository.configState,
+      mode: repository.mode,
+    })),
+    decisions: overview.decisions.map((decision) => {
+      const { pullNumber, ...providerNeutralDecision } = decision;
+      const repository = githubLinkFromName(decision.repository);
+      return {
+        ...providerNeutralDecision,
+        repository,
+        changeRequest: pullNumber === null
+          ? null
+          : {
+              label: `#${pullNumber}`,
+              href: githubChangeRequestUrl(repositoryRefFromName(decision.repository), pullNumber),
+            },
+      };
+    }),
+    failures: {
+      jobs: overview.failures.jobs,
+      actions: overview.failures.actions.map((failure) => ({
+        ...failure,
+        repository: githubLinkFromName(failure.repository),
+      })),
+    },
+    worker: overview.worker,
+  };
+}
+
+function githubLink(owner: string, name: string): ProviderLink {
+  const repository = { owner, name };
+  return { label: `${owner}/${name}`, href: githubRepositoryUrl(repository) };
+}
+
+function githubLinkFromName(name: string): ProviderLink {
+  const repository = repositoryRefFromName(name);
+  return { label: name, href: githubRepositoryUrl(repository) };
+}
+
+function repositoryRefFromName(name: string): { owner: string; name: string } {
+  const separator = name.indexOf("/");
+  if (separator <= 0 || separator === name.length - 1) {
+    return { owner: "", name };
+  }
+  return { owner: name.slice(0, separator), name: name.slice(separator + 1) };
+}
+
+function toProviderConnection(input: { githubInstallationId: string; accountLogin?: string }) {
+  return {
+    provider: "github" as const,
+    externalConnectionId: input.githubInstallationId,
+    workspaceLogin: input.accountLogin ?? "",
+    accountType: "Organization",
+  };
+}
+
+function toProviderRepository(input: { githubRepositoryId: string; owner: string; name: string }) {
+  return {
+    provider: "github" as const,
+    externalRepositoryId: input.githubRepositoryId,
+    owner: input.owner,
+    name: input.name,
+  };
 }

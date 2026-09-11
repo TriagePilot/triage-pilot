@@ -1,19 +1,38 @@
 {
   "name": "@triagepilot/db",
-  "private": true,
+  "version": "0.1.0",
+  "license": "FSL-1.1-Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TriagePilot/triage-pilot.git",
+    "directory": "packages/db"
+  },
   "type": "module",
-  "main": "src/index.ts",
+  "files": ["dist", "migrations", "LICENSE"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "rm -rf dist && tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "migrate": "tsx src/migrate.ts"
+    "migrate": "tsx src/migrate.ts",
+    "prepack": "node ../../scripts/prepare-package.mjs --package .",
+    "postpack": "node ../../scripts/prepare-package.mjs --package . --cleanup"
   },
   "dependencies": {
-    "@triagepilot/shared": "workspace:*",
+    "@triagepilot/contracts": "workspace:0.1.0",
     "kysely": "^0.28.17",
     "pg": "^8.13.1"
   },
   "devDependencies": {
     "@types/pg": "^8.11.10"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

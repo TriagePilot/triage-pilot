@@ -1,72 +1,58 @@
-import { selectLowestLoadReviewers } from "./routing";
+import { normalizeReviewer, selectTieredReviewers, uniqueReviewers } from "./reviewer-selection.js";
 
-export interface AvailabilityWindow {
-  reviewerHandle: string;
+export interface ReviewerAbsenceWindow {
+  externalActorId: string;
   startAt: Date;
   endAt: Date;
 }
 
-export interface AvailabilityReplacementSelection {
-  candidates: string[];
-  replacementReviewer: string | null;
-}
-
-export function availableReviewerHandlesAt(input: {
-  reviewers: string[];
-  absences: AvailabilityWindow[];
+export function availableActorsAt(input: {
+  actors: string[];
+  absences: ReviewerAbsenceWindow[];
   now: Date;
 }): string[] {
-  const unavailableReviewers = new Set(
+  const unavailableActors = new Set(
     input.absences
       .filter((absence) => absence.startAt <= input.now && input.now < absence.endAt)
-      .map((absence) => normalizeReviewer(absence.reviewerHandle))
+      .map((absence) => normalizeReviewer(absence.externalActorId))
       .filter(Boolean),
   );
-  return uniqueReviewers(input.reviewers).filter((reviewer) => !unavailableReviewers.has(reviewer));
+
+  return uniqueReviewers(input.actors).filter((actor) => !unavailableActors.has(actor));
 }
 
-export function selectAvailabilityReplacement(input: {
-  originalEligibleReviewers: string[];
-  originalPreferredReviewers?: string[];
-  unavailableReviewer: string;
+export function selectReplacement(input: {
   author: string;
-  approvedReviewers: string[];
-  currentReviewers: string[];
-  absences: AvailabilityWindow[];
-  now: Date;
+  unavailableActor: string;
+  activeCohort: string[];
+  approvedActors: string[];
+  originalEligibleActors: string[];
+  originalPreferredActors: string[];
+  absences: ReviewerAbsenceWindow[];
   load: Record<string, number>;
   selectionKey: string;
-}): AvailabilityReplacementSelection {
-  const unavailableReviewer = normalizeReviewer(input.unavailableReviewer);
-  const author = normalizeReviewer(input.author);
-  const approvedReviewers = new Set(uniqueReviewers(input.approvedReviewers));
-  const currentReviewers = new Set(uniqueReviewers(input.currentReviewers));
-  const candidates = availableReviewerHandlesAt({
-    reviewers: input.originalEligibleReviewers,
+  now: Date;
+}): { replacementActor: string | null; candidates: string[] } {
+  const excludedActors = new Set(uniqueReviewers([
+    input.author,
+    input.unavailableActor,
+    ...input.activeCohort,
+    ...input.approvedActors,
+  ]));
+  const candidates = availableActorsAt({
+    actors: input.originalEligibleActors,
     absences: input.absences,
     now: input.now,
   })
-    .filter((reviewer) => reviewer !== unavailableReviewer && reviewer !== author)
-    .filter((reviewer) => !approvedReviewers.has(reviewer) && !currentReviewers.has(reviewer))
+    .filter((actor) => !excludedActors.has(actor))
     .sort();
-  const preferredReviewerSet = new Set(uniqueReviewers(
-    input.originalPreferredReviewers ?? input.originalEligibleReviewers,
-  ));
-  const preferredCandidates = candidates.filter((reviewer) => preferredReviewerSet.has(reviewer));
-  const fallbackCandidates = candidates.filter((reviewer) => !preferredReviewerSet.has(reviewer));
-  const replacementReviewer =
-    selectLowestLoadReviewers(preferredCandidates, input.load, input.selectionKey, 1)[0] ??
-    selectLowestLoadReviewers(fallbackCandidates, input.load, input.selectionKey, 1)[0] ??
-    null;
+  const replacementActor = selectTieredReviewers({
+    candidates,
+    preferredReviewers: input.originalPreferredActors,
+    load: input.load,
+    selectionKey: input.selectionKey,
+    count: 1,
+  })[0] ?? null;
 
-  return { candidates, replacementReviewer };
-}
-
-function uniqueReviewers(reviewers: string[]): string[] {
-  return [...new Set(reviewers.map(normalizeReviewer).filter(Boolean))];
-}
-
-function normalizeReviewer(reviewer: string): string {
-  const normalized = reviewer.trim().replace(/^@/, "").toLowerCase();
-  return normalized ? `@${normalized}` : "";
+  return { replacementActor, candidates };
 }

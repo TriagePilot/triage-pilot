@@ -1,50 +1,81 @@
-import { Hono } from "hono";
-import type { OperationsOverview } from "@triagepilot/db";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
+import type { EffectiveConfigurationOverview, OperationsOverview } from "@triagepilot/ui";
+import {
+  RoutingRecoveryClosedError,
+  RoutingRecoveryTargetUnavailableError,
+  RoutingRecoveryValidationError,
+} from "@triagepilot/application";
 
 import { requireAdminSession, type AdminSessionServices } from "./auth";
-import { parsePullRequestUrl, RoutingRunError, type RoutingRunRequest } from "../routing-run";
 
 export interface OperationsServices extends AdminSessionServices {
   listOperationsOverview(): Promise<OperationsOverview>;
-  rerunRouting(request: RoutingRunRequest): Promise<{ jobId: string }>;
+  readEffectiveConfiguration(repositoryId: string): Promise<EffectiveConfigurationOverview>;
+  queueRoutingRecovery(
+    request: { decisionId: string } | { changeRequestUrl: string },
+  ): Promise<{ jobId: string }>;
 }
 
 export function operationsRoutes(services: OperationsServices) {
   const app = new Hono();
 
-  app.get("/overview", requireAdminSession(services), async (c) =>
+  app.get("/overview", requireAdminSession(services), requireBoundWorkspace(services), async (c) =>
     c.json(await services.listOperationsOverview()),
   );
-
-  app.post("/routing-runs", requireAdminSession(services), async (c) => {
-    const request = parseRoutingRunRequest(await c.req.json().catch(() => null));
-    if (!request) {
-      return c.json({ error: "validation_failed", message: "Provide one decision ID or GitHub pull request URL." }, 422);
+  app.get("/effective-configuration", requireAdminSession(services), requireBoundWorkspace(services), async (c) => {
+    const repositoryId = c.req.query("repositoryId")?.trim();
+    if (!repositoryId) return c.json({ error: "repository_required" }, 400);
+    return c.json(await services.readEffectiveConfiguration(repositoryId));
+  });
+  app.post("/routing-runs", requireAdminSession(services), requireBoundWorkspace(services), async (c) => {
+    const request = parseRoutingRecoveryRequest(await c.req.json().catch(() => null));
+    if (request === null) {
+      return c.json({
+        error: "invalid_target",
+        message: "Exactly one routing recovery target is required",
+      }, 422);
     }
     try {
-      const result = await services.rerunRouting(request);
-      return c.json({ status: "queued", jobId: result.jobId }, 202);
-    } catch (error) {
-      if (error instanceof RoutingRunError) {
-        return c.json({ error: error.code, message: error.message }, error.status);
+      const queued = await services.queueRoutingRecovery(request);
+      return c.json({ status: "queued", jobId: queued.jobId }, 202);
+    } catch (caught) {
+      if (caught instanceof RoutingRecoveryValidationError) {
+        return c.json({ error: caught.code, message: caught.message }, 422);
       }
-      throw error;
+      if (caught instanceof RoutingRecoveryTargetUnavailableError) {
+        return c.json({ error: caught.code, message: caught.message }, 404);
+      }
+      if (caught instanceof RoutingRecoveryClosedError) {
+        return c.json({ error: caught.code, message: caught.message }, 409);
+      }
+      throw caught;
     }
   });
 
   return app;
 }
 
-function parseRoutingRunRequest(value: unknown): RoutingRunRequest | null {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+function parseRoutingRecoveryRequest(
+  value: unknown,
+): { decisionId: string } | { changeRequestUrl: string } | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const input = value as Record<string, unknown>;
-  const decisionId = typeof input.decisionId === "string" ? input.decisionId.trim() : "";
-  const pullRequestUrl = typeof input.pullRequestUrl === "string" ? input.pullRequestUrl.trim() : "";
-  if (decisionId && !pullRequestUrl) return { decisionId };
-  if (!decisionId && pullRequestUrl && isGitHubPullRequestUrl(pullRequestUrl)) return { pullRequestUrl };
+  const keys = Object.keys(input);
+  if (keys.length !== 1) return null;
+  if (keys[0] === "decisionId" && typeof input.decisionId === "string" && input.decisionId.trim()) {
+    return { decisionId: input.decisionId.trim() };
+  }
+  if (keys[0] === "changeRequestUrl" && typeof input.changeRequestUrl === "string" && input.changeRequestUrl.trim()) {
+    return { changeRequestUrl: input.changeRequestUrl.trim() };
+  }
   return null;
 }
 
-function isGitHubPullRequestUrl(value: string): boolean {
-  return parsePullRequestUrl(value) !== null;
+function requireBoundWorkspace(services: OperationsServices): MiddlewareHandler {
+  return async (c: Context, next) => {
+    if (c.req.header("x-triagepilot-workspace") !== services.workspaceId) {
+      return c.json({ error: "workspace_scope_mismatch" }, 403);
+    }
+    await next();
+  };
 }

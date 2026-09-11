@@ -1,15 +1,15 @@
 # AGENTS.md
 
-TriagePilot is an AGPL-3.0 self-hosted GitHub pull-request routing application. This repository is the canonical development target.
+TriagePilot is an FSL-1.1-Apache-2.0 self-hosted GitHub pull-request routing application. This repository is the canonical development target for the public self-hosted product.
 
 ## Architecture
 
 - `apps/web`: administrator login, operations UI and API, and organization-scoped GitHub webhooks.
 - `apps/worker`: PostgreSQL job consumer, routing processor, recovery, heartbeat, and retention.
-- `packages/config`: `.github/triagepilot.yml` parsing.
+- `packages/config`: repository and organization configuration parsing and resolution.
 - `packages/core`: pure ownership, risk, and routing logic.
 - `packages/db`: PostgreSQL schema, migrations, jobs, routing decisions, heartbeat, and retention.
-- `packages/github`: GitHub App authentication, webhooks, and API adapter.
+- `packages/provider-github`: GitHub App authentication, webhooks, and API adapter.
 - `packages/shared`: shared types and constants.
 
 Read `docs/specs/2026-07-07-open-source-self-hosting-design.md` before planning product work. Read `docs/architecture.md` before changing process boundaries. Read `docs/github-app/repository-configuration.md` before changing the repository configuration contract.
@@ -18,7 +18,8 @@ Read `docs/specs/2026-07-07-open-source-self-hosting-design.md` before planning 
 
 - Keep the runtime portable and container-first.
 - Do not add provider-specific deployment files, private infrastructure, hosted-service runbooks, or environment-specific secrets templates.
-- Preserve shadow mode as the default. Only `mode: enforce` in `.github/triagepilot.yml` permits GitHub writes.
+- Keep external code and documentation contributions closed unless a separate contributor-rights model is approved later.
+- Preserve shadow mode as the default. Only trusted repository configuration may permit GitHub writes.
 - Add or update tests for behavior changes.
 - Use migrations for schema changes; never mutate an existing released migration.
 - Keep secrets out of source control. Administrator and GitHub App credentials are supplied through environment or mounted-file configuration and are not stored in PostgreSQL.

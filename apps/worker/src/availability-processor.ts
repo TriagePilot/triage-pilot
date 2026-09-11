@@ -1,281 +1,191 @@
-import type {
-  RecordReviewerReplacementInput,
-  RecordReviewerReplacementResult,
-  ReviewerAbsenceActivation,
-  ReviewerAbsenceWindow,
-  ReviewerReplacementCandidate,
-  ReviewerReplacementOutcome,
-} from "@triagepilot/db";
-import { selectAvailabilityReplacement } from "@triagepilot/core";
-import type { PullRequestReview } from "@triagepilot/github";
-import type { ReviewerAbsenceActivationJobPayload } from "@triagepilot/shared";
-
+import {
+  activateReviewerAbsence,
+  assertPersistReviewerReplacementInput,
+  assertReviewerReplacementFinalizerRecovery,
+  type ReviewerAvailabilityPorts,
+  type ReviewerReplacementFinalizerRecovery,
+  type ReviewerReplacementRecoveryRecord,
+} from "@triagepilot/application";
+import type { ReviewerAbsenceActivationJobPayload } from "@triagepilot/contracts";
+import type { ProviderKind } from "@triagepilot/contracts";
 import { classifyWorkerError, PermanentJobError } from "./errors";
-import { activeApprovedReviewers } from "./review-policy";
 
-const NO_REPLACEMENT_POLICY_SUMMARY = "No replacement is available for an absent required reviewer.";
-const PERMANENT_FAILURE_POLICY_SUMMARY = "Reviewer replacement failed for an absent required reviewer.";
-
-export interface ReviewerAvailabilityServices {
-  now(): Date;
-  loadActivation(input: {
-    absenceId: string;
-    expectedRevision: number;
-    now: Date;
-  }): Promise<ReviewerAbsenceActivation | null>;
-  findRecordedOutcome(input: {
-    absenceId: string;
-    absenceRevision: number;
-    decisionId: string;
-  }): Promise<ReviewerReplacementOutcome | null>;
-  fetchPullRequest(candidate: ReviewerReplacementCandidate): Promise<{
-    state: string;
-    headSha: string;
-    authorHandle: string;
-  }>;
-  fetchReviews(candidate: ReviewerReplacementCandidate): Promise<PullRequestReview[]>;
-  listAbsenceWindows(input: {
-    reviewers: string[];
-    endingAfter: Date;
-  }): Promise<ReviewerAbsenceWindow[]>;
-  getReviewerLoad(input: {
-    installationId: string;
-    reviewers: string[];
-  }): Promise<Record<string, number>>;
-  removeReviewer(candidate: ReviewerReplacementCandidate, reviewer: string): Promise<void>;
-  requestReviewer(candidate: ReviewerReplacementCandidate, reviewer: string): Promise<void>;
-  recordOutcome(input: RecordReviewerReplacementInput): Promise<RecordReviewerReplacementResult>;
-  reevaluatePolicy(candidate: ReviewerReplacementCandidate): Promise<void>;
-  failPolicyCheck(candidate: ReviewerReplacementCandidate, summary: string): Promise<void>;
+export type ReviewerAvailabilityServices = ReviewerAvailabilityPorts;
+export interface ReviewerAbsenceActivationJobMessage extends ReviewerAbsenceActivationJobPayload {
+  provider: ProviderKind;
 }
 
 export async function processReviewerAbsenceActivationJob(
-  message: ReviewerAbsenceActivationJobPayload,
+  message: ReviewerAbsenceActivationJobMessage,
   services: ReviewerAvailabilityServices,
-): Promise<void> {
-  const activationAt = services.now();
-  const activation = await services.loadActivation({
-    absenceId: message.absenceId,
-    expectedRevision: message.expectedRevision,
-    now: activationAt,
-  });
-  if (activation === null) return;
+): Promise<ReviewerReplacementFinalizerRecovery | null> {
+  const outcome = await activateReviewerAbsence(message, services);
+  return outcome.status === "finalizer_pending" ? outcome.recovery : null;
+}
 
-  let deferredError: unknown = null;
-  for (const candidate of activation.candidates) {
-    let recordedOutcome: ReviewerReplacementOutcome | null;
+export async function recoverReviewerReplacementFinalizer(
+  input: ReviewerReplacementFinalizerRecovery,
+  services: ReviewerAvailabilityServices,
+): Promise<ReviewerReplacementFinalizerRecovery | null> {
+  assertReviewerReplacementFinalizerRecovery(input);
+  let recovery = input;
+
+  if (recovery.phase !== "persist_replacement") {
     try {
-      recordedOutcome = await services.findRecordedOutcome({
-        absenceId: activation.absenceId,
-        absenceRevision: activation.revision,
-        decisionId: candidate.decisionId,
-      });
-    } catch (error) {
-      if (deferredError === null) deferredError = error;
-      continue;
-    }
-
-    if (recordedOutcome !== null) {
-      if (candidate.mode === "enforce") {
-        try {
-          await replayPolicyFinalizer(services, candidate, recordedOutcome);
-        } catch (error) {
-          if (deferredError === null) {
-            const classified = classifyWorkerError(error);
-            deferredError = classified instanceof PermanentJobError ? classified : error;
-          }
-        }
+      const record = await assertReplacementMatchesRecovery(recovery, services);
+      if (recovery.phase === "complete_replacement" && record.state === "completed") return null;
+      if (record.state !== "finalizer_pending") {
+        throw new PermanentJobError("Reviewer replacement recovery is not pending finalization");
       }
-      continue;
-    }
-
-    try {
-      await processCandidate(services, activation, candidate, activationAt);
     } catch (error) {
-      const classified = classifyWorkerError(error);
-      if (classified instanceof PermanentJobError) {
-        const recoveryError = await recoverPermanentFailure(
-          services,
-          activation,
-          candidate,
-          activationAt,
-          classified,
+      return classifiedRecovery(recovery, error);
+    }
+  }
+
+  if (recovery.phase === "persist_replacement") {
+    try {
+      const persisted = recovery.outcome === "permanent_failure"
+        ? await services.availability.persistMutationIntentRecovery(recovery.persistence)
+        : await services.availability.persistReplacement(recovery.persistence);
+      if (!persisted.activationCurrent || persisted.replacement === null) {
+        const audited = await services.availability.persistMutationIntentRecovery(
+          mutationIntentRecoveryAudit(recovery, "Final replacement persistence rejected stale state."),
         );
-        if (deferredError === null && recoveryError !== null) deferredError = recoveryError;
-      } else if (deferredError === null) {
-        deferredError = error;
+        if (audited.replacement === null) throw new Error("Reviewer mutation recovery audit was not persisted");
+        return null;
       }
+      if (recovery.finalizer === null) return null;
+      recovery = {
+        ...recovery,
+        phase: "run_finalizer",
+        replacementId: persisted.replacement.id,
+        persistence: null,
+      } as ReviewerReplacementFinalizerRecovery;
+    } catch (error) {
+      return classifiedRecovery(recovery, error);
     }
   }
-  if (deferredError !== null) throw deferredError;
+
+  if (recovery.phase === "run_finalizer") {
+    try {
+      await services.finalizers.run({
+        workspaceId: recovery.job.workspaceId,
+        providerConnectionId: recovery.job.providerConnectionId,
+        decisionId: recovery.finalizer.decisionId,
+        action: recovery.finalizer.action,
+        summary: recovery.finalizer.summary,
+      });
+      recovery = {
+        ...recovery,
+        phase: "complete_replacement",
+      } as ReviewerReplacementFinalizerRecovery;
+    } catch (error) {
+      return classifiedRecovery(recovery, error);
+    }
+  }
+
+  if (recovery.phase === "complete_replacement") {
+    try {
+      const completed = await services.availability.updateReplacementState({
+        replacementId: recovery.replacementId,
+        expectedState: "finalizer_pending",
+        state: "completed",
+        lastError: null,
+      });
+      if (completed === null) throw new Error("Reviewer replacement finalizer completion was not persisted");
+      return null;
+    } catch (error) {
+      return classifiedRecovery(recovery, error);
+    }
+  }
+
+  return recovery;
 }
 
-async function recoverPermanentFailure(
+export async function markReviewerReplacementRecoveryExhausted(
+  recovery: ReviewerReplacementFinalizerRecovery,
   services: ReviewerAvailabilityServices,
-  activation: ReviewerAbsenceActivation,
-  candidate: ReviewerReplacementCandidate,
-  activationAt: Date,
-  failure: PermanentJobError,
-): Promise<unknown | null> {
-  try {
-    const activationCurrent = await recordOutcome(services, activation, candidate, activationAt, {
+  error: string,
+): Promise<void> {
+  assertReviewerReplacementFinalizerRecovery(recovery);
+  if (recovery.replacementId === null) {
+    const persisted = await services.availability.persistMutationIntentRecovery(
+      mutationIntentRecoveryAudit(recovery, error),
+    );
+    if (persisted.replacement === null) throw new Error("Exhausted reviewer mutation recovery audit was not persisted");
+    return;
+  }
+  const record = await assertReplacementMatchesRecovery(recovery, services);
+  if (record.state !== "finalizer_pending") {
+    throw new Error("Exhausted reviewer replacement is not pending finalization");
+  }
+  const updated = await services.availability.updateReplacementState({
+    replacementId: recovery.replacementId,
+    expectedState: "finalizer_pending",
+    state: "permanent_failure",
+    lastError: error,
+  });
+  if (updated === null) throw new Error("Exhausted reviewer replacement recovery was not persisted");
+}
+
+async function assertReplacementMatchesRecovery(
+  recovery: ReviewerReplacementFinalizerRecovery,
+  services: ReviewerAvailabilityServices,
+): Promise<ReviewerReplacementRecoveryRecord> {
+  if (recovery.replacementId === null) {
+    throw new Error("Reviewer replacement recovery has no durable replacement identity");
+  }
+  const record = await services.availability.loadReplacement(recovery.replacementId);
+  if (
+    record === null
+    || record.workspaceId !== recovery.job.workspaceId
+    || record.provider !== recovery.provider
+    || record.providerConnectionId !== recovery.job.providerConnectionId
+    || record.absenceId !== recovery.job.absenceId
+    || record.absenceRevision !== recovery.job.absenceRevision
+    || record.decisionId !== recovery.finalizer?.decisionId
+    || record.unavailableActorId !== recovery.unavailableActorId
+    || record.outcome !== recovery.outcome
+    || record.replacementActorId !== recovery.replacementActorId
+    || record.mutationIntentId !== recovery.mutationIntentId
+  ) throw new PermanentJobError("Reviewer replacement recovery does not match durable replacement provenance");
+  return record;
+}
+
+function mutationIntentRecoveryAudit(
+  recovery: ReviewerReplacementFinalizerRecovery,
+  error: string,
+) {
+  if (recovery.persistence === null || recovery.mutationIntentId === null) {
+    throw new PermanentJobError("Reviewer mutation recovery has no durable persistence provenance");
+  }
+  const value: unknown = {
+    ...recovery.persistence,
+    replacementActorId: null,
+    mutationIntentId: recovery.mutationIntentId,
+    outcome: "permanent_failure",
+    reason: error,
+    state: "permanent_failure",
+    lastError: error,
+    replaceCohort: false,
+    event: {
+      ...recovery.persistence.event,
+      replacementActor: null,
       outcome: "permanent_failure",
-      replacementReviewer: null,
-      reason: failure.message,
-      replaceCohort: false,
-    });
-    if (!activationCurrent) return null;
-  } catch (error) {
-    return error;
-  }
-
-  if (candidate.mode !== "enforce") return null;
-  try {
-    await services.failPolicyCheck(candidate, PERMANENT_FAILURE_POLICY_SUMMARY);
-    return null;
-  } catch (error) {
-    return classifyWorkerError(error) instanceof PermanentJobError ? null : error;
-  }
+    },
+  };
+  assertPersistReviewerReplacementInput(value);
+  return value;
 }
 
-async function processCandidate(
-  services: ReviewerAvailabilityServices,
-  activation: ReviewerAbsenceActivation,
-  candidate: ReviewerReplacementCandidate,
-  activationAt: Date,
-): Promise<void> {
-  const pullRequest = await services.fetchPullRequest(candidate);
-  if (pullRequest.state !== "open") {
-    await recordOutcome(services, activation, candidate, activationAt, {
-      outcome: "skipped_closed",
-      replacementReviewer: null,
-      reason: "Pull request is no longer open.",
-      replaceCohort: false,
-    });
-    return;
-  }
-  if (pullRequest.headSha !== candidate.headSha) {
-    await recordOutcome(services, activation, candidate, activationAt, {
-      outcome: "skipped_changed_head",
-      replacementReviewer: null,
-      reason: "Pull request head no longer matches the routed head.",
-      replaceCohort: false,
-    });
-    return;
-  }
-
-  const approvedReviewers = activeApprovedReviewers(await services.fetchReviews(candidate));
-  if (approvedReviewers.length >= candidate.requiredApprovalCount) {
-    const activationCurrent = await recordOutcome(services, activation, candidate, activationAt, {
-      outcome: "skipped_policy_satisfied",
-      replacementReviewer: null,
-      reason: "Required human approval count is already satisfied.",
-      replaceCohort: false,
-    });
-    if (!activationCurrent) return;
-    if (candidate.mode === "enforce") await services.reevaluatePolicy(candidate);
-    return;
-  }
-  if (approvedReviewers.map(normalizeReviewer).includes(normalizeReviewer(activation.reviewerHandle))) {
-    await recordOutcome(services, activation, candidate, activationAt, {
-      outcome: "skipped_approved",
-      replacementReviewer: null,
-      reason: "Unavailable reviewer has already approved the pull request.",
-      replaceCohort: false,
-    });
-    return;
-  }
-
-  const absences = await services.listAbsenceWindows({
-    reviewers: candidate.originalEligibleReviewers,
-    endingAfter: activationAt,
-  });
-  const load = await services.getReviewerLoad({
-    installationId: candidate.installationId,
-    reviewers: candidate.originalEligibleReviewers,
-  });
-  const selection = selectAvailabilityReplacement({
-    originalEligibleReviewers: candidate.originalEligibleReviewers,
-    originalPreferredReviewers: candidate.originalPreferredReviewers,
-    unavailableReviewer: activation.reviewerHandle,
-    author: pullRequest.authorHandle,
-    approvedReviewers,
-    currentReviewers: candidate.selectedReviewers,
-    absences,
-    now: activationAt,
-    load,
-    selectionKey: `${candidate.owner}/${candidate.repo}#${candidate.pullNumber}`,
-  });
-  if (selection.replacementReviewer === null) {
-    const activationCurrent = await recordOutcome(services, activation, candidate, activationAt, {
-      outcome: "no_replacement_available",
-      replacementReviewer: null,
-      reason: "No available reviewer remains in the original ownership-eligible pool.",
-      replaceCohort: false,
-    });
-    if (!activationCurrent) return;
-    if (candidate.mode === "enforce") {
-      await services.failPolicyCheck(candidate, NO_REPLACEMENT_POLICY_SUMMARY);
-    }
-    return;
-  }
-  if (candidate.mode === "enforce") {
-    await services.removeReviewer(candidate, activation.reviewerHandle);
-    await services.requestReviewer(candidate, selection.replacementReviewer);
-    const activationCurrent = await recordOutcome(services, activation, candidate, activationAt, {
-      outcome: "replaced",
-      replacementReviewer: selection.replacementReviewer,
-      reason: `Replaced absent reviewer ${activation.reviewerHandle} with ${selection.replacementReviewer}.`,
-      replaceCohort: true,
-    });
-    if (!activationCurrent) return;
-    await services.reevaluatePolicy(candidate);
-  } else {
-    await recordOutcome(services, activation, candidate, activationAt, {
-      outcome: "simulated_replacement",
-      replacementReviewer: selection.replacementReviewer,
-      reason: `Would replace absent reviewer ${activation.reviewerHandle} with ${selection.replacementReviewer}.`,
-      replaceCohort: true,
-    });
-  }
-}
-
-async function replayPolicyFinalizer(
-  services: ReviewerAvailabilityServices,
-  candidate: ReviewerReplacementCandidate,
-  outcome: ReviewerReplacementOutcome,
-): Promise<void> {
-  if (outcome === "replaced" || outcome === "skipped_policy_satisfied") {
-    await services.reevaluatePolicy(candidate);
-  } else if (outcome === "no_replacement_available") {
-    await services.failPolicyCheck(candidate, NO_REPLACEMENT_POLICY_SUMMARY);
-  } else if (outcome === "permanent_failure") {
-    await services.failPolicyCheck(candidate, PERMANENT_FAILURE_POLICY_SUMMARY);
-  }
-}
-
-async function recordOutcome(
-  services: ReviewerAvailabilityServices,
-  activation: ReviewerAbsenceActivation,
-  candidate: ReviewerReplacementCandidate,
-  startedAt: Date,
-  outcome: Pick<
-    RecordReviewerReplacementInput,
-    "outcome" | "replacementReviewer" | "reason" | "replaceCohort"
-  >,
-): Promise<boolean> {
-  const result = await services.recordOutcome({
-    absenceId: activation.absenceId,
-    absenceRevision: activation.revision,
-    decisionId: candidate.decisionId,
-    unavailableReviewer: activation.reviewerHandle,
-    ...outcome,
-    startedAt,
-    completedAt: services.now(),
-  });
-  return result.activationCurrent !== false;
-}
-
-function normalizeReviewer(reviewer: string): string {
-  return reviewer.trim().replace(/^@/, "").toLowerCase();
+function classifiedRecovery(
+  recovery: ReviewerReplacementFinalizerRecovery,
+  error: unknown,
+): ReviewerReplacementFinalizerRecovery {
+  const classified = classifyWorkerError(error);
+  return {
+    ...recovery,
+    lastError: classified.message,
+    retryable: !(classified instanceof PermanentJobError),
+  };
 }

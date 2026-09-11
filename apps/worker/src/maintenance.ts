@@ -2,8 +2,10 @@ const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export interface WorkerMaintenanceServices {
   recoverStaleJobs(now: Date): Promise<void>;
+  cleanupRevokedProviderConnections(now: Date): Promise<void>;
   applyRetention(now: Date): Promise<void>;
   updateHeartbeat(now: Date): Promise<void>;
+  drainPlatformOutbox(now: Date): Promise<void>;
 }
 
 export interface WorkerMaintenanceState {
@@ -15,8 +17,10 @@ export async function runWorkerStartup(
   now: Date,
 ): Promise<WorkerMaintenanceState> {
   await services.recoverStaleJobs(now);
+  await runProviderConnectionCleanup(services, now);
   await services.applyRetention(now);
   await services.updateHeartbeat(now);
+  await runPlatformOutboxDrain(services, now);
   return { lastRetentionAt: now };
 }
 
@@ -26,9 +30,33 @@ export async function runWorkerMaintenance(
   now: Date,
 ): Promise<WorkerMaintenanceState> {
   await services.recoverStaleJobs(now);
+  await runProviderConnectionCleanup(services, now);
   await services.updateHeartbeat(now);
+  await runPlatformOutboxDrain(services, now);
   if (now.getTime() - state.lastRetentionAt.getTime() < RETENTION_INTERVAL_MS) return state;
 
   await services.applyRetention(now);
   return { lastRetentionAt: now };
+}
+
+async function runProviderConnectionCleanup(
+  services: Pick<WorkerMaintenanceServices, "cleanupRevokedProviderConnections">,
+  now: Date,
+): Promise<void> {
+  try {
+    await services.cleanupRevokedProviderConnections(now);
+  } catch {
+    // Revocation is already durable; cleanup remains pending and retries on the next maintenance cycle.
+  }
+}
+
+export async function runPlatformOutboxDrain(
+  services: Pick<WorkerMaintenanceServices, "drainPlatformOutbox">,
+  now: Date,
+): Promise<void> {
+  try {
+    await services.drainPlatformOutbox(now);
+  } catch {
+    // Platform event delivery is retryable maintenance work and must not block routing.
+  }
 }

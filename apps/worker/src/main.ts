@@ -1,76 +1,38 @@
 import { pathToFileURL } from "node:url";
 
-import {
-  applyFixedRetention,
-  createDatabase,
-  createJobQueue,
-  recoverStaleJobs,
-  updateWorkerHeartbeat,
-} from "@triagepilot/db";
 import { formatLog } from "@triagepilot/shared";
 
+import { createSelfHostedWorkerComposition } from "./composition/self-hosted";
 import { readWorkerEnv } from "./env";
-import { processReviewerAbsenceActivationJob } from "./availability-processor";
-import { runWorkerMaintenance, runWorkerStartup } from "./maintenance";
-import { processRoutingJob } from "./processor";
-import { processHumanReviewPolicyJob } from "./review-policy-processor";
-import { runWorkerOnce } from "./runner";
-import {
-  createWorkerHumanReviewPolicyServiceFactory,
-  createWorkerReviewerAvailabilityServiceFactory,
-  createWorkerRoutingServiceFactory,
-} from "./runtime-services";
-
-export function createWorkerRuntimeProcessors(
-  input: Parameters<typeof createWorkerRoutingServiceFactory>[0],
-) {
-  return {
-    processRoutingJob,
-    buildRoutingServices: createWorkerRoutingServiceFactory(input),
-    processHumanReviewPolicyJob,
-    buildHumanReviewPolicyServices: createWorkerHumanReviewPolicyServiceFactory(input),
-    processReviewerAbsenceActivationJob,
-    buildReviewerAvailabilityServices: createWorkerReviewerAvailabilityServiceFactory(input),
-  };
-}
 
 export async function runWorkerProcess(source: NodeJS.ProcessEnv = process.env): Promise<void> {
   const env = await readWorkerEnv(source);
-  const db = createDatabase(env.databaseUrl);
+  const composition = await createSelfHostedWorkerComposition(env);
 
   try {
-    const queue = createJobQueue(db);
-    const runtimeProcessors = createWorkerRuntimeProcessors({ db, github: env.github });
-    const maintenanceServices = {
-      async recoverStaleJobs(now: Date) {
-        await recoverStaleJobs(db, now);
-      },
-      async applyRetention(now: Date) {
-        await applyFixedRetention(db, now);
-      },
-      async updateHeartbeat(now: Date) {
-        await updateWorkerHeartbeat(db, { workerId: env.workerId, now });
-      },
-    };
-    let maintenanceState = await runWorkerStartup(maintenanceServices, new Date());
-    console.log(formatLog({ level: "info", event: "worker_started", service: "worker" }));
+    let maintenanceState = await composition.runStartup(new Date());
+    console.log(formatLog({
+      level: "info",
+      event: "worker_started",
+      service: "worker",
+      workspaceId: composition.workspaceId,
+      provider: "github",
+    }));
 
     for (;;) {
       const now = new Date();
       try {
-        maintenanceState = await runWorkerMaintenance(maintenanceState, maintenanceServices, now);
-        await runWorkerOnce({
-          queue,
-          workerId: env.workerId,
-          now,
-          ...runtimeProcessors,
-        });
+        maintenanceState = await composition.runMaintenance(maintenanceState, now);
+        await composition.runOnce(now);
+        await composition.drainPlatformOutbox(new Date());
       } catch (error) {
         console.error(
           formatLog({
             level: "error",
             event: "worker_cycle_failed",
             service: "worker",
+            workspaceId: composition.workspaceId,
+            provider: "github",
             message: error instanceof Error ? error.message : "worker cycle failed",
           }),
         );
@@ -78,7 +40,7 @@ export async function runWorkerProcess(source: NodeJS.ProcessEnv = process.env):
       await new Promise((resolve) => setTimeout(resolve, env.pollMs));
     }
   } finally {
-    await db.destroy();
+    await composition.close();
   }
 }
 

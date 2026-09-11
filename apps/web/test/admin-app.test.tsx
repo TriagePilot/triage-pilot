@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { App, Dashboard, LoginScreen } from "../src/admin/App";
-import type { AvailabilityOverview, OperationsOverview } from "../src/admin/api";
+import type { OperationsOverview } from "../src/admin/api";
 
 describe("admin application", () => {
   it("starts with a useful session loading state", () => {
@@ -30,9 +30,9 @@ describe("admin application", () => {
     expect(html).not.toContain("Webhook secret");
   });
 
-  it("renders the operational chain, availability controls, and semantic data tables", () => {
+  it("renders the operational chain, recovery controls, and semantic data tables", () => {
     const html = renderToStaticMarkup(
-      <Dashboard username="admin" overview={overview} availability={availability} onAvailabilityChange={() => {}} onLogout={async () => {}} />,
+      <Dashboard username="admin" overview={overview} onLogout={async () => {}} />,
     );
 
     expect(html).toContain("Operations ledger");
@@ -40,13 +40,8 @@ describe("admin application", () => {
     expect(html).toContain("App 123");
     expect(html).toContain("Installation 9007199254740993");
     expect(html).toContain("Worker available");
-    expect(html).toContain("Reviewer availability");
     expect(html).toContain("Connected repositories");
     expect(html).toContain("Recent routing decisions");
-    expect(html).toContain("Run missing pull request");
-    expect(html).toContain('for="missing-pull-request-url"');
-    expect(html).toContain("Re-run routing");
-    expect(html).toContain("1 run");
     expect(html).toContain("Permanent job failures");
     expect(html).toContain("Action failures");
     expect(html).toContain("acme/api");
@@ -58,19 +53,19 @@ describe("admin application", () => {
     expect(html).toContain('rel="noreferrer"');
     expect(html).toContain("Reviewers");
     expect(html).toContain("@team-a7f19c/reviewers, @user-b4e82d");
-    expect(html).toContain("2 of 2 required");
     expect(html).toContain("GitHub permission denied");
     expect(html).toContain("Review request rejected");
-    expect(html.match(/<table/g)).toHaveLength(5);
-    expect(html.match(/role="region"/g)).toHaveLength(5);
-    expect(html.match(/tabindex="0"/g)).toHaveLength(5);
+    expect(html.match(/<table/g)).toHaveLength(4);
+    expect(html.match(/role="region"/g)).toHaveLength(4);
+    expect(html.match(/tabindex="0"/g)).toHaveLength(4);
     expect(html).toContain('aria-labelledby="repositories-heading"');
     expect(html).toContain('aria-labelledby="decisions-heading"');
     expect(html).toContain('aria-labelledby="job-failures-heading"');
     expect(html).toContain('aria-labelledby="action-failures-heading"');
-    expect(html).toContain('aria-labelledby="availability-history-heading"');
-    expect(html.match(/<button/g)).toHaveLength(5);
-    expect(html.match(/<input/g)).toHaveLength(5);
+    expect(html.match(/<button/g)).toHaveLength(3);
+    expect(html).toContain("Run missing change request");
+    expect(html).toContain("Re-run routing");
+    expect(html).toContain('id="routing-recovery-url"');
     expect(html).not.toContain("<select");
   });
 
@@ -84,38 +79,14 @@ describe("admin application", () => {
           decisions: [],
           failures: { jobs: [], actions: [] },
         }}
-        availability={availability}
-        onAvailabilityChange={() => {}}
         onLogout={async () => {}}
       />,
     );
 
-    expect(html).toContain("No repositories are connected to this installation.");
+    expect(html).toContain("No repositories are connected to this provider connection.");
     expect(html).toContain("No routing decisions have been recorded yet.");
     expect(html).toContain("No permanent job failures.");
     expect(html).toContain("No action failures.");
-  });
-
-  it("shows why a reviewer quota was not fulfilled", () => {
-    const html = renderToStaticMarkup(
-      <Dashboard
-        username="admin"
-        overview={{
-          ...overview,
-          decisions: [{
-            ...overview.decisions[0],
-            selectedReviewer: "@user-b4e82d",
-            selectedReviewers: ["@user-b4e82d"],
-            reviewerShortfall: 1,
-          }],
-        }}
-        availability={availability}
-        onAvailabilityChange={() => {}}
-        onLogout={async () => {}}
-      />,
-    );
-
-    expect(html).toContain("1 of 2 required · shortfall 1");
   });
 
   it("keeps an operational error visible without replacing readable data", () => {
@@ -123,8 +94,6 @@ describe("admin application", () => {
       <Dashboard
         username="admin"
         overview={overview}
-        availability={availability}
-        onAvailabilityChange={() => {}}
         error="Could not sign out."
         onLogout={async () => {}}
       />,
@@ -141,10 +110,8 @@ describe("admin application", () => {
         username="admin"
         overview={{
           ...overview,
-          decisions: [{ ...overview.decisions[0]!, pullNumber: null }],
+          decisions: [{ ...overview.decisions[0]!, changeRequest: null }],
         }}
-        availability={availability}
-        onAvailabilityChange={() => {}}
         onLogout={async () => {}}
       />,
     );
@@ -164,8 +131,6 @@ describe("admin application", () => {
           ...overview,
           decisions: [{ ...overview.decisions[0]!, policyCheckState }],
         }}
-        availability={availability}
-        onAvailabilityChange={() => {}}
         onLogout={async () => {}}
       />,
     );
@@ -208,8 +173,6 @@ describe("admin application", () => {
             ],
           } as unknown as OperationsOverview
         }
-        availability={availability}
-        onAvailabilityChange={() => {}}
         onLogout={async () => {}}
       />,
     );
@@ -225,18 +188,28 @@ describe("admin application", () => {
 });
 
 const overview: OperationsOverview = {
-  organization: "acme",
-  githubApp: { appId: "123", configured: true, installationId: "9007199254740993" },
+  statuses: [
+    { id: "workspace", label: "Organization", value: "acme" },
+    {
+      id: "connection",
+      label: "GitHub App",
+      value: "App 123",
+      detail: "Installation 9007199254740993",
+    },
+  ],
   repositories: [
-    { id: "repo-1", owner: "acme", name: "api", configState: "valid", mode: "shadow" },
+    {
+      id: "repo-1",
+      repository: { label: "acme/api", href: "https://github.com/acme/api" },
+      configState: "valid",
+      mode: "shadow",
+    },
   ],
   decisions: [
     {
       id: "decision-1",
-      repository: "acme/api",
-      pullNumber: 7,
-      headSha: "head-1",
-      runCount: 1,
+      repository: { label: "acme/api", href: "https://github.com/acme/api" },
+      changeRequest: { label: "#7", href: "https://github.com/acme/api/pull/7" },
       mode: "shadow",
       action: "request_human_review",
       actionStatus: "not_applied",
@@ -244,10 +217,10 @@ const overview: OperationsOverview = {
       policyCheckState: "in_progress",
       riskScore: 55,
       riskBreakdown: null,
-      selectedReviewer: "@team-a7f19c/reviewers",
-      selectedReviewers: ["@team-a7f19c/reviewers", "@user-b4e82d"],
       requestedReviewerCount: 2,
       reviewerShortfall: 0,
+      selectedReviewer: "@team-a7f19c/reviewers",
+      selectedReviewers: ["@team-a7f19c/reviewers", "@user-b4e82d"],
       createdAt: "2026-08-18T10:00:00.000Z",
     },
   ],
@@ -258,7 +231,7 @@ const overview: OperationsOverview = {
     actions: [
       {
         decisionId: "decision-2",
-        repository: "acme/api",
+        repository: { label: "acme/api", href: "https://github.com/acme/api" },
         error: "Review request rejected",
         failedAt: "2026-08-18T10:02:00.000Z",
       },
@@ -266,5 +239,3 @@ const overview: OperationsOverview = {
   },
   worker: { available: true, workerId: "worker-1", lastHeartbeatAt: "2026-08-18T10:02:00.000Z" },
 };
-
-const availability: AvailabilityOverview = { timezone: "Europe/Bratislava", absences: [] };

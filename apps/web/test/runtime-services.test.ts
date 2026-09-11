@@ -1,140 +1,34 @@
 import { describe, expect, it, vi } from "vitest";
-
-const dbMocks = vi.hoisted(() => ({
-  acceptHumanReviewPolicyDelivery: vi.fn(),
-  cancelReviewerAbsence: vi.fn(),
-  createReviewerAbsence: vi.fn(),
-  readAvailabilityOverview: vi.fn(),
-  updateOrganizationTimezone: vi.fn(),
-  updateReviewerAbsence: vi.fn(),
-  createJobQueue: vi.fn(),
-  findRoutingRecoveryTarget: vi.fn(),
-}));
-
-vi.mock("@triagepilot/db", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@triagepilot/db")>()),
-  acceptHumanReviewPolicyDelivery: dbMocks.acceptHumanReviewPolicyDelivery,
-  cancelReviewerAbsence: dbMocks.cancelReviewerAbsence,
-  createReviewerAbsence: dbMocks.createReviewerAbsence,
-  readAvailabilityOverview: dbMocks.readAvailabilityOverview,
-  updateOrganizationTimezone: dbMocks.updateOrganizationTimezone,
-  updateReviewerAbsence: dbMocks.updateReviewerAbsence,
-  createJobQueue: dbMocks.createJobQueue,
-  findRoutingRecoveryTarget: dbMocks.findRoutingRecoveryTarget,
-}));
+import { ensureLocalWorkspace } from "@triagepilot/db";
 
 import { createWebRuntimeServices } from "../src/runtime-services";
-import { RoutingRunError } from "../src/routing-run";
 import { withPostgresTestDatabase } from "../../../packages/db/test/postgres";
 
 describe("web runtime services", () => {
-  it("queues a fresh routing job from the pull request's current GitHub state", async () => {
+  it("delegates routing recovery to the provider-aware self-hosted composition", async () => {
     const db = new NoAccessDb();
-    const enqueue = vi.fn(async () => ({ inserted: true, jobId: "job-recovery-1" }));
-    const request = vi.fn(async () => ({
-      data: {
-        state: "open",
-        draft: false,
-        base: { sha: "base-current" },
-        head: { sha: "head-current" },
-      },
-    }));
-    dbMocks.createJobQueue.mockReturnValueOnce({ enqueue });
-    dbMocks.findRoutingRecoveryTarget.mockResolvedValueOnce({
-      githubInstallationId: "99",
-      githubRepositoryId: "101",
-      owner: "acme",
-      repo: "api",
-      pullNumber: 7,
-    });
-    const services = createWebRuntimeServices(runtimeInput(db as never, () => new Date(), {
-      createRequester: async () => ({ request }),
-      createId: () => "run-1",
-    }));
-
-    await expect(services.rerunRouting({ decisionId: "decision-1" })).resolves.toEqual({
-      jobId: "job-recovery-1",
+    const queueRoutingRecovery = vi.fn(async () => ({ jobId: "job-recovery-1", routingKey: "routing-key-1" }));
+    const services = createWebRuntimeServices({
+      ...runtimeInput(db as never, () => new Date()),
+      queueRoutingRecovery,
     });
 
-    expect(dbMocks.findRoutingRecoveryTarget).toHaveBeenCalledWith(db, {
-      githubOrganization: "acme",
-      decisionId: "decision-1",
+    await expect(services.queueRoutingRecovery({
+      changeRequestUrl: "https://github.com/acme/api/pull/7",
+    })).resolves.toEqual({ jobId: "job-recovery-1" });
+    expect(queueRoutingRecovery).toHaveBeenCalledWith({
+      changeRequestUrl: "https://github.com/acme/api/pull/7",
     });
-    expect(request).toHaveBeenCalledWith("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
-      owner: "acme",
-      repo: "api",
-      pull_number: 7,
-    });
-    expect(enqueue).toHaveBeenCalledWith({
-      kind: "process_pull_request",
-      idempotencyKey: "routing:101:7:base-current:head-current:ready:rerun:run-1",
-      payload: {
-        kind: "process_pull_request",
-        deliveryId: "operator-rerun:run-1",
-        installationId: "99",
-        repositoryId: "101",
-        owner: "acme",
-        repo: "api",
-        pullNumber: 7,
-        baseSha: "base-current",
-        headSha: "head-current",
-        isDraft: false,
-        eventName: "operator.rerun",
-        routingKey: "routing:101:7:base-current:head-current:ready:rerun:run-1",
-      },
-    });
+    expect(db.accessedTables).toEqual([]);
   });
 
-  it("resolves a configured missing pull request from its GitHub URL", async () => {
-    const db = new NoAccessDb();
-    dbMocks.createJobQueue.mockReturnValueOnce({
-      enqueue: vi.fn(async () => ({ inserted: true, jobId: "job-recovery-2" })),
-    });
-    dbMocks.findRoutingRecoveryTarget.mockResolvedValueOnce({
-      githubInstallationId: "99",
-      githubRepositoryId: "101",
-      owner: "acme",
-      repo: "api",
-      pullNumber: 2674,
-    });
-    const services = createWebRuntimeServices(runtimeInput(db as never, () => new Date(), {
-      createRequester: async () => ({ request: async () => ({ data: {
-        state: "open", draft: true, base: { sha: "base" }, head: { sha: "head" },
-      } }) }),
-      createId: () => "run-2",
-    }));
-
-    await services.rerunRouting({ pullRequestUrl: "https://github.com/acme/api/pull/2674" });
-
-    expect(dbMocks.findRoutingRecoveryTarget).toHaveBeenCalledWith(db, {
-      githubOrganization: "acme",
-      owner: "acme",
-      repo: "api",
-      pullNumber: 2674,
-    });
-  });
-
-  it("reports a missing GitHub pull request without enqueueing work", async () => {
-    const db = new NoAccessDb();
-    const enqueue = vi.fn();
-    dbMocks.createJobQueue.mockReturnValueOnce({ enqueue });
-    dbMocks.findRoutingRecoveryTarget.mockResolvedValueOnce({
-      githubInstallationId: "99", githubRepositoryId: "101", owner: "acme", repo: "api", pullNumber: 2674,
-    });
-    const services = createWebRuntimeServices(runtimeInput(db as never, () => new Date(), {
-      createRequester: async () => ({ request: async () => { throw { status: 404 }; } }),
-    }));
-
-    const error = await services.rerunRouting({ pullRequestUrl: "https://github.com/acme/api/pull/2674" })
-      .catch((caught) => caught);
-
-    expect(error).toBeInstanceOf(RoutingRunError);
-    expect(error).toMatchObject({ status: 404, code: "not_found" });
-    expect(enqueue).not.toHaveBeenCalled();
-  });
   it("delegates review policy acceptance to the database service", async () => {
     const db = new NoAccessDb();
-    const services = createWebRuntimeServices(runtimeInput(db as never, () => new Date()));
+    const acceptHumanReviewPolicyDelivery = vi.fn(async () => ({ inserted: true, jobId: "job-review-1" }));
+    const services = createWebRuntimeServices({
+      ...runtimeInput(db as never, () => new Date()),
+      repositories: { acceptHumanReviewPolicyDelivery } as never,
+    });
     const delivery = {
       deliveryId: "delivery-review-1",
       eventName: "pull_request_review",
@@ -143,20 +37,34 @@ describe("web runtime services", () => {
       payload: {
         kind: "evaluate_human_review_policy" as const,
         deliveryId: "delivery-review-1",
-        installationId: "99",
-        repositoryId: "101",
-        owner: "acme",
-        repo: "api",
-        pullNumber: 7,
+        changeRequest: {
+          repository: { provider: "github" as const, externalId: "101", owner: "acme", name: "api" },
+          externalId: "7",
+          number: 7,
+        },
       },
     };
-    dbMocks.acceptHumanReviewPolicyDelivery.mockResolvedValueOnce({ inserted: true, jobId: "job-review-1" });
-
     await expect(services.acceptHumanReviewPolicyDelivery(delivery)).resolves.toEqual({
       inserted: true,
       jobId: "job-review-1",
     });
-    expect(dbMocks.acceptHumanReviewPolicyDelivery).toHaveBeenCalledWith(db, delivery);
+    expect(acceptHumanReviewPolicyDelivery).toHaveBeenCalledWith({
+      deliveryId: "delivery-review-1",
+      eventName: "pull_request_review",
+      connection: {
+        provider: "github",
+        externalConnectionId: "99",
+        workspaceLogin: "acme",
+        accountType: "Organization",
+      },
+      repository: {
+        provider: "github",
+        externalRepositoryId: "101",
+        owner: "acme",
+        name: "api",
+      },
+      payload: delivery.payload,
+    });
   });
 
   it("uses configured in-memory credentials without reading removed setup state", async () => {
@@ -168,49 +76,18 @@ describe("web runtime services", () => {
     expect(db.accessedTables).toEqual([]);
   });
 
-  it("delegates reviewer availability reads and mutations to the database service", async () => {
-    const db = new NoAccessDb();
-    const services = createWebRuntimeServices(runtimeInput(db as never, () => new Date()));
-    const now = new Date("2026-08-18T10:00:00.000Z");
-    const overview = { timezone: "UTC", absences: [] };
-    const absence = {
-      reviewerHandle: "@user-d82a5f",
-      startAt: new Date("2026-08-19T08:00:00.000Z"),
-      endAt: new Date("2026-08-19T16:00:00.000Z"),
-      now,
-    };
-    dbMocks.readAvailabilityOverview.mockResolvedValueOnce(overview);
-    dbMocks.updateOrganizationTimezone.mockResolvedValueOnce(undefined);
-    dbMocks.createReviewerAbsence.mockResolvedValueOnce(undefined);
-    dbMocks.updateReviewerAbsence.mockResolvedValueOnce(undefined);
-    dbMocks.cancelReviewerAbsence.mockResolvedValueOnce(undefined);
-
-    await expect(services.readAvailabilityOverview({ now })).resolves.toEqual(overview);
-    await services.updateOrganizationTimezone({ timezone: "Europe/Bratislava", now });
-    await services.createReviewerAbsence(absence);
-    await services.updateReviewerAbsence({ ...absence, absenceId: "absence-1", expectedRevision: 2 });
-    await services.cancelReviewerAbsence({ absenceId: "absence-1", expectedRevision: 2, now });
-
-    expect(dbMocks.readAvailabilityOverview).toHaveBeenCalledWith(db, { now });
-    expect(dbMocks.updateOrganizationTimezone).toHaveBeenCalledWith(db, { timezone: "Europe/Bratislava", now });
-    expect(dbMocks.createReviewerAbsence).toHaveBeenCalledWith(db, absence);
-    expect(dbMocks.updateReviewerAbsence).toHaveBeenCalledWith(db, {
-      ...absence,
-      absenceId: "absence-1",
-      expectedRevision: 2,
-    });
-    expect(dbMocks.cancelReviewerAbsence).toHaveBeenCalledWith(db, { absenceId: "absence-1", expectedRevision: 2, now });
-  });
-
   it.runIf(Boolean(process.env.TEST_DATABASE_URL))(
     "returns a secret-free overview and uses the 30-second heartbeat boundary",
     async () => {
       await withPostgresTestDatabase(async (db) => {
-        const installation = await db
-          .insertInto("installations")
+        const workspaceId = await ensureLocalWorkspace(db);
+        const connection = await db
+          .insertInto("provider_connections")
           .values({
-            github_installation_id: "9007199254740993",
-            account_login: "acme",
+            workspace_id: workspaceId,
+            provider: "github",
+            external_connection_id: "9007199254740993",
+            workspace_login: "acme",
             account_type: "Organization",
             status: "active",
             permissions: {},
@@ -220,8 +97,10 @@ describe("web runtime services", () => {
         const repository = await db
           .insertInto("repositories")
           .values({
-            installation_id: installation.id,
-            github_repository_id: "101",
+            workspace_id: workspaceId,
+            provider: "github",
+            provider_connection_id: connection.id,
+            external_repository_id: "101",
             owner: "acme",
             name: "api",
             default_branch: "main",
@@ -233,6 +112,7 @@ describe("web runtime services", () => {
         const decision = await db
           .insertInto("routing_decisions")
           .values({
+            workspace_id: workspaceId,
             repository_id: repository.id,
             delivery_id: "delivery-1",
             routing_key: "legacy:delivery-1",
@@ -246,11 +126,9 @@ describe("web runtime services", () => {
             selected_reviewer: "@team-a7f19c/reviewers",
             selected_reviewers: JSON.stringify(["@team-a7f19c/reviewers", "@user-b4e82d"]),
             no_human_reason: null,
-            details: {
-              pullNumber: 7,
-              privateKey: "raw-detail-secret",
-              routing: { requestedReviewerCount: 2, reviewerShortfall: 0 },
-            },
+            details: { pullNumber: 7, privateKey: "raw-detail-secret" },
+            effective_config_hash: "legacy-test-hash",
+            inheritance_mode: "legacy",
             created_at: new Date("2026-08-18T10:00:00.000Z"),
           })
           .returning("id")
@@ -258,6 +136,9 @@ describe("web runtime services", () => {
         const job = await db
           .insertInto("jobs")
           .values({
+            workspace_id: workspaceId,
+            provider: "github",
+            provider_connection_id: connection.id,
             kind: "process_pull_request",
             status: "failed",
             payload: { webhookSecret: "raw-job-secret" },
@@ -274,23 +155,33 @@ describe("web runtime services", () => {
           .execute();
 
         let currentTime = new Date("2026-08-18T10:02:30.000Z");
-        const services = createWebRuntimeServices(runtimeInput(db, () => currentTime));
+        const services = createWebRuntimeServices(runtimeInput(db, () => currentTime, workspaceId));
         await expect(services.checkDatabase()).resolves.toBeUndefined();
         const overview = await services.listOperationsOverview();
 
         expect(overview).toEqual({
-          organization: "acme",
-          githubApp: { appId: "123", configured: true, installationId: "9007199254740993" },
+          statuses: [
+            { id: "workspace", label: "Organization", value: "acme" },
+            {
+              id: "connection",
+              label: "GitHub App",
+              value: "App 123",
+              detail: "Installation 9007199254740993",
+            },
+          ],
           repositories: [
-            { id: repository.id, owner: "acme", name: "api", configState: "valid", mode: "shadow" },
+            {
+              id: repository.id,
+              repository: { label: "acme/api", href: "https://github.com/acme/api" },
+              configState: "valid",
+              mode: "shadow",
+            },
           ],
           decisions: [
             {
               id: decision.id,
-              repository: "acme/api",
-              pullNumber: 7,
-              headSha: null,
-              runCount: 1,
+              repository: { label: "acme/api", href: "https://github.com/acme/api" },
+              changeRequest: { label: "#7", href: "https://github.com/acme/api/pull/7" },
               mode: "shadow",
               action: "request_human_review",
               actionStatus: "not_applied",
@@ -298,10 +189,10 @@ describe("web runtime services", () => {
               policyCheckState: "in_progress",
               riskScore: 55,
               riskBreakdown: null,
+              requestedReviewerCount: null,
+              reviewerShortfall: null,
               selectedReviewer: "@team-a7f19c/reviewers",
               selectedReviewers: ["@team-a7f19c/reviewers", "@user-b4e82d"],
-              requestedReviewerCount: 2,
-              reviewerShortfall: 0,
               createdAt: "2026-08-18T10:00:00.000Z",
             },
           ],
@@ -350,10 +241,11 @@ describe("web runtime services", () => {
 function runtimeInput(
   db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0],
   now: () => Date,
-  overrides: Record<string, unknown> = {},
+  workspaceId = "00000000-0000-4000-8000-000000000001",
 ) {
   return {
     db,
+    workspaceId,
     adminUsername: "admin",
     adminPassword: "correct-password",
     sessionSecret: "session-secret-value-that-is-long-enough",
@@ -367,7 +259,17 @@ function runtimeInput(
       webhookSecret: "hook-secret",
     },
     verifySignature: async () => {},
-    ...overrides,
+    normalizeGitHubWebhook: () => null,
+    readEffectiveConfiguration: async () => ({
+      repository: { label: "acme/api", href: "https://github.com/acme/api" },
+      trustedPath: null,
+      trustedRevision: "self-hosted-probe",
+      repositoryRevision: null,
+      inheritanceMode: "defaults" as const,
+      effectiveHash: "a".repeat(64),
+      values: [],
+    }),
+    queueRoutingRecovery: async () => ({ jobId: "job-recovery-1", routingKey: "routing-key-1" }),
   };
 }
 

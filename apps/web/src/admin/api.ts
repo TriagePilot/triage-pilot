@@ -1,7 +1,17 @@
-import type { AvailabilityOverview, OperationsOverview } from "@triagepilot/db";
+import type {
+  AvailabilitySettingsOverview,
+  EffectiveConfigurationOverview,
+  OperationsApiClient,
+  OperationsOverview,
+  ReviewerAbsenceMutation,
+  ReviewerAbsenceOverview,
+  ReviewerReplacementOverview,
+  RepositoryContext,
+  WorkspaceContext,
+} from "@triagepilot/ui";
 
 export type AdminSession =
-  | { authenticated: true; username: string }
+  | { authenticated: true; username: string; workspaceId: string }
   | { authenticated: false };
 
 export class AdminApiError extends Error {
@@ -41,8 +51,115 @@ export async function logout(): Promise<void> {
   if (!response.ok) throw new AdminApiError("Could not sign out.", response.status);
 }
 
-export async function fetchOperationsOverview(): Promise<OperationsOverview> {
-  const response = await fetch("/api/operations/overview", { credentials: "same-origin" });
+export function createSelfHostedOperationsApi(input: {
+  onUnauthorized?(message: string): void;
+} = {}): OperationsApiClient {
+  return {
+    async readOperationsOverview(workspace) {
+      try {
+        return await fetchOperationsOverviewForWorkspace(workspace);
+      } catch (caught) {
+        notifyUnauthorized(caught, input.onUnauthorized);
+        throw caught;
+      }
+    },
+    async readEffectiveConfiguration(workspace, repository) {
+      try {
+        return await fetchEffectiveConfigurationForWorkspace(workspace, repository);
+      } catch (caught) {
+        notifyUnauthorized(caught, input.onUnauthorized);
+        throw caught;
+      }
+    },
+    async readAvailabilitySettings(workspace) {
+      return withUnauthorized(input.onUnauthorized, () => requestAvailability<AvailabilitySettingsOverview>(workspace, "/timezone"));
+    },
+    async updateAvailabilityTimezone(workspace, timezone) {
+      return withUnauthorized(input.onUnauthorized, () => requestAvailability<AvailabilitySettingsOverview>(workspace, "/timezone", {
+        method: "PUT", body: JSON.stringify({ timezone }),
+      }));
+    },
+    async listReviewerAbsences(workspace) {
+      return withUnauthorized(input.onUnauthorized, () => requestAvailability<ReviewerAbsenceOverview[]>(workspace, "/absences"));
+    },
+    async scheduleReviewerAbsence(workspace, availability) {
+      return withUnauthorized(input.onUnauthorized, () => requestAvailability<ReviewerAbsenceOverview>(workspace, "/absences", {
+        method: "POST", body: JSON.stringify(availability),
+      }));
+    },
+    async reviseReviewerAbsence(workspace, absenceId, availability) {
+      return withUnauthorized(input.onUnauthorized, () => requestAvailability<ReviewerAbsenceOverview>(workspace, `/absences/${encodeURIComponent(absenceId)}`, {
+        method: "PUT", body: JSON.stringify(availability),
+      }));
+    },
+    async cancelReviewerAbsence(workspace, absenceId, expectedRevision) {
+      return withUnauthorized(input.onUnauthorized, () => requestAvailability<ReviewerAbsenceOverview>(workspace, `/absences/${encodeURIComponent(absenceId)}/cancel`, {
+        method: "POST", body: JSON.stringify({ expectedRevision }),
+      }));
+    },
+    async listReviewerReplacementHistory(workspace, absenceId) {
+      const query = absenceId === undefined ? "" : `?${new URLSearchParams({ absenceId })}`;
+      return withUnauthorized(input.onUnauthorized, () => requestAvailability<ReviewerReplacementOverview[]>(workspace, `/replacements${query}`));
+    },
+    async queueRoutingRecovery(workspace, request) {
+      return withUnauthorized(input.onUnauthorized, async () => {
+        const response = await fetch("/api/operations/routing-runs", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            "content-type": "application/json",
+            ...workspaceHeaders(workspace),
+          },
+          body: JSON.stringify(request),
+        });
+        if (response.status === 401) {
+          throw new AdminApiError("The administrator session has expired.", 401);
+        }
+        if (!response.ok) {
+          const body = await response.json().catch(() => null) as { message?: string } | null;
+          throw new AdminApiError(body?.message ?? "Could not queue the routing run.", response.status);
+        }
+        const queued = await response.json() as { jobId: string };
+        return { jobId: queued.jobId };
+      });
+    },
+  };
+}
+
+async function requestAvailability<T>(workspace: WorkspaceContext, path: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetch(`/api/operations/availability${path}`, {
+    ...init,
+    credentials: "same-origin",
+    headers: {
+      ...(init.body === undefined ? {} : { "content-type": "application/json" }),
+      ...workspaceHeaders(workspace),
+      ...init.headers,
+    },
+  });
+  if (response.status === 401) throw new AdminApiError("The administrator session has expired.", 401);
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { message?: string; issues?: Array<{ message?: string }> } | null;
+    throw new AdminApiError(body?.issues?.[0]?.message ?? body?.message ?? "Could not update reviewer availability.", response.status);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function withUnauthorized<T>(onUnauthorized: ((message: string) => void) | undefined, action: () => Promise<T>): Promise<T> {
+  try {
+    return await action();
+  } catch (caught) {
+    notifyUnauthorized(caught, onUnauthorized);
+    throw caught;
+  }
+}
+
+export async function fetchOperationsOverviewForWorkspace(
+  workspace: WorkspaceContext,
+): Promise<OperationsOverview> {
+  const response = await fetch("/api/operations/overview", {
+    credentials: "same-origin",
+    headers: workspaceHeaders(workspace),
+  });
   if (response.status === 401) {
     throw new AdminApiError("The administrator session has expired.", response.status);
   }
@@ -52,83 +169,32 @@ export async function fetchOperationsOverview(): Promise<OperationsOverview> {
   return response.json() as Promise<OperationsOverview>;
 }
 
-export type RoutingRunRequest = { decisionId: string } | { pullRequestUrl: string };
-
-export async function rerunRouting(request: RoutingRunRequest): Promise<{ status: "queued"; jobId: string }> {
-  const response = await fetch("/api/operations/routing-runs", {
-    method: "POST",
+export async function fetchEffectiveConfigurationForWorkspace(
+  workspace: WorkspaceContext,
+  repository: RepositoryContext,
+): Promise<EffectiveConfigurationOverview> {
+  const query = new URLSearchParams({ repositoryId: repository.id });
+  const response = await fetch(`/api/operations/effective-configuration?${query}`, {
     credentials: "same-origin",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(request),
+    headers: workspaceHeaders(workspace),
   });
   if (response.status === 401) {
     throw new AdminApiError("The administrator session has expired.", response.status);
   }
   if (!response.ok) {
-    const body = await response.json().catch(() => null) as { message?: string } | null;
-    throw new AdminApiError(body?.message ?? "Could not queue the routing run.", response.status);
+    throw new AdminApiError("Could not load the effective configuration.", response.status);
   }
-  return response.json() as Promise<{ status: "queued"; jobId: string }>;
+  return response.json() as Promise<EffectiveConfigurationOverview>;
 }
 
-export interface AbsenceFormInput {
-  reviewerHandle: string;
-  startLocal: string;
-  endLocal: string;
-}
-
-export async function fetchAvailability(): Promise<AvailabilityOverview> {
-  return requestAvailability("");
-}
-
-export async function updateAvailabilityTimezone(timezone: string): Promise<AvailabilityOverview> {
-  return requestAvailability("/timezone", {
-    method: "PUT",
-    body: JSON.stringify({ timezone }),
-  });
-}
-
-export async function createAbsence(input: AbsenceFormInput): Promise<AvailabilityOverview> {
-  return requestAvailability("/absences", {
-    method: "POST",
-    body: JSON.stringify(input),
-  });
-}
-
-export async function updateAbsence(
-  absenceId: string,
-  input: AbsenceFormInput & { expectedRevision: number },
-): Promise<AvailabilityOverview> {
-  return requestAvailability(`/absences/${absenceId}`, {
-    method: "PUT",
-    body: JSON.stringify(input),
-  });
-}
-
-export async function cancelAbsence(absenceId: string, expectedRevision: number): Promise<AvailabilityOverview> {
-  return requestAvailability(`/absences/${absenceId}/cancel`, {
-    method: "POST",
-    body: JSON.stringify({ expectedRevision }),
-  });
-}
-
-async function requestAvailability(path: string, init: RequestInit = {}): Promise<AvailabilityOverview> {
-  const response = await fetch(`/api/operations/availability${path}`, {
-    ...init,
-    credentials: "same-origin",
-    headers: { "content-type": "application/json", ...init.headers },
-  });
-  if (response.status === 401) {
-    throw new AdminApiError("The administrator session has expired.", response.status);
+function notifyUnauthorized(caught: unknown, onUnauthorized: ((message: string) => void) | undefined) {
+  if (caught instanceof AdminApiError && caught.status === 401) {
+    onUnauthorized?.(caught.message);
   }
-  if (response.status === 422) {
-    const body = await response.json().catch(() => null) as { issues?: Array<{ message?: string }> } | null;
-    throw new AdminApiError(body?.issues?.[0]?.message ?? "Could not update reviewer availability.", response.status);
-  }
-  if (!response.ok) {
-    throw new AdminApiError("Could not update reviewer availability.", response.status);
-  }
-  return response.json() as Promise<AvailabilityOverview>;
 }
 
-export type { AvailabilityOverview, OperationsOverview };
+function workspaceHeaders(workspace: WorkspaceContext): HeadersInit {
+  return { "x-triagepilot-workspace": workspace.id };
+}
+
+export type { EffectiveConfigurationOverview, OperationsOverview };

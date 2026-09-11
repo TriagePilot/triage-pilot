@@ -5,23 +5,70 @@ import { PermanentJobError, StaleJobLeaseError, TransientJobError } from "../src
 import { runWorkerOnce } from "../src/runner";
 import { processRoutingJob, type RoutingJobServices } from "../src/processor";
 import type { HumanReviewPolicyServices } from "../src/review-policy-processor";
-import type { ReviewerAvailabilityServices } from "../src/availability-processor";
+import { parseReviewerMutationIntentId, type ReviewerAvailabilityPorts } from "@triagepilot/application";
+
+const routingJobPayload = {
+  kind: "process_change_request" as const,
+  deliveryId: "delivery-1",
+  eventName: "change_request.opened",
+  workspaceId: "ws_local",
+  providerConnectionId: "99",
+  changeRequest: {
+    repository: { provider: "github" as const, externalId: "101", owner: "acme", name: "api" },
+    externalId: "7",
+    number: 7,
+    baseRevision: "trusted-base",
+    headRevision: "abc123",
+  },
+  isDraft: false,
+  routingKey: "routing:ws_local:github:101:7:trusted-base:abc123",
+};
+
+function effectiveConfiguration(mode: "shadow" | "enforce") {
+  return {
+    ok: true as const,
+    config: {
+      version: 1 as const,
+      mode,
+      routing: {
+        highRiskReviewers: 2 as const,
+        excludeTargetBranches: [],
+        excludeSourceBranchPatterns: [],
+        includeDraftPullRequests: false,
+      },
+      risk: {
+        size: { highChangedFiles: 100, highChangedLines: 5000 },
+        thresholds: { low: 25, high: 70 },
+        paths: [],
+        suppressors: [],
+        aiAuthorship: { enabled: false, modifier: 0 },
+      },
+      ownership: { rules: [], fallbackReviewers: [] },
+    },
+    diagnostics: [] as [],
+    provenance: {
+      organizationVersion: null,
+      repositoryPath: null,
+      repositoryRevision: null,
+      inheritanceMode: "defaults" as const,
+      effectiveHash: "effective-hash",
+      sources: {},
+    },
+  };
+}
+
+const jobScope = {
+  workspaceId: "ws_local",
+  provider: "github" as const,
+  providerConnectionId: "123",
+};
 
 const jobRecord: JobRecord = {
   id: "job-1",
+  ...jobScope,
   kind: "process_pull_request",
   status: "queued",
-  payload: {
-    kind: "process_pull_request",
-    deliveryId: "delivery-1",
-    installationId: "99",
-    repositoryId: "101",
-    owner: "acme",
-    repo: "api",
-    pullNumber: 7,
-    headSha: "abc123",
-    eventName: "pull_request.opened",
-  },
+  payload: routingJobPayload,
   idempotencyKey: "routing:delivery-1",
   attemptCount: 1,
   maxAttempts: 5,
@@ -30,20 +77,24 @@ const jobRecord: JobRecord = {
   lockedBy: "worker-1",
   lastError: null,
 };
-const jobLease = { jobId: "job-1", lockedBy: "worker-1", attemptCount: 1, maxAttempts: 5 };
+const jobLease = {
+  ...jobScope,
+  jobId: "job-1",
+  lockedBy: "worker-1",
+  lockedAt: jobRecord.lockedAt!,
+  attemptCount: 1,
+  maxAttempts: 5,
+};
 const policyJobPayload = {
   kind: "evaluate_human_review_policy" as const,
   deliveryId: "review-delivery-1",
-  installationId: "123",
-  repositoryId: "456",
-  owner: "acme",
-  repo: "app",
-  pullNumber: 7,
-};
-const activationJobPayload = {
-  kind: "activate_reviewer_absence" as const,
-  absenceId: "11111111-1111-4111-8111-111111111111",
-  expectedRevision: 2,
+  workspaceId: "ws_local",
+  providerConnectionId: "123",
+  changeRequest: {
+    repository: { provider: "github" as const, externalId: "456", owner: "acme", name: "app" },
+    externalId: "7",
+    number: 7,
+  },
 };
 
 function buildQueueWithJob() {
@@ -52,29 +103,456 @@ function buildQueueWithJob() {
     claimNext: vi.fn(async (): Promise<JobRecord> => ({ ...jobRecord, status: "running" })),
     markSucceeded: vi.fn(async (): Promise<JobTransitionResult> => ({ updated: true })),
     markFailed: vi.fn(async (): Promise<JobTransitionResult> => ({ updated: true })),
+    exhaustReviewerAbsenceActivation: vi.fn(async (): Promise<JobTransitionResult> => ({ updated: true })),
   };
 }
 
 describe("runWorkerOnce", () => {
+  it("dispatches an activation from claimed scope before building availability services", async () => {
+    const queue = buildQueueWithJob();
+    queue.claimNext.mockResolvedValue(activationJob({
+      payload: {
+        kind: "activate_reviewer_absence",
+        workspaceId: "stored-workspace",
+        providerConnectionId: "stored-connection",
+        absenceId: "absence-1",
+        absenceRevision: 3,
+      },
+    }));
+    const services = {} as ReviewerAvailabilityPorts;
+    const order: string[] = [];
+    const buildReviewerAvailabilityServices = vi.fn(() => {
+      order.push("build");
+      return services;
+    });
+    const processReviewerAbsenceActivationJob = vi.fn(async () => {
+      order.push("process");
+      return null;
+    });
+
+    await runWorkerOnce({
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
+      workerId: "worker-1",
+      now: new Date("2026-09-01T12:00:00.000Z"),
+      processRoutingJob: vi.fn(async () => {}),
+      buildRoutingServices: vi.fn(() => ({}) as never),
+      processReviewerAbsenceActivationJob,
+      buildReviewerAvailabilityServices,
+    });
+
+    expect(buildReviewerAvailabilityServices).toHaveBeenCalledWith(
+      {
+        kind: "activate_reviewer_absence",
+        workspaceId: "ws_local",
+        provider: "github",
+        providerConnectionId: "123",
+        absenceId: "absence-1",
+        absenceRevision: 3,
+      },
+      jobLease,
+    );
+    expect(processReviewerAbsenceActivationJob).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: "ws_local", providerConnectionId: "123" }),
+      services,
+    );
+    expect(order).toEqual(["build", "process"]);
+    expect(queue.markSucceeded).toHaveBeenCalledWith(jobLease, expect.any(Date));
+  });
+
+  it("rejects malformed activation scope before composing availability services", async () => {
+    const queue = buildQueueWithJob();
+    queue.claimNext.mockResolvedValue(activationJob({
+      payload: {
+        kind: "activate_reviewer_absence",
+        workspaceId: "ws_local",
+        providerConnectionId: "123",
+        absenceId: " ",
+        absenceRevision: 0,
+      },
+    }));
+    const buildReviewerAvailabilityServices = vi.fn(() => ({} as ReviewerAvailabilityPorts));
+
+    await runWorkerOnce({
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
+      workerId: "worker-1",
+      now: new Date("2026-09-01T12:00:00.000Z"),
+      processRoutingJob: vi.fn(async () => {}),
+      buildRoutingServices: vi.fn(() => ({}) as never),
+      processReviewerAbsenceActivationJob: vi.fn(async () => null),
+      buildReviewerAvailabilityServices,
+    });
+
+    expect(buildReviewerAvailabilityServices).not.toHaveBeenCalled();
+    expect(queue.exhaustReviewerAbsenceActivation).toHaveBeenCalledWith(
+      jobLease,
+      "reviewer absence activation job payload is malformed",
+      expect.any(Date),
+    );
+  });
+
+  it("validates and rehydrates finalizer recovery before finalizer-only dispatch", async () => {
+    const queue = buildQueueWithJob();
+    const recovery = serializedRecovery("run_finalizer");
+    queue.claimNext.mockResolvedValue(activationJob({
+      payload: {
+        kind: "activate_reviewer_absence",
+        workspaceId: "ws_local",
+        providerConnectionId: "123",
+        absenceId: "absence-1",
+        absenceRevision: 3,
+        reviewerReplacementFinalizerRecovery: recovery,
+      },
+    }));
+    const services = {} as ReviewerAvailabilityPorts;
+    const recoverReviewerReplacementFinalizer = vi.fn(async () => null);
+    const processReviewerAbsenceActivationJob = vi.fn(async () => null);
+
+    await runWorkerOnce({
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
+      workerId: "worker-1",
+      now: new Date("2026-09-01T12:00:00.000Z"),
+      processRoutingJob: vi.fn(async () => {}),
+      buildRoutingServices: vi.fn(() => ({}) as never),
+      processReviewerAbsenceActivationJob,
+      recoverReviewerReplacementFinalizer,
+      buildReviewerAvailabilityServices: vi.fn(() => services),
+    });
+
+    expect(recoverReviewerReplacementFinalizer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        phase: "run_finalizer",
+        provider: "github",
+        unavailableActorId: "@user-a62c84",
+        mutationIntentId: "intent-1",
+        persistence: null,
+      }),
+      services,
+    );
+    expect(processReviewerAbsenceActivationJob).toHaveBeenCalledWith(
+      expect.objectContaining({ absenceId: "absence-1", absenceRevision: 3 }),
+      services,
+    );
+    expect(queue.markSucceeded).toHaveBeenCalledOnce();
+  });
+
+  it("continues the same claim after recovering A and preserves the bound when B needs recovery", async () => {
+    const queue = buildQueueWithJob();
+    const recoveryA = serializedRecovery("run_finalizer");
+    const recoveryB = { ...serializedRecovery("run_finalizer"), replacementId: "replacement-2" };
+    queue.claimNext.mockResolvedValue(activationJob({
+      attemptCount: 2,
+      maxAttempts: 4,
+      payload: {
+        kind: "activate_reviewer_absence",
+        workspaceId: "ws_local",
+        providerConnectionId: "123",
+        absenceId: "absence-1",
+        absenceRevision: 3,
+        reviewerReplacementFinalizerRecovery: recoveryA,
+      },
+    }));
+
+    await runWorkerOnce({
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
+      workerId: "worker-1",
+      now: new Date("2026-09-01T12:00:00.000Z"),
+      processRoutingJob: vi.fn(async () => {}),
+      buildRoutingServices: vi.fn(() => ({}) as never),
+      recoverReviewerReplacementFinalizer: vi.fn(async () => null),
+      processReviewerAbsenceActivationJob: vi.fn(async () => recoveryB as never),
+      buildReviewerAvailabilityServices: vi.fn(() => ({} as ReviewerAvailabilityPorts)),
+    });
+
+    expect(queue.markSucceeded).not.toHaveBeenCalled();
+    expect(queue.markFailed).toHaveBeenCalledWith(
+      { ...jobLease, attemptCount: 2, maxAttempts: 4 },
+      "database unavailable",
+      expect.any(Date),
+      {
+        retryable: true,
+        recovery: {
+          payload: expect.objectContaining({ reviewerReplacementFinalizerRecovery: recoveryB }),
+          maxAttempts: 4,
+        },
+      },
+    );
+  });
+
+  it("atomically exhausts B rather than recovered A when B throws on the final bounded claim", async () => {
+    const queue = buildQueueWithJob();
+    const recoveryA = serializedRecovery("run_finalizer");
+    queue.claimNext.mockResolvedValue(activationJob({
+      attemptCount: 4,
+      maxAttempts: 4,
+      payload: {
+        kind: "activate_reviewer_absence",
+        workspaceId: "ws_local",
+        providerConnectionId: "123",
+        absenceId: "absence-1",
+        absenceRevision: 3,
+        reviewerReplacementFinalizerRecovery: recoveryA,
+      },
+    }));
+
+    await runWorkerOnce({
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
+      workerId: "worker-1",
+      now: new Date("2026-09-01T12:00:00.000Z"),
+      processRoutingJob: vi.fn(async () => {}),
+      buildRoutingServices: vi.fn(() => ({}) as never),
+      recoverReviewerReplacementFinalizer: vi.fn(async () => null),
+      processReviewerAbsenceActivationJob: vi.fn(async () => {
+        throw new TransientJobError("candidate B persistence unavailable");
+      }),
+      buildReviewerAvailabilityServices: vi.fn(() => ({} as ReviewerAvailabilityPorts)),
+    });
+
+    expect(queue.exhaustReviewerAbsenceActivation).toHaveBeenCalledWith(
+      { ...jobLease, attemptCount: 4, maxAttempts: 4 },
+      "candidate B persistence unavailable",
+      expect.any(Date),
+    );
+    expect(queue.markFailed).not.toHaveBeenCalled();
+  });
+
+  it("atomically exhausts the returned B recovery on the final bounded claim", async () => {
+    const queue = buildQueueWithJob();
+    const recoveryA = serializedRecovery("run_finalizer");
+    const recoveryB = { ...serializedRecovery("persist_replacement"), mutationIntentId: "intent-b" };
+    queue.claimNext.mockResolvedValue(activationJob({
+      attemptCount: 4,
+      maxAttempts: 4,
+      payload: {
+        kind: "activate_reviewer_absence",
+        workspaceId: "ws_local",
+        providerConnectionId: "123",
+        absenceId: "absence-1",
+        absenceRevision: 3,
+        reviewerReplacementFinalizerRecovery: recoveryA,
+      },
+    }));
+
+    await runWorkerOnce({
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
+      workerId: "worker-1",
+      now: new Date("2026-09-01T12:00:00.000Z"),
+      processRoutingJob: vi.fn(async () => {}),
+      buildRoutingServices: vi.fn(() => ({}) as never),
+      recoverReviewerReplacementFinalizer: vi.fn(async () => null),
+      processReviewerAbsenceActivationJob: vi.fn(async () => recoveryB as never),
+      buildReviewerAvailabilityServices: vi.fn(() => ({} as ReviewerAvailabilityPorts)),
+    });
+
+    expect(queue.exhaustReviewerAbsenceActivation).toHaveBeenCalledWith(
+      { ...jobLease, attemptCount: 4, maxAttempts: 4 },
+      "database unavailable",
+      expect.any(Date),
+    );
+    expect(queue.markFailed).not.toHaveBeenCalled();
+  });
+
+  it("rejects incomplete provider-effect recovery before service or credential composition", async () => {
+    const queue = buildQueueWithJob();
+    queue.claimNext.mockResolvedValue(activationJob({
+      payload: {
+        kind: "activate_reviewer_absence",
+        workspaceId: "ws_local",
+        providerConnectionId: "123",
+        absenceId: "absence-1",
+        absenceRevision: 3,
+        reviewerReplacementFinalizerRecovery: {
+          ...serializedRecovery("run_finalizer"),
+          mutationIntentId: " ",
+        },
+      },
+    }));
+    const buildReviewerAvailabilityServices = vi.fn(() => ({} as ReviewerAvailabilityPorts));
+
+    await runWorkerOnce({
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
+      workerId: "worker-1",
+      now: new Date("2026-09-01T12:00:00.000Z"),
+      processRoutingJob: vi.fn(async () => {}),
+      buildRoutingServices: vi.fn(() => ({}) as never),
+      processReviewerAbsenceActivationJob: vi.fn(async () => null),
+      recoverReviewerReplacementFinalizer: vi.fn(async () => null),
+      buildReviewerAvailabilityServices,
+    });
+
+    expect(buildReviewerAvailabilityServices).not.toHaveBeenCalled();
+    expect(queue.exhaustReviewerAbsenceActivation).toHaveBeenCalledWith(
+      jobLease,
+      expect.stringContaining("recovery payload is malformed"),
+      expect.any(Date),
+    );
+  });
+
+  it("queues bounded recovery instead of repeating provider effects", async () => {
+    const queue = buildQueueWithJob();
+    const claimed = activationJob({ attemptCount: 1, maxAttempts: 5 });
+    queue.claimNext.mockResolvedValue(claimed);
+    const recovery = serializedRecovery("persist_replacement", true);
+
+    await runWorkerOnce({
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
+      workerId: "worker-1",
+      now: new Date("2026-09-01T12:00:00.000Z"),
+      processRoutingJob: vi.fn(async () => {}),
+      buildRoutingServices: vi.fn(() => ({}) as never),
+      processReviewerAbsenceActivationJob: vi.fn(async () => recovery as never),
+      buildReviewerAvailabilityServices: vi.fn(() => ({} as ReviewerAvailabilityPorts)),
+    });
+
+    expect(queue.markFailed).toHaveBeenCalledWith(
+      jobLease,
+      "database unavailable",
+      expect.any(Date),
+      {
+        retryable: true,
+        recovery: {
+          payload: expect.objectContaining({ reviewerReplacementFinalizerRecovery: recovery }),
+          maxAttempts: 4,
+        },
+      },
+    );
+  });
+
+  it("stops a permanently classified finalizer recovery immediately", async () => {
+    const queue = buildQueueWithJob();
+    const recovery = { ...serializedRecovery("run_finalizer"), retryable: false };
+    queue.claimNext.mockResolvedValue(activationJob({
+      attemptCount: 2,
+      maxAttempts: 4,
+      payload: {
+        kind: "activate_reviewer_absence",
+        workspaceId: "ws_local",
+        providerConnectionId: "123",
+        absenceId: "absence-1",
+        absenceRevision: 3,
+        reviewerReplacementFinalizerRecovery: serializedRecovery("run_finalizer"),
+      },
+    }));
+    await runWorkerOnce({
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
+      workerId: "worker-1",
+      now: new Date("2026-09-01T12:00:00.000Z"),
+      processRoutingJob: vi.fn(async () => {}),
+      buildRoutingServices: vi.fn(() => ({}) as never),
+      processReviewerAbsenceActivationJob: vi.fn(async () => null),
+      recoverReviewerReplacementFinalizer: vi.fn(async () => recovery as never),
+      buildReviewerAvailabilityServices: vi.fn(() => ({} as ReviewerAvailabilityPorts)),
+    });
+
+    expect(queue.exhaustReviewerAbsenceActivation).toHaveBeenCalledWith(
+      { ...jobLease, attemptCount: 2, maxAttempts: 4 },
+      "database unavailable",
+      expect.any(Date),
+    );
+  });
+
+  it("persists exhausted reviewer finalizer visibility and fails the claimed job", async () => {
+    const queue = buildQueueWithJob();
+    const recovery = serializedRecovery("run_finalizer");
+    queue.claimNext.mockResolvedValue(activationJob({
+      attemptCount: 5,
+      maxAttempts: 5,
+      payload: {
+        kind: "activate_reviewer_absence",
+        workspaceId: "ws_local",
+        providerConnectionId: "123",
+        absenceId: "absence-1",
+        absenceRevision: 3,
+        reviewerReplacementFinalizerRecovery: recovery,
+      },
+    }));
+    const services = {} as ReviewerAvailabilityPorts;
+    const nextRecovery = { ...recovery, lastError: "finalizer still unavailable" } as never;
+    await runWorkerOnce({
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
+      workerId: "worker-1",
+      now: new Date("2026-09-01T12:00:00.000Z"),
+      processRoutingJob: vi.fn(async () => {}),
+      buildRoutingServices: vi.fn(() => ({}) as never),
+      processReviewerAbsenceActivationJob: vi.fn(async () => null),
+      recoverReviewerReplacementFinalizer: vi.fn(async () => nextRecovery),
+      buildReviewerAvailabilityServices: vi.fn(() => services),
+    });
+
+    expect(queue.exhaustReviewerAbsenceActivation).toHaveBeenCalledWith(
+      { ...jobLease, attemptCount: 5 },
+      "finalizer still unavailable",
+      expect.any(Date),
+    );
+  });
+
+  it.each([
+    [503, true],
+    [403, false],
+  ])("classifies activation provider status %i with retryable=%s", async (status, retryable) => {
+    const queue = buildQueueWithJob();
+    queue.claimNext.mockResolvedValue(activationJob());
+
+    await runWorkerOnce({
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
+      workerId: "worker-1",
+      now: new Date("2026-09-01T12:00:00.000Z"),
+      processRoutingJob: vi.fn(async () => {}),
+      buildRoutingServices: vi.fn(() => ({}) as never),
+      processReviewerAbsenceActivationJob: vi.fn(async () => {
+        throw Object.assign(new Error("activation provider failed"), { status });
+      }),
+      buildReviewerAvailabilityServices: vi.fn(() => ({} as ReviewerAvailabilityPorts)),
+    });
+
+    if (retryable) {
+      expect(queue.markFailed).toHaveBeenCalledWith(
+        jobLease,
+        "activation provider failed",
+        expect.any(Date),
+        { retryable: true },
+      );
+    } else {
+      expect(queue.exhaustReviewerAbsenceActivation).toHaveBeenCalledWith(
+        jobLease,
+        "activation provider failed",
+        expect.any(Date),
+      );
+    }
+  });
+
   it("claims a queued PR job, processes it, and marks it succeeded", async () => {
     const processRoutingJob = vi.fn(async () => {});
     const queue = {
       enqueue: vi.fn(),
       claimNext: vi.fn(async (): Promise<JobRecord> => ({
         id: "job-1",
+        ...jobScope,
         kind: "process_pull_request",
         status: "running",
         payload: {
-          kind: "process_pull_request",
-          deliveryId: "delivery-1",
-          installationId: "123",
-          repositoryId: "456",
-          owner: "acme",
-          repo: "app",
-          pullNumber: 7,
-          baseSha: "trusted-base",
-          headSha: "abc",
-          eventName: "pull_request.opened",
+          ...routingJobPayload,
+          providerConnectionId: "123",
+          changeRequest: {
+            ...routingJobPayload.changeRequest,
+            repository: {
+              ...routingJobPayload.changeRequest.repository,
+              externalId: "456",
+              name: "app",
+            },
+            headRevision: "abc",
+          },
+          routingKey: "routing:ws_local:github:456:7:trusted-base:abc",
         },
         idempotencyKey: "routing:delivery-1",
         attemptCount: 1,
@@ -86,10 +564,12 @@ describe("runWorkerOnce", () => {
       })),
       markSucceeded: vi.fn(async (): Promise<JobTransitionResult> => ({ updated: true })),
       markFailed: vi.fn(async (): Promise<JobTransitionResult> => ({ updated: true })),
+      exhaustReviewerAbsenceActivation: vi.fn(async (): Promise<JobTransitionResult> => ({ updated: true })),
     };
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-07-07T12:00:00.000Z"),
       processRoutingJob,
@@ -98,18 +578,55 @@ describe("runWorkerOnce", () => {
 
     expect(processRoutingJob).toHaveBeenCalledWith(
       expect.objectContaining({
-        kind: "process_pull_request",
+        kind: "process_change_request",
         deliveryId: "delivery-1",
-        baseSha: "trusted-base",
-        headSha: "abc",
+        changeRequest: expect.objectContaining({
+          baseRevision: "trusted-base",
+          headRevision: "abc",
+        }),
       }),
       {},
     );
     expect(queue.markSucceeded).toHaveBeenCalledWith(
-      { jobId: "job-1", lockedBy: "worker-1", attemptCount: 1, maxAttempts: 5 },
+      { ...jobScope, jobId: "job-1", lockedBy: "worker-1", lockedAt: expect.any(Date), attemptCount: 1, maxAttempts: 5 },
       expect.any(Date),
     );
     expect(queue.markFailed).not.toHaveBeenCalled();
+  });
+
+  it("uses the claimed provider instead of the stored routing payload provider", async () => {
+    const queue = buildQueueWithJob();
+    queue.claimNext.mockResolvedValue({
+      ...jobRecord,
+      provider: "gitlab",
+      status: "running",
+      payload: {
+        ...routingJobPayload,
+        workspaceId: "stored-payload-workspace",
+        providerConnectionId: 99,
+      },
+    });
+    const processRoutingJob = vi.fn(async () => {});
+
+    await runWorkerOnce({
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
+      workerId: "worker-1",
+      now: new Date("2026-08-18T10:00:00.000Z"),
+      processRoutingJob,
+      buildRoutingServices: vi.fn(() => ({}) as never),
+    });
+
+    expect(processRoutingJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: "ws_local",
+        providerConnectionId: "123",
+        changeRequest: expect.objectContaining({
+          repository: expect.objectContaining({ provider: "gitlab" }),
+        }),
+      }),
+      {},
+    );
   });
 
   it("dispatches a valid human-review policy job and marks it succeeded", async () => {
@@ -126,7 +643,8 @@ describe("runWorkerOnce", () => {
     const processRoutingJob = vi.fn(async () => {});
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob,
@@ -136,56 +654,51 @@ describe("runWorkerOnce", () => {
     });
 
     expect(processHumanReviewPolicyJob).toHaveBeenCalledWith(
-      {
-        kind: "evaluate_human_review_policy",
-        deliveryId: "review-delivery-1",
-        installationId: "123",
-        repositoryId: "456",
-        owner: "acme",
-        repo: "app",
-        pullNumber: 7,
-      },
+      policyJobPayload,
       policyServices,
     );
     expect(buildHumanReviewPolicyServices).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "evaluate_human_review_policy", repositoryId: "456", pullNumber: 7 }),
+      expect.objectContaining({
+        kind: "evaluate_human_review_policy",
+        providerConnectionId: "123",
+        changeRequest: expect.objectContaining({ number: 7 }),
+      }),
     );
     expect(processRoutingJob).not.toHaveBeenCalled();
     expect(queue.markSucceeded).toHaveBeenCalledWith(jobLease, expect.any(Date));
     expect(queue.markFailed).not.toHaveBeenCalled();
   });
 
-  it("dispatches a valid reviewer absence activation job and marks it succeeded", async () => {
+  it("uses the claimed provider instead of the stored review payload provider", async () => {
     const queue = buildQueueWithJob();
     queue.claimNext.mockResolvedValue({
       ...jobRecord,
-      kind: "activate_reviewer_absence",
+      provider: "gitlab",
+      kind: "evaluate_human_review_policy",
       status: "running",
-      payload: activationJobPayload,
+      payload: policyJobPayload,
     });
-    const availabilityServices = {} as ReviewerAvailabilityServices;
-    const processReviewerAbsenceActivationJob = vi.fn(async () => {});
-    const buildReviewerAvailabilityServices = vi.fn(() => availabilityServices);
-    const processRoutingJob = vi.fn(async () => {});
+    const processHumanReviewPolicyJob = vi.fn(async () => {});
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
-      processRoutingJob,
+      processRoutingJob: vi.fn(async () => {}),
       buildRoutingServices: vi.fn(() => ({}) as never),
-      processReviewerAbsenceActivationJob,
-      buildReviewerAvailabilityServices,
+      processHumanReviewPolicyJob,
+      buildHumanReviewPolicyServices: vi.fn(() => ({}) as never),
     });
 
-    expect(processReviewerAbsenceActivationJob).toHaveBeenCalledWith(
-      activationJobPayload,
-      availabilityServices,
+    expect(processHumanReviewPolicyJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        changeRequest: expect.objectContaining({
+          repository: expect.objectContaining({ provider: "gitlab" }),
+        }),
+      }),
+      {},
     );
-    expect(buildReviewerAvailabilityServices).toHaveBeenCalledWith(activationJobPayload);
-    expect(processRoutingJob).not.toHaveBeenCalled();
-    expect(queue.markSucceeded).toHaveBeenCalledWith(jobLease, expect.any(Date));
-    expect(queue.markFailed).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -233,7 +746,8 @@ describe("runWorkerOnce", () => {
     });
     const processRoutingJob = vi.fn(async () => {});
     const input = {
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob,
@@ -247,8 +761,10 @@ describe("runWorkerOnce", () => {
     expect(queue.markFailed).toHaveBeenNthCalledWith(
       1,
       {
+        ...jobScope,
         jobId: "job-1",
         lockedBy: "worker-1",
+        lockedAt: expect.any(Date),
         attemptCount: failure.attemptCount,
         maxAttempts: failure.maxAttempts,
       },
@@ -271,8 +787,10 @@ describe("runWorkerOnce", () => {
     expect(queue.markFailed).toHaveBeenNthCalledWith(
       2,
       {
+        ...jobScope,
         jobId: "job-1",
         lockedBy: "worker-1",
+        lockedAt: expect.any(Date),
         attemptCount: failure.attemptCount + 1,
         maxAttempts: failure.attemptCount + 3,
       },
@@ -286,7 +804,8 @@ describe("runWorkerOnce", () => {
     const queue = buildQueueWithJob();
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob: vi.fn(async () => {
@@ -306,45 +825,53 @@ describe("runWorkerOnce", () => {
   it("records a delayed enforce head mismatch and does not retry the job", async () => {
     const queue = buildQueueWithJob();
     const services: RoutingJobServices = {
-      fetchConfig: vi.fn(async () => "version: 1\nmode: enforce\n"),
-      fetchChangedFiles: vi.fn(async () => []),
-      fetchCommitMessages: vi.fn(async () => []),
-      fetchPullRequestMetadata: vi.fn(async () => ({
-        authorLogin: "user-c91e46",
-        authorHandle: "@user-c91e46",
-        branchName: "feature",
-        targetBranchName: "develop",
-      })),
-      fetchActiveApprovedReviewers: vi.fn(async () => []),
-      now: vi.fn(() => new Date("2026-10-01T08:00:00.000Z")),
-      listReviewerAbsences: vi.fn(async () => []),
-      enqueueHumanReviewPolicyEvaluation: vi.fn(async () => {}),
-      getReviewerLoad: vi.fn(async () => ({})),
-      updateRepositoryConfigState: vi.fn(async () => {}),
-      persistDecision: vi.fn(async () => ({
-        decisionId: "decision-1",
-        actionStatus: "pending" as const,
-        actionError: null,
-        actionAppliedAt: null,
-      })),
-      applyDecisionActions: vi.fn(async (input) => {
-        if (input.expectedHeadSha === "abc123") {
-          throw new PermanentJobError("pull request head changed before enforce actions");
-        }
-      }),
-      markActionSucceeded: vi.fn(async () => {}),
-      markActionFailed: vi.fn(async () => {}),
+      resolveConfiguration: vi.fn(async () => effectiveConfiguration("enforce")),
+      provider: {
+        fetchChangeRequestMetadata: vi.fn(async () => ({
+          author: "@user-c91e46",
+          sourceBranch: "feature",
+          targetBranch: "develop",
+          currentHeadRevision: "abc123",
+        })),
+        fetchChangedFiles: vi.fn(async () => []),
+        fetchCommitMessages: vi.fn(async () => []),
+        fetchCurrentRevisionApprovals: vi.fn(async () => []),
+        applyActions: vi.fn(async (input) => {
+          if (input.expectedHeadRevision === "abc123") {
+            throw new PermanentJobError("pull request head changed before enforce actions");
+          }
+        }),
+      },
+      reviewerLoad: vi.fn(async () => ({})),
+      availability: { findActive: vi.fn(async () => []) },
+      decisions: {
+        persistWithEvent: vi.fn(async (_input, event) => {
+          const persisted = {
+            decisionId: "decision-1",
+            actionStatus: "pending" as const,
+            actionError: null,
+            actionAppliedAt: null,
+          };
+          event({ ...persisted, occurredAt: new Date("2026-08-18T09:59:00.000Z") });
+          return persisted;
+        }),
+        markActionSucceeded: vi.fn(async () => {}),
+        markActionFailed: vi.fn(async () => {}),
+      },
+      enqueueReviewPolicy: vi.fn(async () => {}),
+      clock: { now: () => new Date("2026-08-18T10:00:00.000Z") },
     };
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob,
       buildRoutingServices: vi.fn(() => services),
     });
 
-    expect(services.markActionFailed).toHaveBeenCalledWith(
+    expect(services.decisions.markActionFailed).toHaveBeenCalledWith(
       "decision-1",
       "pull request head changed before enforce actions",
       expect.any(Date),
@@ -362,7 +889,8 @@ describe("runWorkerOnce", () => {
     const queue = buildQueueWithJob();
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob: vi.fn(async () => {
@@ -389,7 +917,8 @@ describe("runWorkerOnce", () => {
     const queue = buildQueueWithJob();
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob: vi.fn(async () => {
@@ -441,7 +970,8 @@ describe("runWorkerOnce", () => {
       throw new TransientJobError("GitHub unavailable");
     });
     const input = {
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob,
@@ -453,7 +983,7 @@ describe("runWorkerOnce", () => {
     expect(failPolicyCheck).not.toHaveBeenCalled();
     expect(queue.markFailed).toHaveBeenNthCalledWith(
       1,
-      { jobId: "job-1", lockedBy: "worker-1", attemptCount: 5, maxAttempts: 5 },
+      { ...jobScope, jobId: "job-1", lockedBy: "worker-1", lockedAt: expect.any(Date), attemptCount: 5, maxAttempts: 5 },
       "GitHub unavailable",
       expect.any(Date),
       {
@@ -471,7 +1001,7 @@ describe("runWorkerOnce", () => {
     expect(processRoutingJob).toHaveBeenCalledOnce();
     expect(queue.markFailed).toHaveBeenNthCalledWith(
       2,
-      { jobId: "job-1", lockedBy: "worker-1", attemptCount: 6, maxAttempts: 8 },
+      { ...jobScope, jobId: "job-1", lockedBy: "worker-1", lockedAt: expect.any(Date), attemptCount: 6, maxAttempts: 8 },
       "GitHub still unavailable",
       expect.any(Date),
       { retryable: true },
@@ -483,7 +1013,7 @@ describe("runWorkerOnce", () => {
     expect(processRoutingJob).toHaveBeenCalledOnce();
     expect(queue.markFailed).toHaveBeenNthCalledWith(
       3,
-      { jobId: "job-1", lockedBy: "worker-1", attemptCount: 7, maxAttempts: 8 },
+      { ...jobScope, jobId: "job-1", lockedBy: "worker-1", lockedAt: expect.any(Date), attemptCount: 7, maxAttempts: 8 },
       "GitHub unavailable",
       expect.any(Date),
       { retryable: false },
@@ -495,7 +1025,8 @@ describe("runWorkerOnce", () => {
     const failPolicyCheck = vi.fn(async () => {});
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob: vi.fn(async () => {
@@ -518,12 +1049,13 @@ describe("runWorkerOnce", () => {
     queue.claimNext.mockResolvedValue({
       ...jobRecord,
       status: "running",
-      payload: { ...(jobRecord.payload as object), installationId: 99 },
+      payload: { ...(jobRecord.payload as object), eventName: 99 },
     });
     const processRoutingJob = vi.fn(async () => {});
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob,
@@ -546,19 +1078,18 @@ describe("runWorkerOnce", () => {
       kind: "evaluate_human_review_policy",
       status: "running",
       payload: {
-        kind: "evaluate_human_review_policy",
-        deliveryId: "review-delivery-1",
-        installationId: "123",
-        repositoryId: "456",
-        owner: "",
-        repo: "app",
-        pullNumber: 7,
+        ...policyJobPayload,
+        changeRequest: {
+          ...policyJobPayload.changeRequest,
+          repository: { ...policyJobPayload.changeRequest.repository, owner: "" },
+        },
       },
     });
     const processHumanReviewPolicyJob = vi.fn(async () => {});
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob: vi.fn(async () => {}),
@@ -577,80 +1108,15 @@ describe("runWorkerOnce", () => {
   });
 
   it.each([
-    ["empty absence ID", { absenceId: "" }],
-    ["non-UUID absence ID", { absenceId: "absence-1" }],
-    ["zero revision", { expectedRevision: 0 }],
-    ["negative revision", { expectedRevision: -1 }],
-    ["fractional revision", { expectedRevision: 1.5 }],
-    ["unsafe revision", { expectedRevision: Number.MAX_SAFE_INTEGER + 1 }],
-    ["string revision", { expectedRevision: "2" }],
-  ])("rejects an activation payload with %s permanently", async (_name, malformed) => {
-    const queue = buildQueueWithJob();
-    queue.claimNext.mockResolvedValue({
-      ...jobRecord,
-      kind: "activate_reviewer_absence",
-      status: "running",
-      payload: { ...activationJobPayload, ...malformed },
-    });
-    const processReviewerAbsenceActivationJob = vi.fn(async () => {});
-    const buildReviewerAvailabilityServices = vi.fn(() => ({} as ReviewerAvailabilityServices));
-
-    await runWorkerOnce({
-      queue,
-      workerId: "worker-1",
-      now: new Date("2026-08-18T10:00:00.000Z"),
-      processRoutingJob: vi.fn(async () => {}),
-      buildRoutingServices: vi.fn(() => ({}) as never),
-      processReviewerAbsenceActivationJob,
-      buildReviewerAvailabilityServices,
-    });
-
-    expect(processReviewerAbsenceActivationJob).not.toHaveBeenCalled();
-    expect(buildReviewerAvailabilityServices).not.toHaveBeenCalled();
-    expect(queue.markFailed).toHaveBeenCalledWith(
-      jobLease,
-      "reviewer absence activation job payload is malformed",
-      expect.any(Date),
-      { retryable: false },
-    );
-  });
-
-  it("retries an exhausted activation failure without scheduling policy-check recovery", async () => {
-    const queue = buildQueueWithJob();
-    queue.claimNext.mockResolvedValue({
-      ...jobRecord,
-      kind: "activate_reviewer_absence",
-      status: "running",
-      payload: activationJobPayload,
-      attemptCount: 5,
-      maxAttempts: 5,
-    });
-
-    await runWorkerOnce({
-      queue,
-      workerId: "worker-1",
-      now: new Date("2026-08-18T10:00:00.000Z"),
-      processRoutingJob: vi.fn(async () => {}),
-      buildRoutingServices: vi.fn(() => ({}) as never),
-      processReviewerAbsenceActivationJob: vi.fn(async () => {
-        throw new TransientJobError("database unavailable");
-      }),
-      buildReviewerAvailabilityServices: vi.fn(() => ({} as ReviewerAvailabilityServices)),
-    });
-
-    expect(queue.markFailed).toHaveBeenCalledWith(
-      { jobId: "job-1", lockedBy: "worker-1", attemptCount: 5, maxAttempts: 5 },
-      "database unavailable",
-      expect.any(Date),
-      { retryable: true },
-    );
-  });
-
-  it.each([
-    ["installation ID", { installationId: "9007199254740992" }],
-    ["repository ID", { repositoryId: "9007199254740992" }],
-    ["pull number", { pullNumber: Number.MAX_SAFE_INTEGER + 1 }],
-  ])("rejects an unsafe %s permanently", async (_field, unsafeValue) => {
+    ["repository ID", { changeRequest: {
+      ...routingJobPayload.changeRequest,
+      repository: { ...routingJobPayload.changeRequest.repository, externalId: "" },
+    } }],
+    ["pull number", { changeRequest: {
+      ...routingJobPayload.changeRequest,
+      number: Number.MAX_SAFE_INTEGER + 1,
+    } }],
+  ])("rejects an invalid %s permanently", async (_field, unsafeValue) => {
     const queue = buildQueueWithJob();
     queue.claimNext.mockResolvedValue({
       ...jobRecord,
@@ -660,7 +1126,8 @@ describe("runWorkerOnce", () => {
     const processRoutingJob = vi.fn(async () => {});
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob,
@@ -685,7 +1152,8 @@ describe("runWorkerOnce", () => {
     } as unknown as JobRecord);
 
     await runWorkerOnce({
-      queue,
+      jobClaimer: queue,
+      workspaceQueue: () => queue,
       workerId: "worker-1",
       now: new Date("2026-08-18T10:00:00.000Z"),
       processRoutingJob: vi.fn(async () => {}),
@@ -706,7 +1174,8 @@ describe("runWorkerOnce", () => {
 
     await expect(
       runWorkerOnce({
-        queue,
+        jobClaimer: queue,
+        workspaceQueue: () => queue,
         workerId: "worker-1",
         now: new Date("2026-08-18T10:00:00.000Z"),
         processRoutingJob: vi.fn(async () => {}),
@@ -716,3 +1185,84 @@ describe("runWorkerOnce", () => {
     expect(queue.markFailed).not.toHaveBeenCalled();
   });
 });
+
+function activationJob(overrides: Partial<JobRecord> = {}): JobRecord {
+  return {
+    ...jobRecord,
+    kind: "activate_reviewer_absence" as never,
+    status: "running",
+    payload: {
+      kind: "activate_reviewer_absence",
+      workspaceId: "ws_local",
+      providerConnectionId: "123",
+      absenceId: "absence-1",
+      absenceRevision: 3,
+    },
+    ...overrides,
+  };
+}
+
+function serializedRecovery(
+  phase: "persist_replacement" | "run_finalizer" | "complete_replacement",
+  providerEffectsApplied = true,
+) {
+  const at = new Date("2026-09-01T12:00:00.000Z");
+  const mutationIntentId = parseReviewerMutationIntentId("intent-1");
+  const persistence = {
+    provider: "github" as const,
+    providerConnectionId: "123",
+    absenceId: "absence-1",
+    absenceRevision: 3,
+    decisionId: "decision-1",
+    expectedHeadRevision: "head-1",
+    unavailableActorId: "@user-a62c84",
+    replacementActorId: "@user-b71d93",
+    mutationIntentId,
+    outcome: "replaced" as const,
+    reason: "replacement applied",
+    state: "finalizer_pending" as const,
+    lastError: null,
+    startedAt: at,
+    completedAt: at,
+    replaceCohort: true as const,
+    event: {
+      schemaVersion: 1 as const,
+      eventType: "reviewer_replacement" as const,
+      eventId: "replacement-event-1",
+      occurredAt: at.toISOString(),
+      workspaceId: "ws_local",
+      provider: "github" as const,
+      providerConnectionId: "123",
+      absenceId: "absence-1",
+      absenceRevision: 3,
+      decisionId: "decision-1",
+      repositoryId: "repository-1",
+      changeRequestId: "change-request-1",
+      unavailableActor: "@user-a62c84",
+      replacementActor: "@user-b71d93",
+      outcome: "replaced" as const,
+    },
+  };
+  return JSON.parse(JSON.stringify({
+    kind: "reviewer_replacement_finalizer",
+    phase,
+    provider: "github",
+    unavailableActorId: "@user-a62c84",
+    job: {
+      kind: "activate_reviewer_absence",
+      workspaceId: "ws_local",
+      providerConnectionId: "123",
+      absenceId: "absence-1",
+      absenceRevision: 3,
+    },
+    finalizer: { action: "reevaluate_policy", decisionId: "decision-1", summary: null },
+    replacementId: phase === "persist_replacement" ? null : "replacement-1",
+    outcome: "replaced",
+    replacementActorId: "@user-b71d93",
+    mutationIntentId,
+    providerEffectsApplied,
+    persistence: phase === "persist_replacement" ? persistence : null,
+    lastError: "database unavailable",
+    retryable: true,
+  })) as Record<string, unknown>;
+}

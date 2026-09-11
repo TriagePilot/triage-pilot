@@ -1,668 +1,371 @@
 import { describe, expect, it, vi } from "vitest";
-import type {
-  ReviewerAbsenceActivation,
-  ReviewerReplacementCandidate,
-} from "@triagepilot/db";
+import {
+  parseReviewerMutationIntentId,
+  type PersistReviewerReplacementInput,
+  type ReviewerAvailabilityPorts,
+  type ReviewerReplacementFinalizerRecovery,
+} from "@triagepilot/application";
 
 import {
+  markReviewerReplacementRecoveryExhausted,
   processReviewerAbsenceActivationJob,
-  type ReviewerAvailabilityServices,
+  recoverReviewerReplacementFinalizer,
 } from "../src/availability-processor";
-import { PermanentJobError } from "../src/errors";
 
-const now = new Date("2026-10-01T08:00:00.000Z");
-const message = {
+const job = {
   kind: "activate_reviewer_absence" as const,
-  absenceId: "11111111-1111-4111-8111-111111111111",
-  expectedRevision: 2,
+  workspaceId: "workspace-1",
+  provider: "github" as const,
+  providerConnectionId: "connection-1",
+  absenceId: "absence-1",
+  absenceRevision: 2,
 };
+const mutationIntentId = parseReviewerMutationIntentId("intent-1");
 
-const candidate: ReviewerReplacementCandidate = {
-  decisionId: "decision-1",
-  installationId: "99",
-  repositoryId: "101",
-  owner: "acme",
-  repo: "api",
-  pullNumber: 7,
-  headSha: "routed-head",
-  mode: "enforce",
-  selectedReviewers: ["@user-d82a5f"],
-  originalEligibleReviewers: ["@user-d82a5f", "@user-c91e46"],
-  originalPreferredReviewers: ["@user-d82a5f", "@user-c91e46"],
-  requiredApprovalCount: 1,
-  policyCheckRunId: "check-1",
-  policyCheckState: "in_progress",
-};
+describe("reviewer absence availability processor", () => {
+  it("calls the Task 8 activation use case and returns no recovery after a stale activation", async () => {
+    const services = buildServices();
 
-const activation: ReviewerAbsenceActivation = {
-  absenceId: message.absenceId,
-  revision: message.expectedRevision,
-  reviewerHandle: "@user-d82a5f",
-  startAt: now,
-  endAt: new Date("2026-10-08T08:00:00.000Z"),
-  candidates: [candidate],
-};
+    await expect(processReviewerAbsenceActivationJob(job, services)).resolves.toBeNull();
 
-function buildServices(
-  overrides: Partial<ReviewerAvailabilityServices> = {},
-): ReviewerAvailabilityServices {
+    expect(services.availability.listPendingFinalizers).toHaveBeenCalledWith({
+      absenceId: "absence-1",
+      absenceRevision: 2,
+    });
+    expect(services.availability.loadActivation).toHaveBeenCalledWith("absence-1", 2);
+    expect(services.provider.inspectChangeRequest).not.toHaveBeenCalled();
+  });
+
+  it("persists provider-effect recovery and runs only its mapped finalizer", async () => {
+    const services = buildServices();
+    const recovery = replacedRecovery("persist_replacement");
+    services.availability.persistReplacement = vi.fn(async () => ({
+      inserted: true,
+      activationCurrent: true,
+      replacement: { id: "replacement-1", state: "finalizer_pending" as const },
+    }));
+
+    await expect(recoverReviewerReplacementFinalizer(recovery, services)).resolves.toBeNull();
+
+    expect(services.availability.persistReplacement).toHaveBeenCalledWith(recovery.persistence);
+    expect(services.finalizers.run).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      providerConnectionId: "connection-1",
+      decisionId: "decision-1",
+      action: "reevaluate_policy",
+      summary: null,
+    });
+    expect(services.availability.updateReplacementState).toHaveBeenCalledWith({
+      replacementId: "replacement-1",
+      expectedState: "finalizer_pending",
+      state: "completed",
+      lastError: null,
+    });
+    expect(services.provider.inspectChangeRequest).not.toHaveBeenCalled();
+    expect(services.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+  });
+
+  it("replays a pending finalizer without repeating persistence or provider effects", async () => {
+    const services = buildServices();
+    const recovery = replacedRecovery("run_finalizer");
+    expectPendingRecovery(services, recovery);
+
+    await expect(recoverReviewerReplacementFinalizer(recovery, services)).resolves.toBeNull();
+
+    expect(services.availability.persistReplacement).not.toHaveBeenCalled();
+    expect(services.finalizers.run).toHaveBeenCalledOnce();
+    expect(services.availability.updateReplacementState).toHaveBeenCalledOnce();
+    expect(services.provider.inspectChangeRequest).not.toHaveBeenCalled();
+    expect(services.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+  });
+
+  it("completes a replacement after process death without rerunning its finalizer", async () => {
+    const services = buildServices();
+    const recovery = replacedRecovery("complete_replacement");
+    expectPendingRecovery(services, recovery);
+
+    await expect(recoverReviewerReplacementFinalizer(recovery, services)).resolves.toBeNull();
+
+    expect(services.availability.persistReplacement).not.toHaveBeenCalled();
+    expect(services.finalizers.run).not.toHaveBeenCalled();
+    expect(services.availability.updateReplacementState).toHaveBeenCalledOnce();
+    expect(services.provider.inspectChangeRequest).not.toHaveBeenCalled();
+    expect(services.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+  });
+
+  it("accepts exact already-completed history after a completion commit crash", async () => {
+    const services = buildServices();
+    const recovery = replacedRecovery("complete_replacement");
+    (services.availability as never as { loadReplacement: ReturnType<typeof vi.fn> }).loadReplacement = vi.fn(async () => ({
+      id: "replacement-1",
+      workspaceId: recovery.job.workspaceId,
+      provider: recovery.provider,
+      providerConnectionId: recovery.job.providerConnectionId,
+      absenceId: recovery.job.absenceId,
+      absenceRevision: recovery.job.absenceRevision,
+      decisionId: "decision-1",
+      unavailableActorId: recovery.unavailableActorId,
+      state: "completed",
+      outcome: "replaced",
+      replacementActorId: "@user-b71d93",
+      mutationIntentId,
+    }));
+
+    await expect(recoverReviewerReplacementFinalizer(recovery, services)).resolves.toBeNull();
+
+    expect(services.finalizers.run).not.toHaveBeenCalled();
+    expect(services.availability.updateReplacementState).not.toHaveBeenCalled();
+  });
+
+  it("converts stale provider-effect persistence into a linked audit without provider or finalizer writes", async () => {
+    const services = buildServices();
+    const recovery = replacedRecovery("persist_replacement");
+    services.availability.persistReplacement = vi.fn(async () => ({
+      inserted: false,
+      activationCurrent: false,
+      replacement: null,
+    }));
+    const persistMutationIntentRecovery = vi.fn(async () => ({
+      inserted: true,
+      activationCurrent: true,
+      replacement: { id: "audit-1", state: "permanent_failure" as const },
+    }));
+    (services.availability as never as { persistMutationIntentRecovery: typeof persistMutationIntentRecovery })
+      .persistMutationIntentRecovery = persistMutationIntentRecovery;
+
+    await expect(recoverReviewerReplacementFinalizer(recovery, services)).resolves.toBeNull();
+
+    expect(persistMutationIntentRecovery).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "permanent_failure",
+      state: "permanent_failure",
+      mutationIntentId,
+      replaceCohort: false,
+    }));
+    expect(services.finalizers.run).not.toHaveBeenCalled();
+    expect(services.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+  });
+
+  it("persists null-finalizer permanent partial mutation recovery without provider or policy writes", async () => {
+    const services = buildServices();
+    const recovery = permanentFailureRecovery();
+    services.availability.persistMutationIntentRecovery = vi.fn(async () => ({
+      inserted: true,
+      activationCurrent: true,
+      replacement: { id: "replacement-1", state: "permanent_failure" as const },
+    }));
+
+    await expect(recoverReviewerReplacementFinalizer(recovery, services)).resolves.toBeNull();
+
+    expect(services.availability.persistMutationIntentRecovery).toHaveBeenCalledWith(recovery.persistence);
+    expect(services.finalizers.run).not.toHaveBeenCalled();
+    expect(services.availability.updateReplacementState).not.toHaveBeenCalled();
+    expect(services.provider.inspectChangeRequest).not.toHaveBeenCalled();
+    expect(services.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+  });
+
+  it("validates complete recovery provenance before any replay side effect", async () => {
+    const services = buildServices();
+    const malformed = {
+      ...replacedRecovery("run_finalizer"),
+      mutationIntentId: " ",
+    };
+
+    await expect(recoverReviewerReplacementFinalizer(malformed as never, services))
+      .rejects.toThrow("durable mutation provenance");
+
+    expect(services.availability.persistReplacement).not.toHaveBeenCalled();
+    expect(services.finalizers.run).not.toHaveBeenCalled();
+    expect(services.availability.updateReplacementState).not.toHaveBeenCalled();
+  });
+
+  it("records exhausted mapped recovery in replacement history without replaying writes", async () => {
+    const services = buildServices();
+    const recovery = replacedRecovery("run_finalizer");
+    expectPendingRecovery(services, recovery);
+
+    await markReviewerReplacementRecoveryExhausted(recovery, services, "policy finalizer exhausted");
+
+    expect(services.availability.updateReplacementState).toHaveBeenCalledWith({
+      replacementId: "replacement-1",
+      expectedState: "finalizer_pending",
+      state: "permanent_failure",
+      lastError: "policy finalizer exhausted",
+    });
+    expect(services.finalizers.run).not.toHaveBeenCalled();
+    expect(services.provider.inspectChangeRequest).not.toHaveBeenCalled();
+    expect(services.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+  });
+
+  it("records exhausted persist-phase provider effects through the recovery-specific audit path", async () => {
+    const services = buildServices();
+    const recovery = replacedRecovery("persist_replacement");
+    const persistMutationIntentRecovery = vi.fn(async () => ({
+      inserted: true,
+      activationCurrent: true,
+      replacement: { id: "audit-1", state: "permanent_failure" as const },
+    }));
+    (services.availability as never as { persistMutationIntentRecovery: typeof persistMutationIntentRecovery })
+      .persistMutationIntentRecovery = persistMutationIntentRecovery;
+
+    await markReviewerReplacementRecoveryExhausted(recovery, services, "stale persistence exhausted");
+
+    expect(persistMutationIntentRecovery).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "permanent_failure",
+      lastError: "stale persistence exhausted",
+      mutationIntentId,
+    }));
+    expect(services.availability.updateReplacementState).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before a finalizer when recovery does not match durable pending history", async () => {
+    const services = buildServices();
+    const recovery = replacedRecovery("run_finalizer");
+    services.availability.loadReplacement = vi.fn(async () => ({
+      id: "replacement-1",
+      decisionId: "different-decision",
+      state: "finalizer_pending" as const,
+      outcome: "replaced" as const,
+      replacementActorId: "@user-b71d93",
+      mutationIntentId,
+      lastError: null,
+    })) as never;
+
+    await expect(recoverReviewerReplacementFinalizer(recovery, services)).resolves.toMatchObject({
+      phase: "run_finalizer",
+      lastError: "Reviewer replacement recovery does not match durable replacement provenance",
+      retryable: false,
+    });
+
+    expect(services.finalizers.run).not.toHaveBeenCalled();
+    expect(services.availability.updateReplacementState).not.toHaveBeenCalled();
+  });
+});
+
+function buildServices(): ReviewerAvailabilityPorts {
   return {
-    now: vi.fn(() => now),
-    loadActivation: vi.fn(async () => activation),
-    findRecordedOutcome: vi.fn(async () => null),
-    fetchPullRequest: vi.fn(async () => ({
-      state: "open",
-      headSha: candidate.headSha,
-      authorHandle: "@user-author",
-    })),
-    fetchReviews: vi.fn(async () => []),
-    listAbsenceWindows: vi.fn(async () => []),
-    getReviewerLoad: vi.fn(async () => ({ "@user-c91e46": 0 })),
-    removeReviewer: vi.fn(async () => {}),
-    requestReviewer: vi.fn(async () => {}),
-    recordOutcome: vi.fn(async () => ({ inserted: true })),
-    reevaluatePolicy: vi.fn(async () => {}),
-    failPolicyCheck: vi.fn(async () => {}),
-    ...overrides,
+    clock: { now: () => new Date("2026-09-01T12:00:00.000Z") },
+    availability: {
+      listPendingFinalizers: vi.fn(async () => []),
+      loadReplacement: vi.fn(async () => null),
+      loadActivation: vi.fn(async () => null),
+      listUnfinalizedMutationIntents: vi.fn(async () => []),
+      loadMutationIntent: vi.fn(async () => null),
+      prepareMutationIntent: vi.fn(async () => { throw new Error("not expected"); }),
+      findActive: vi.fn(async () => []),
+      persistReplacement: vi.fn(async () => { throw new Error("not expected"); }),
+      persistMutationIntentRecovery: vi.fn(async () => { throw new Error("not expected"); }),
+      updateReplacementState: vi.fn(async (input) => ({ id: input.replacementId, state: input.state })),
+    },
+    provider: {
+      inspectChangeRequest: vi.fn(async () => { throw new Error("not expected"); }),
+      reconcileReviewRequest: vi.fn(async () => { throw new Error("not expected"); }),
+      classifyError: vi.fn(() => ({ kind: "retryable" as const, message: "retry" })),
+    },
+    reviewerLoad: vi.fn(async () => ({})),
+    finalizers: {
+      run: vi.fn(async () => {}),
+      classifyError: vi.fn(() => ({ kind: "retryable" as const, message: "retry" })),
+    },
   };
 }
 
-describe("processReviewerAbsenceActivationJob", () => {
-  it.each(["stale", "cancelled", "ended"])("treats a %s activation as a job-level no-op", async () => {
-    const services = buildServices({ loadActivation: vi.fn(async () => null) });
-
-    await processReviewerAbsenceActivationJob(message, services);
-
-    expect(services.loadActivation).toHaveBeenCalledWith({
-      absenceId: message.absenceId,
-      expectedRevision: message.expectedRevision,
-      now,
-    });
-    expect(services.fetchPullRequest).not.toHaveBeenCalled();
-    expect(services.recordOutcome).not.toHaveBeenCalled();
-  });
-
-  it("records a closed pull request as a decision-scoped skip", async () => {
-    const services = buildServices({
-      fetchPullRequest: vi.fn(async () => ({
-        state: "closed",
-        headSha: candidate.headSha,
-        authorHandle: "@user-author",
-      })),
-    });
-
-    await processReviewerAbsenceActivationJob(message, services);
-
-    expect(services.recordOutcome).toHaveBeenCalledWith(expect.objectContaining({
-      absenceId: activation.absenceId,
-      absenceRevision: activation.revision,
-      decisionId: candidate.decisionId,
-      unavailableReviewer: activation.reviewerHandle,
-      replacementReviewer: null,
-      outcome: "skipped_closed",
-      replaceCohort: false,
-    }));
-    expect(services.fetchReviews).not.toHaveBeenCalled();
-    expect(services.removeReviewer).not.toHaveBeenCalled();
-  });
-
-  it("records a changed routed head as a decision-scoped skip", async () => {
-    const services = buildServices({
-      fetchPullRequest: vi.fn(async () => ({
-        state: "open",
-        headSha: "new-head",
-        authorHandle: "@user-author",
-      })),
-    });
-
-    await processReviewerAbsenceActivationJob(message, services);
-
-    expect(services.recordOutcome).toHaveBeenCalledWith(expect.objectContaining({
-      outcome: "skipped_changed_head",
-      replacementReviewer: null,
-      replaceCohort: false,
-    }));
-    expect(services.fetchReviews).not.toHaveBeenCalled();
-    expect(services.removeReviewer).not.toHaveBeenCalled();
-  });
-
-  it("uses GitHub-effective approvals without invalidating them by commit ID", async () => {
-    const services = buildServices({
-      fetchReviews: vi.fn(async () => [{
-        userLogin: "user-approved",
-        userType: "User",
-        state: "APPROVED",
-        commitId: "older-head",
-        submittedAt: "2026-09-30T10:00:00.000Z",
-      }]),
-    });
-
-    await processReviewerAbsenceActivationJob(message, services);
-
-    expect(services.recordOutcome).toHaveBeenCalledWith(expect.objectContaining({
-      outcome: "skipped_policy_satisfied",
-      replacementReviewer: null,
-      replaceCohort: false,
-    }));
-    expect(services.reevaluatePolicy).toHaveBeenCalledWith(candidate);
-    expect(services.listAbsenceWindows).not.toHaveBeenCalled();
-    expect(services.removeReviewer).not.toHaveBeenCalled();
-  });
-
-  it("leaves the cohort unchanged when the unavailable reviewer has approved", async () => {
-    const approvedCandidate = { ...candidate, requiredApprovalCount: 2 };
-    const services = buildServices({
-      loadActivation: vi.fn(async () => ({ ...activation, candidates: [approvedCandidate] })),
-      fetchReviews: vi.fn(async () => [{
-        userLogin: "USER-D82A5F",
-        userType: "User",
-        state: "APPROVED",
-        commitId: "older-head",
-        submittedAt: "2026-09-30T10:00:00.000Z",
-      }]),
-    });
-
-    await processReviewerAbsenceActivationJob(message, services);
-
-    expect(services.recordOutcome).toHaveBeenCalledWith(expect.objectContaining({
-      outcome: "skipped_approved",
-      replacementReviewer: null,
-      replaceCohort: false,
-    }));
-    expect(services.listAbsenceWindows).not.toHaveBeenCalled();
-    expect(services.removeReviewer).not.toHaveBeenCalled();
-    expect(services.reevaluatePolicy).not.toHaveBeenCalled();
-  });
-
-  it("excludes the author, approvals, concurrent absences, and existing cohort before enforcing in order", async () => {
-    const events: string[] = [];
-    const replacementCandidate: ReviewerReplacementCandidate = {
-      ...candidate,
-      selectedReviewers: [activation.reviewerHandle, "@user-current"],
-      originalEligibleReviewers: [
-        activation.reviewerHandle,
-        "@user-c91e46",
-        "@user-author",
-        "@user-approved",
-        "@user-absent",
-        "@user-current",
-      ],
-      requiredApprovalCount: 2,
-    };
-    const services = buildServices({
-      loadActivation: vi.fn(async () => ({ ...activation, candidates: [replacementCandidate] })),
-      fetchPullRequest: vi.fn(async () => {
-        events.push("fetch-pull-request");
-        return { state: "open", headSha: candidate.headSha, authorHandle: "@user-author" };
-      }),
-      fetchReviews: vi.fn(async () => {
-        events.push("fetch-reviews");
-        return [{
-          userLogin: "user-approved",
-          userType: "User",
-          state: "APPROVED",
-          commitId: "older-head",
-          submittedAt: "2026-09-30T10:00:00.000Z",
-        }];
-      }),
-      listAbsenceWindows: vi.fn(async () => {
-        events.push("list-absence-windows");
-        return [{
-          reviewerHandle: "@user-absent",
-          startAt: now,
-          endAt: new Date("2026-10-02T08:00:00.000Z"),
-        }];
-      }),
-      getReviewerLoad: vi.fn(async () => {
-        events.push("get-load");
-        return { "@user-c91e46": 0 };
-      }),
-      removeReviewer: vi.fn(async (_candidate, reviewer) => {
-        events.push(`remove:${reviewer}`);
-      }),
-      requestReviewer: vi.fn(async (_candidate, reviewer) => {
-        events.push(`request:${reviewer}`);
-      }),
-      recordOutcome: vi.fn(async (input) => {
-        events.push(`persist:${input.outcome}`);
-        return { inserted: true };
-      }),
-      reevaluatePolicy: vi.fn(async () => {
-        events.push("reevaluate-policy");
-      }),
-    });
-
-    await processReviewerAbsenceActivationJob(message, services);
-
-    expect(events).toEqual([
-      "fetch-pull-request",
-      "fetch-reviews",
-      "list-absence-windows",
-      "get-load",
-      "remove:@user-d82a5f",
-      "request:@user-c91e46",
-      "persist:replaced",
-      "reevaluate-policy",
-    ]);
-    expect(services.recordOutcome).toHaveBeenCalledWith(expect.objectContaining({
-      replacementReviewer: "@user-c91e46",
-      outcome: "replaced",
-      replaceCohort: true,
-    }));
-  });
-
-  it("blocks enforce policy without lowering the cohort when no replacement exists", async () => {
-    const events: string[] = [];
-    const noReplacementCandidate = {
-      ...candidate,
-      originalEligibleReviewers: [activation.reviewerHandle],
-    };
-    const services = buildServices({
-      loadActivation: vi.fn(async () => ({ ...activation, candidates: [noReplacementCandidate] })),
-      failPolicyCheck: vi.fn(async (_candidate, summary) => {
-        events.push(`fail:${summary}`);
-      }),
-      recordOutcome: vi.fn(async (input) => {
-        events.push(`persist:${input.outcome}`);
-        return { inserted: true };
-      }),
-    });
-
-    await processReviewerAbsenceActivationJob(message, services);
-
-    expect(events).toEqual([
-      "persist:no_replacement_available",
-      "fail:No replacement is available for an absent required reviewer.",
-    ]);
-    expect(services.recordOutcome).toHaveBeenCalledWith(expect.objectContaining({
-      outcome: "no_replacement_available",
-      replacementReviewer: null,
-      reason: "No available reviewer remains in the original ownership-eligible pool.",
-      replaceCohort: false,
-    }));
-    expect(services.removeReviewer).not.toHaveBeenCalled();
-    expect(services.requestReviewer).not.toHaveBeenCalled();
-    expect(services.reevaluatePolicy).not.toHaveBeenCalled();
-  });
-
-  it("records no shadow replacement without failing policy or mutating GitHub", async () => {
-    const shadowCandidate = {
-      ...candidate,
-      mode: "shadow" as const,
-      policyCheckState: "not_started" as const,
-      originalEligibleReviewers: [activation.reviewerHandle],
-    };
-    const services = buildServices({
-      loadActivation: vi.fn(async () => ({ ...activation, candidates: [shadowCandidate] })),
-    });
-
-    await processReviewerAbsenceActivationJob(message, services);
-
-    expect(services.recordOutcome).toHaveBeenCalledWith(expect.objectContaining({
-      outcome: "no_replacement_available",
-      replaceCohort: false,
-    }));
-    expect(services.removeReviewer).not.toHaveBeenCalled();
-    expect(services.requestReviewer).not.toHaveBeenCalled();
-    expect(services.reevaluatePolicy).not.toHaveBeenCalled();
-    expect(services.failPolicyCheck).not.toHaveBeenCalled();
-  });
-
-  it("persists a simulated shadow cohort replacement with zero writes", async () => {
-    const shadowCandidate = { ...candidate, mode: "shadow" as const, policyCheckState: "not_started" as const };
-    const services = buildServices({
-      loadActivation: vi.fn(async () => ({ ...activation, candidates: [shadowCandidate] })),
-    });
-
-    await processReviewerAbsenceActivationJob(message, services);
-
-    expect(services.recordOutcome).toHaveBeenCalledWith(expect.objectContaining({
-      outcome: "simulated_replacement",
-      replacementReviewer: "@user-c91e46",
-      replaceCohort: true,
-    }));
-    expect(services.removeReviewer).not.toHaveBeenCalled();
-    expect(services.requestReviewer).not.toHaveBeenCalled();
-    expect(services.reevaluatePolicy).not.toHaveBeenCalled();
-    expect(services.failPolicyCheck).not.toHaveBeenCalled();
-  });
-
-  it("stops policy finalization when replacement persistence finds the activation stale", async () => {
-    const services = buildServices({
-      recordOutcome: vi.fn(async () => ({ inserted: false, activationCurrent: false })),
-    });
-
-    await processReviewerAbsenceActivationJob(message, services);
-
-    expect(services.removeReviewer).toHaveBeenCalledWith(candidate, activation.reviewerHandle);
-    expect(services.requestReviewer).toHaveBeenCalledWith(candidate, "@user-c91e46");
-    expect(services.recordOutcome).toHaveBeenCalledWith(expect.objectContaining({ outcome: "replaced" }));
-    expect(services.reevaluatePolicy).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    ["replaced", "reevaluate"],
-    ["skipped_policy_satisfied", "reevaluate"],
-    ["no_replacement_available", "fail"],
-    ["permanent_failure", "fail"],
-    ["simulated_replacement", "none"],
-    ["skipped_approved", "none"],
-    ["skipped_closed", "none"],
-    ["skipped_changed_head", "none"],
-  ] as const)("replays only the %s policy finalizer", async (recordedOutcome, finalizer) => {
-    const services = buildServices({
-      findRecordedOutcome: vi.fn(async () => recordedOutcome),
-    });
-
-    await processReviewerAbsenceActivationJob(message, services);
-
-    expect(services.fetchPullRequest).not.toHaveBeenCalled();
-    expect(services.removeReviewer).not.toHaveBeenCalled();
-    expect(services.requestReviewer).not.toHaveBeenCalled();
-    expect(services.recordOutcome).not.toHaveBeenCalled();
-    expect(services.reevaluatePolicy).toHaveBeenCalledTimes(finalizer === "reevaluate" ? 1 : 0);
-    expect(services.failPolicyCheck).toHaveBeenCalledTimes(finalizer === "fail" ? 1 : 0);
-    if (recordedOutcome === "no_replacement_available") {
-      expect(services.failPolicyCheck).toHaveBeenCalledWith(
-        candidate,
-        "No replacement is available for an absent required reviewer.",
-      );
-    }
-  });
-
-  it.each(["replaced", "skipped_policy_satisfied"] as const)(
-    "reports a permanent %s replay failure after later decisions finish",
-    async (recordedOutcome) => {
-      const recoveryCandidate = {
-        ...candidate,
-        selectedReviewers: ["@user-c91e46"],
-        policyCheckState: "success" as const,
-      };
-      const laterCandidate = { ...candidate, decisionId: "decision-2", pullNumber: 8 };
-      const events: string[] = [];
-      const services = buildServices({
-        loadActivation: vi.fn(async () => ({
-          ...activation,
-          candidates: [recoveryCandidate, laterCandidate],
-        })),
-        findRecordedOutcome: vi.fn(async (input) => (
-          input.decisionId === recoveryCandidate.decisionId ? recordedOutcome : null
-        )),
-        fetchPullRequest: vi.fn(async (input) => ({
-          state: "closed",
-          headSha: input.headSha,
-          authorHandle: "@user-author",
-        })),
-        reevaluatePolicy: vi.fn(async (input) => {
-          events.push(`replay:${input.decisionId}`);
-          throw Object.assign(new Error("check update rejected"), { status: 422 });
-        }),
-        recordOutcome: vi.fn(async (input) => {
-          events.push(`persist:${input.decisionId}:${input.outcome}`);
-          return { inserted: true };
-        }),
-        failPolicyCheck: vi.fn(async (input) => {
-          events.push(`fail:${input.decisionId}`);
-        }),
-      });
-
-      await expect(processReviewerAbsenceActivationJob(message, services)).rejects.toEqual(
-        new PermanentJobError("check update rejected"),
-      );
-
-      expect(events).toEqual([
-        "replay:decision-1",
-        "persist:decision-2:skipped_closed",
-      ]);
+function persistence(outcome: "replaced" | "permanent_failure"): PersistReviewerReplacementInput {
+  const completedAt = new Date("2026-09-01T12:00:00.000Z");
+  const replacementActorId = outcome === "replaced" ? "@user-b71d93" : null;
+  return {
+    provider: "github",
+    providerConnectionId: "connection-1",
+    absenceId: "absence-1",
+    absenceRevision: 2,
+    decisionId: "decision-1",
+    expectedHeadRevision: "head-1",
+    unavailableActorId: "@user-a62c84",
+    replacementActorId,
+    mutationIntentId,
+    outcome,
+    reason: outcome === "replaced" ? "replacement applied" : "provider rejected after a partial mutation",
+    state: outcome === "replaced" ? "finalizer_pending" : "permanent_failure",
+    lastError: outcome === "replaced" ? null : "provider rejected after a partial mutation",
+    startedAt: completedAt,
+    completedAt,
+    replaceCohort: outcome === "replaced",
+    event: {
+      schemaVersion: 1,
+      eventType: "reviewer_replacement",
+      eventId: "replacement-event-1",
+      occurredAt: completedAt.toISOString(),
+      workspaceId: "workspace-1",
+      provider: "github",
+      providerConnectionId: "connection-1",
+      absenceId: "absence-1",
+      absenceRevision: 2,
+      decisionId: "decision-1",
+      repositoryId: "repository-1",
+      changeRequestId: "change-request-1",
+      unavailableActor: "@user-a62c84",
+      replacementActor: replacementActorId,
+      outcome,
     },
-  );
+  } as PersistReviewerReplacementInput;
+}
 
-  it("defers a transient recorded replay failure until later decisions finish", async () => {
-    const error = Object.assign(new Error("check update unavailable"), { status: 503 });
-    const recoveryCandidate = {
-      ...candidate,
-      selectedReviewers: ["@user-c91e46"],
-      policyCheckState: "success" as const,
-    };
-    const laterCandidate = { ...candidate, decisionId: "decision-2", pullNumber: 8 };
-    const events: string[] = [];
-    const services = buildServices({
-      loadActivation: vi.fn(async () => ({
-        ...activation,
-        candidates: [recoveryCandidate, laterCandidate],
-      })),
-      findRecordedOutcome: vi.fn(async (input) => (
-        input.decisionId === recoveryCandidate.decisionId ? "replaced" : null
-      )),
-      fetchPullRequest: vi.fn(async (input) => ({
-        state: "closed",
-        headSha: input.headSha,
-        authorHandle: "@user-author",
-      })),
-      reevaluatePolicy: vi.fn(async (input) => {
-        events.push(`replay:${input.decisionId}`);
-        throw error;
-      }),
-      recordOutcome: vi.fn(async (input) => {
-        events.push(`persist:${input.decisionId}:${input.outcome}`);
-        return { inserted: true };
-      }),
-      failPolicyCheck: vi.fn(async (input) => {
-        events.push(`fail:${input.decisionId}`);
-      }),
-    });
+function replacedRecovery(
+  phase: "persist_replacement" | "run_finalizer" | "complete_replacement",
+): ReviewerReplacementFinalizerRecovery {
+  return {
+    kind: "reviewer_replacement_finalizer",
+    phase,
+    job,
+    provider: "github",
+    unavailableActorId: "@user-a62c84",
+    finalizer: { action: "reevaluate_policy", decisionId: "decision-1", summary: null },
+    replacementId: phase === "persist_replacement" ? null : "replacement-1",
+    outcome: "replaced",
+    replacementActorId: "@user-b71d93",
+    mutationIntentId,
+    providerEffectsApplied: true,
+    persistence: phase === "persist_replacement" ? persistence("replaced") : null,
+    lastError: "database unavailable",
+    retryable: true,
+  } as ReviewerReplacementFinalizerRecovery;
+}
 
-    await expect(processReviewerAbsenceActivationJob(message, services)).rejects.toBe(error);
+function permanentFailureRecovery(): ReviewerReplacementFinalizerRecovery {
+  return {
+    kind: "reviewer_replacement_finalizer",
+    phase: "persist_replacement",
+    job,
+    provider: "github",
+    unavailableActorId: "@user-a62c84",
+    finalizer: null,
+    replacementId: null,
+    outcome: "permanent_failure",
+    replacementActorId: null,
+    mutationIntentId,
+    providerEffectsApplied: true,
+    persistence: persistence("permanent_failure") as never,
+    lastError: "database unavailable",
+    retryable: true,
+  };
+}
 
-    expect(events).toEqual([
-      "replay:decision-1",
-      "persist:decision-2:skipped_closed",
-    ]);
-  });
-
-  it("records a permanent GitHub failure, blocks enforce policy, and completes the job", async () => {
-    const events: string[] = [];
-    const services = buildServices({
-      requestReviewer: vi.fn(async () => {
-        throw Object.assign(new Error("review request rejected"), { status: 422 });
-      }),
-      failPolicyCheck: vi.fn(async () => {
-        events.push("fail-policy");
-      }),
-      recordOutcome: vi.fn(async (input) => {
-        events.push(`persist:${input.outcome}`);
-        return { inserted: true };
-      }),
-    });
-
-    await expect(processReviewerAbsenceActivationJob(message, services)).resolves.toBeUndefined();
-
-    expect(events).toEqual(["persist:permanent_failure", "fail-policy"]);
-    expect(services.recordOutcome).toHaveBeenCalledWith(expect.objectContaining({
-      outcome: "permanent_failure",
-      replacementReviewer: null,
-      reason: "review request rejected",
-      replaceCohort: false,
-    }));
-    expect(services.reevaluatePolicy).not.toHaveBeenCalled();
-  });
-
-  it("rethrows transient failures for durable job retry", async () => {
-    const error = Object.assign(new Error("GitHub unavailable"), { status: 503 });
-    const services = buildServices({
-      requestReviewer: vi.fn(async () => {
-        throw error;
-      }),
-    });
-
-    await expect(processReviewerAbsenceActivationJob(message, services)).rejects.toBe(error);
-
-    expect(services.failPolicyCheck).not.toHaveBeenCalled();
-    expect(services.recordOutcome).not.toHaveBeenCalled();
-    expect(services.reevaluatePolicy).not.toHaveBeenCalled();
-  });
-
-  it("persists no-replacement history before a transient policy finalizer and continues later decisions", async () => {
-    const error = Object.assign(new Error("policy update unavailable"), { status: 503 });
-    const blockedCandidate = {
-      ...candidate,
-      originalEligibleReviewers: [activation.reviewerHandle],
-    };
-    const laterCandidate = { ...candidate, decisionId: "decision-2", pullNumber: 8 };
-    const events: string[] = [];
-    const services = buildServices({
-      loadActivation: vi.fn(async () => ({
-        ...activation,
-        candidates: [blockedCandidate, laterCandidate],
-      })),
-      fetchPullRequest: vi.fn(async (input) => ({
-        state: input.decisionId === blockedCandidate.decisionId ? "open" : "closed",
-        headSha: input.headSha,
-        authorHandle: "@user-author",
-      })),
-      recordOutcome: vi.fn(async (input) => {
-        events.push(`persist:${input.decisionId}:${input.outcome}`);
-        return { inserted: true };
-      }),
-      failPolicyCheck: vi.fn(async (input) => {
-        events.push(`fail:${input.decisionId}`);
-        throw error;
-      }),
-    });
-
-    await expect(processReviewerAbsenceActivationJob(message, services)).rejects.toBe(error);
-
-    expect(events).toEqual([
-      "persist:decision-1:no_replacement_available",
-      "fail:decision-1",
-      "persist:decision-2:skipped_closed",
-    ]);
-  });
-
-  it("does not make policy terminal when no-replacement history persistence fails", async () => {
-    const error = Object.assign(new Error("database unavailable"), { severity: "FATAL" });
-    const blockedCandidate = {
-      ...candidate,
-      originalEligibleReviewers: [activation.reviewerHandle],
-    };
-    const laterCandidate = { ...candidate, decisionId: "decision-2", pullNumber: 8 };
-    const events: string[] = [];
-    const services = buildServices({
-      loadActivation: vi.fn(async () => ({
-        ...activation,
-        candidates: [blockedCandidate, laterCandidate],
-      })),
-      fetchPullRequest: vi.fn(async (input) => ({
-        state: input.decisionId === blockedCandidate.decisionId ? "open" : "closed",
-        headSha: input.headSha,
-        authorHandle: "@user-author",
-      })),
-      recordOutcome: vi.fn(async (input) => {
-        events.push(`persist:${input.decisionId}:${input.outcome}`);
-        if (input.decisionId === blockedCandidate.decisionId) throw error;
-        return { inserted: true };
-      }),
-      failPolicyCheck: vi.fn(async (input) => {
-        events.push(`fail:${input.decisionId}`);
-      }),
-    });
-
-    await expect(processReviewerAbsenceActivationJob(message, services)).rejects.toBe(error);
-
-    expect(events).toEqual([
-      "persist:decision-1:no_replacement_available",
-      "persist:decision-2:skipped_closed",
-    ]);
-    expect(services.failPolicyCheck).not.toHaveBeenCalled();
-  });
-
-  it("retains permanent-failure history and continues when policy failure finalization is permanently rejected", async () => {
-    const laterCandidate = { ...candidate, decisionId: "decision-2", pullNumber: 8 };
-    const events: string[] = [];
-    const services = buildServices({
-      loadActivation: vi.fn(async () => ({ ...activation, candidates: [candidate, laterCandidate] })),
-      fetchPullRequest: vi.fn(async (input) => ({
-        state: input.decisionId === candidate.decisionId ? "open" : "closed",
-        headSha: input.headSha,
-        authorHandle: "@user-author",
-      })),
-      requestReviewer: vi.fn(async () => {
-        throw Object.assign(new Error("review request rejected"), { status: 422 });
-      }),
-      recordOutcome: vi.fn(async (input) => {
-        events.push(`persist:${input.decisionId}:${input.outcome}`);
-        return { inserted: true };
-      }),
-      failPolicyCheck: vi.fn(async (input) => {
-        events.push(`fail:${input.decisionId}`);
-        throw Object.assign(new Error("check update forbidden"), { status: 403 });
-      }),
-    });
-
-    await expect(processReviewerAbsenceActivationJob(message, services)).resolves.toBeUndefined();
-
-    expect(events).toEqual([
-      "persist:decision-1:permanent_failure",
-      "fail:decision-1",
-      "persist:decision-2:skipped_closed",
-    ]);
-  });
-
-  it("continues later decisions and retries when permanent-failure history persistence is transiently unavailable", async () => {
-    const error = Object.assign(new Error("database unavailable"), { severity: "FATAL" });
-    const laterCandidate = { ...candidate, decisionId: "decision-2", pullNumber: 8 };
-    const events: string[] = [];
-    const services = buildServices({
-      loadActivation: vi.fn(async () => ({ ...activation, candidates: [candidate, laterCandidate] })),
-      fetchPullRequest: vi.fn(async (input) => ({
-        state: input.decisionId === candidate.decisionId ? "open" : "closed",
-        headSha: input.headSha,
-        authorHandle: "@user-author",
-      })),
-      requestReviewer: vi.fn(async () => {
-        throw Object.assign(new Error("review request rejected"), { status: 422 });
-      }),
-      recordOutcome: vi.fn(async (input) => {
-        events.push(`persist:${input.decisionId}:${input.outcome}`);
-        if (input.decisionId === candidate.decisionId) throw error;
-        return { inserted: true };
-      }),
-      failPolicyCheck: vi.fn(async (input) => {
-        events.push(`fail:${input.decisionId}`);
-      }),
-    });
-
-    await expect(processReviewerAbsenceActivationJob(message, services)).rejects.toBe(error);
-
-    expect(events).toEqual([
-      "persist:decision-1:permanent_failure",
-      "persist:decision-2:skipped_closed",
-    ]);
-    expect(services.failPolicyCheck).not.toHaveBeenCalled();
-  });
-
-  it("processes decision candidates sequentially", async () => {
-    const secondCandidate = { ...candidate, decisionId: "decision-2", pullNumber: 8 };
-    const events: string[] = [];
-    const services = buildServices({
-      loadActivation: vi.fn(async () => ({ ...activation, candidates: [candidate, secondCandidate] })),
-      fetchPullRequest: vi.fn(async (input) => {
-        events.push(`fetch:${input.decisionId}`);
-        return { state: "closed", headSha: input.headSha, authorHandle: "@user-author" };
-      }),
-      recordOutcome: vi.fn(async (input) => {
-        events.push(`persist:${input.decisionId}`);
-        return { inserted: true };
-      }),
-    });
-
-    await processReviewerAbsenceActivationJob(message, services);
-
-    expect(events).toEqual([
-      "fetch:decision-1",
-      "persist:decision-1",
-      "fetch:decision-2",
-      "persist:decision-2",
-    ]);
-  });
-});
+function expectPendingRecovery(
+  services: ReviewerAvailabilityPorts,
+  recovery: ReviewerReplacementFinalizerRecovery,
+): void {
+  services.availability.loadReplacement = vi.fn(async () => ({
+    id: recovery.replacementId!,
+    workspaceId: recovery.job.workspaceId,
+    provider: recovery.provider,
+    providerConnectionId: recovery.job.providerConnectionId,
+    absenceId: recovery.job.absenceId,
+    absenceRevision: recovery.job.absenceRevision,
+    decisionId: recovery.finalizer!.decisionId,
+    unavailableActorId: recovery.unavailableActorId,
+    state: "finalizer_pending" as const,
+    outcome: recovery.outcome as "replaced",
+    replacementActorId: recovery.replacementActorId,
+    mutationIntentId: recovery.mutationIntentId,
+    lastError: null,
+  })) as never;
+}

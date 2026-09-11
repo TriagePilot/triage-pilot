@@ -1,24 +1,54 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  findReviewerReplacementCandidates,
   findLatestHumanReviewPolicyDecision,
-  findReviewerReplacementOutcome,
+  ensureLocalWorkspace,
   markActionFailed,
   markActionSucceeded,
   persistDecision,
-  recordReviewerReplacement,
   recordPolicyCheck,
   updatePolicyCheckState,
 } from "../src";
 import { withPostgresTestDatabase } from "./postgres";
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () => {
+  it("persists non-empty configuration diagnostics as a JSON array", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const repositoryId = await seedRepository(db);
+      const decision = await persistDecision(db, await ensureLocalWorkspace(db), {
+        repositoryId,
+        deliveryId: "delivery-invalid-config",
+        changeRequestId: "change:invalid/7",
+        pullNumber: 7,
+        headSha: "head-invalid",
+        mode: "shadow",
+        action: "configuration_failure",
+        actionStatus: "not_applied",
+        riskScore: 0,
+        details: { diagnostics: [{ path: "$.mode", message: "invalid mode" }] },
+        effectiveConfigHash: "invalid",
+        configDiagnostics: [{ path: "$.mode", message: "invalid mode" }],
+        configSources: {},
+      });
+
+      await expect(db.selectFrom("routing_decisions")
+        .select(["effective_config_hash", "config_diagnostics"])
+        .where("id", "=", decision.decisionId)
+        .executeTakeFirstOrThrow()).resolves.toEqual({
+        effective_config_hash: "invalid",
+        config_diagnostics: [{ path: "$.mode", message: "invalid mode" }],
+      });
+    });
+  });
+
   it("uses the delivery ID as a stable retry key while refreshing the decision", async () => {
     await withPostgresTestDatabase(async (db) => {
       const repositoryId = await seedRepository(db);
-      const first = await persistDecision(db, {
+      const first = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
+        changeRequestId: "change:7/first",
         pullNumber: 7,
         headSha: "head-1",
         mode: "shadow",
@@ -28,9 +58,10 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         noHumanReason: "risk_at_or_below_low_threshold",
         details: { attempt: 1 },
       });
-      const retried = await persistDecision(db, {
+      const retried = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
+        changeRequestId: "change:7/current",
         pullNumber: 7,
         headSha: "head-1",
         mode: "enforce",
@@ -54,6 +85,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
           risk_score: 35,
           selected_reviewer: "@user-b4e82d",
           selected_reviewers: ["@user-b4e82d", "@user-9e3c71"],
+          change_request_id: "change:7/current",
           no_human_reason: null,
           details: { attempt: 2 },
         }),
@@ -64,9 +96,10 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
   it("returns a terminal succeeded outcome without rewriting the completed decision", async () => {
     await withPostgresTestDatabase(async (db) => {
       const repositoryId = await seedRepository(db);
-      const first = await persistDecision(db, {
+      const first = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
+        changeRequestId: "change:7/terminal",
         pullNumber: 7,
         headSha: "head-1",
         mode: "enforce",
@@ -77,11 +110,12 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         details: { attempt: 1 },
       });
       const appliedAt = new Date("2026-08-18T12:00:00.000Z");
-      await markActionSucceeded(db, first.decisionId, appliedAt);
+      await markActionSucceeded(db, await ensureLocalWorkspace(db), first.decisionId, appliedAt);
 
-      const retried = await persistDecision(db, {
+      const retried = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
+        changeRequestId: "change:7/terminal",
         pullNumber: 7,
         headSha: "head-1",
         mode: "enforce",
@@ -132,9 +166,10 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
   it("preserves the completed action identity when a retry calculates a different mode and action", async () => {
     await withPostgresTestDatabase(async (db) => {
       const repositoryId = await seedRepository(db);
-      const first = await persistDecision(db, {
+      const first = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
+        changeRequestId: "change:7/retry",
         pullNumber: 7,
         headSha: "head-1",
         mode: "enforce",
@@ -145,11 +180,12 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         details: { routing: "original" },
       });
       const appliedAt = new Date("2026-08-18T12:00:00.000Z");
-      await markActionSucceeded(db, first.decisionId, appliedAt);
+      await markActionSucceeded(db, await ensureLocalWorkspace(db), first.decisionId, appliedAt);
 
-      const retried = await persistDecision(db, {
+      const retried = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
+        changeRequestId: "change:7/retry",
         pullNumber: 7,
         headSha: "head-1",
         mode: "shadow",
@@ -199,9 +235,10 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
   it("records failure and success outcomes only for the named decision", async () => {
     await withPostgresTestDatabase(async (db) => {
       const repositoryId = await seedRepository(db);
-      const decision = await persistDecision(db, {
+      const decision = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
+        changeRequestId: "change:7/outcome",
         pullNumber: 7,
         headSha: "head-1",
         mode: "enforce",
@@ -210,9 +247,10 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         riskScore: 5,
         details: {},
       });
-      const untouched = await persistDecision(db, {
+      const untouched = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-2",
+        changeRequestId: "change:7/untouched",
         pullNumber: 7,
         headSha: "head-1",
         mode: "enforce",
@@ -223,7 +261,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       });
 
       const failedAt = new Date("2026-08-18T11:59:00.000Z");
-      await markActionFailed(db, decision.decisionId, "GitHub denied the action", failedAt);
+      await markActionFailed(db, await ensureLocalWorkspace(db), decision.decisionId, "GitHub denied the action", failedAt);
       await expect(readOutcome(db, decision.decisionId)).resolves.toEqual({
         action_status: "failed",
         action_error: "GitHub denied the action",
@@ -232,7 +270,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       });
 
       const appliedAt = new Date("2026-08-18T12:00:00.000Z");
-      await markActionSucceeded(db, decision.decisionId, appliedAt);
+      await markActionSucceeded(db, await ensureLocalWorkspace(db), decision.decisionId, appliedAt);
       await expect(readOutcome(db, decision.decisionId)).resolves.toEqual({
         action_status: "succeeded",
         action_error: null,
@@ -251,9 +289,10 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
   it("keeps the first success terminal across late failure and repeated success updates", async () => {
     await withPostgresTestDatabase(async (db) => {
       const repositoryId = await seedRepository(db);
-      const decision = await persistDecision(db, {
+      const decision = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
+        changeRequestId: "change:7/late-failure",
         pullNumber: 7,
         headSha: "head-1",
         mode: "enforce",
@@ -263,10 +302,11 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         details: {},
       });
       const firstAppliedAt = new Date("2026-08-18T12:00:00.000Z");
-      await markActionSucceeded(db, decision.decisionId, firstAppliedAt);
+      await markActionSucceeded(db, await ensureLocalWorkspace(db), decision.decisionId, firstAppliedAt);
 
       await markActionFailed(
         db,
+        await ensureLocalWorkspace(db),
         decision.decisionId,
         "late failure",
         new Date("2026-08-18T12:01:00.000Z"),
@@ -278,7 +318,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         action_failed_at: null,
       });
 
-      await markActionSucceeded(db, decision.decisionId, new Date("2026-08-18T12:05:00.000Z"));
+      await markActionSucceeded(db, await ensureLocalWorkspace(db), decision.decisionId, new Date("2026-08-18T12:05:00.000Z"));
       await expect(readOutcome(db, decision.decisionId)).resolves.toEqual({
         action_status: "succeeded",
         action_error: null,
@@ -291,9 +331,10 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
   it("finds the latest policy decision for a pull request and updates its durable check state", async () => {
     await withPostgresTestDatabase(async (db) => {
       const repositoryId = await seedRepository(db);
-      const first = await persistDecision(db, {
+      const first = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-1",
+        changeRequestId: "change:7/policy-first",
         pullNumber: 7,
         headSha: "head-1",
         mode: "enforce",
@@ -303,14 +344,14 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         selectedReviewers: ["@user-d82a5f"],
         details: { routing: { requestedReviewerCount: 2 } },
       });
-      await recordPolicyCheck(db, {
+      await recordPolicyCheck(db, await ensureLocalWorkspace(db), {
         decisionId: first.decisionId,
         checkRunId: "42",
         state: "in_progress",
       });
 
       await expect(
-        findLatestHumanReviewPolicyDecision(db, { repositoryId, pullNumber: 7 }),
+        findLatestHumanReviewPolicyDecision(db, await ensureLocalWorkspace(db), { repositoryId, pullNumber: 7 }),
       ).resolves.toEqual({
         decisionId: first.decisionId,
         owner: "acme",
@@ -325,9 +366,10 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         policyCheckState: "in_progress",
       });
 
-      const latest = await persistDecision(db, {
+      const latest = await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-2",
+        changeRequestId: "change:7/policy-latest",
         pullNumber: 7,
         headSha: "head-2",
         mode: "enforce",
@@ -336,16 +378,16 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         riskScore: 35,
         details: {},
       });
-      await updatePolicyCheckState(db, { decisionId: latest.decisionId, state: "failure" });
-      await updatePolicyCheckState(db, { decisionId: latest.decisionId, state: "success" });
-      await recordPolicyCheck(db, {
+      await updatePolicyCheckState(db, await ensureLocalWorkspace(db), { decisionId: latest.decisionId, state: "failure" });
+      await updatePolicyCheckState(db, await ensureLocalWorkspace(db), { decisionId: latest.decisionId, state: "success" });
+      await recordPolicyCheck(db, await ensureLocalWorkspace(db), {
         decisionId: latest.decisionId,
         checkRunId: "99",
         state: "in_progress",
       });
 
       await expect(
-        findLatestHumanReviewPolicyDecision(db, { repositoryId, pullNumber: 7 }),
+        findLatestHumanReviewPolicyDecision(db, await ensureLocalWorkspace(db), { repositoryId, pullNumber: 7 }),
       ).resolves.toEqual({
         decisionId: latest.decisionId,
         owner: "acme",
@@ -365,9 +407,10 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
   it("does not return a latest shadow decision for policy evaluation", async () => {
     await withPostgresTestDatabase(async (db) => {
       const repositoryId = await seedRepository(db);
-      await persistDecision(db, {
+      await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-enforce",
+        changeRequestId: "change:7/enforce",
         pullNumber: 7,
         headSha: "head-1",
         mode: "enforce",
@@ -377,9 +420,10 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         selectedReviewers: ["@user-d82a5f"],
         details: {},
       });
-      await persistDecision(db, {
+      await persistDecision(db, await ensureLocalWorkspace(db), {
         repositoryId,
         deliveryId: "delivery-shadow",
+        changeRequestId: "change:7/shadow",
         pullNumber: 7,
         headSha: "head-2",
         mode: "shadow",
@@ -390,172 +434,193 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       });
 
       await expect(
-        findLatestHumanReviewPolicyDecision(db, { repositoryId, pullNumber: 7 }),
+        findLatestHumanReviewPolicyDecision(db, await ensureLocalWorkspace(db), { repositoryId, pullNumber: 7 }),
       ).resolves.toBeNull();
     });
   });
 
-  it("records a replacement once and changes the persisted reviewer cohort atomically", async () => {
+  it("discovers only latest scoped cohorts and derives immutable replacement inputs from decision details", async () => {
     await withPostgresTestDatabase(async (db) => {
+      const workspaceId = await ensureLocalWorkspace(db);
       const repositoryId = await seedRepository(db);
-      const absence = await db
-        .insertInto("reviewer_absences")
-        .values({
-          reviewer_handle: "@user-d82a5f",
-          start_at: new Date("2026-08-31T12:00:00.000Z"),
-          end_at: new Date("2026-09-02T12:00:00.000Z"),
-        })
-        .returning(["id", "revision"])
+      const repository = await db.selectFrom("repositories")
+        .select(["provider", "provider_connection_id", "external_repository_id"])
+        .where("workspace_id", "=", workspaceId)
+        .where("id", "=", repositoryId)
         .executeTakeFirstOrThrow();
-      const decision = await persistDecision(db, {
-        repositoryId,
-        deliveryId: "delivery-replacement",
-        pullNumber: 7,
-        headSha: "head-1",
-        mode: "enforce",
+      const absence = await db.insertInto("reviewer_absences").values({
+        workspace_id: workspaceId,
+        provider: repository.provider,
+        provider_connection_id: repository.provider_connection_id,
+        external_actor_id: "Actor:Absent/Case",
+        start_at: new Date("2026-09-01T10:00:00.000Z"),
+        end_at: new Date("2026-09-02T10:00:00.000Z"),
+      }).returning("id").executeTakeFirstOrThrow();
+      const common = {
+        workspace_id: workspaceId,
+        repository_id: repositoryId,
+        mode: "enforce" as const,
         action: "request_human_review",
-        actionStatus: "pending",
-        riskScore: 35,
-        selectedReviewers: ["@user-d82a5f", "@user-b4e82d"],
-        details: {},
-      });
-      const input = {
-        absenceId: absence.id,
-        absenceRevision: absence.revision,
-        decisionId: decision.decisionId,
-        unavailableReviewer: "@user-d82a5f",
-        replacementReviewer: "@user-c91e46",
-        outcome: "replaced" as const,
-        reason: "reviewer absence",
-        startedAt: new Date("2026-09-01T12:00:00.000Z"),
-        completedAt: new Date("2026-09-01T12:01:00.000Z"),
-        replaceCohort: true,
+        action_status: "pending" as const,
+        risk_score: 50,
+        no_human_reason: null,
+        organization_config_version: null,
+        repository_config_path: null,
+        repository_config_revision: null,
+        effective_config_hash: "candidate-config",
+        inheritance_mode: "legacy" as const,
+        config_diagnostics: [],
+        config_sources: {},
       };
+      await db.insertInto("routing_decisions").values([
+        {
+          ...common,
+          id: "00000000-0000-0000-0000-000000000061",
+          delivery_id: "candidate-old",
+          routing_key: "candidate-old",
+          change_request_id: "change:old/7",
+          pull_number: 7,
+          head_sha: "head-old",
+          selected_reviewer: "Actor:Absent/Case",
+          selected_reviewers: JSON.stringify(["Actor:Absent/Case"]),
+          details: {
+            ownership: { preferredReviewers: ["Actor:Old/7"], eligibleReviewers: ["Actor:Absent/Case", "Actor:Old/7"] },
+            routing: { requestedReviewerCount: 1 },
+          },
+          created_at: new Date("2026-09-01T10:00:00.000Z"),
+        },
+        {
+          ...common,
+          id: "00000000-0000-0000-0000-000000000062",
+          delivery_id: "candidate-current",
+          routing_key: "candidate-current",
+          change_request_id: "change:Current/7",
+          pull_number: 7,
+          head_sha: "head-current",
+          selected_reviewer: "Actor:Absent/Case",
+          selected_reviewers: JSON.stringify(["Actor:Absent/Case", "Actor:Existing/Case"]),
+          details: {
+            ownership: {
+              preferredReviewers: ["Actor:Absent/Case", "9007199254740993"],
+              eligibleReviewers: ["Actor:Absent/Case", "9007199254740993", "actor:fallback/lower"],
+            },
+            routing: { requestedReviewerCount: 2 },
+          },
+          policy_check_run_id: "42",
+          policy_check_state: "in_progress" as const,
+          created_at: new Date("2026-09-01T11:00:00.000Z"),
+        },
+        {
+          ...common,
+          id: "00000000-0000-0000-0000-000000000063",
+          delivery_id: "candidate-legacy",
+          routing_key: "candidate-legacy",
+          change_request_id: "884211",
+          pull_number: 8,
+          head_sha: "head-legacy",
+          selected_reviewer: "Actor:Absent/Case",
+          selected_reviewers: JSON.stringify(["Actor:Absent/Case"]),
+          details: {
+            ownership: { eligibleReviewers: ["Actor:Absent/Case", "Actor:Legacy/8"] },
+            routing: { requestedReviewerCount: 1 },
+          },
+          created_at: new Date("2026-09-01T11:10:00.000Z"),
+        },
+        {
+          ...common,
+          id: "00000000-0000-0000-0000-000000000064",
+          delivery_id: "candidate-superseded",
+          routing_key: "candidate-superseded",
+          change_request_id: "change:old/9",
+          pull_number: 9,
+          head_sha: "head-superseded",
+          selected_reviewer: "Actor:Absent/Case",
+          selected_reviewers: JSON.stringify(["Actor:Absent/Case"]),
+          details: {
+            ownership: { eligibleReviewers: ["Actor:Absent/Case", "Actor:Spare/9"] },
+            routing: { requestedReviewerCount: 1 },
+          },
+          created_at: new Date("2026-09-01T11:20:00.000Z"),
+        },
+        {
+          ...common,
+          id: "00000000-0000-0000-0000-000000000065",
+          delivery_id: "candidate-superseding",
+          routing_key: "candidate-superseding",
+          change_request_id: "change:current/9",
+          pull_number: 9,
+          head_sha: "head-superseding",
+          selected_reviewer: "Actor:Current/9",
+          selected_reviewers: JSON.stringify(["Actor:Current/9"]),
+          details: {
+            ownership: { eligibleReviewers: ["Actor:Absent/Case", "Actor:Current/9"] },
+            routing: { requestedReviewerCount: 1 },
+          },
+          created_at: new Date("2026-09-01T11:30:00.000Z"),
+        },
+        {
+          ...common,
+          id: "00000000-0000-0000-0000-000000000066",
+          delivery_id: "candidate-malformed",
+          routing_key: "candidate-malformed",
+          change_request_id: "change:malformed/10",
+          pull_number: 10,
+          head_sha: "head-malformed",
+          selected_reviewer: "Actor:Absent/Case",
+          selected_reviewers: JSON.stringify(["Actor:Absent/Case"]),
+          details: {
+            ownership: { eligibleReviewers: "Actor:Absent/Case" },
+            routing: { requestedReviewerCount: 2 },
+          },
+          created_at: new Date("2026-09-01T11:40:00.000Z"),
+        },
+      ]).execute();
 
-      await expect(recordReviewerReplacement(db, input)).resolves.toEqual({ inserted: true });
-      await expect(recordReviewerReplacement(db, input)).resolves.toEqual({ inserted: false });
-      await expect(db.selectFrom("reviewer_replacements").selectAll().execute()).resolves.toEqual([
-        expect.objectContaining({
-          absence_id: absence.id,
-          absence_revision: absence.revision,
-          decision_id: decision.decisionId,
-          unavailable_reviewer: "@user-d82a5f",
-          replacement_reviewer: "@user-c91e46",
-          outcome: "replaced",
-        }),
+      await expect(findReviewerReplacementCandidates(db, workspaceId, {
+        provider: repository.provider,
+        providerConnectionId: repository.provider_connection_id,
+        unavailableActorId: "Actor:Absent/Case",
+        recordedFor: { absenceId: absence.id, absenceRevision: 1 },
+      })).resolves.toEqual([
+        {
+          decisionId: "00000000-0000-0000-0000-000000000062",
+          provider: "github",
+          providerConnectionId: repository.provider_connection_id,
+          repositoryRecordId: repositoryId,
+          repositoryId: repository.external_repository_id,
+          owner: "acme",
+          repositoryName: "api",
+          changeRequestId: "change:Current/7",
+          changeRequestNumber: 7,
+          routedHeadRevision: "head-current",
+          mode: "enforce",
+          selectedActors: ["Actor:Absent/Case", "Actor:Existing/Case"],
+          originalPreferredActors: ["Actor:Absent/Case", "9007199254740993"],
+          originalEligibleActors: ["Actor:Absent/Case", "9007199254740993", "actor:fallback/lower"],
+          requestedReviewerCount: 2,
+          policyCheckRunId: "42",
+          policyCheckState: "in_progress",
+        },
+        {
+          decisionId: "00000000-0000-0000-0000-000000000063",
+          provider: "github",
+          providerConnectionId: repository.provider_connection_id,
+          repositoryRecordId: repositoryId,
+          repositoryId: repository.external_repository_id,
+          owner: "acme",
+          repositoryName: "api",
+          changeRequestId: "884211",
+          changeRequestNumber: 8,
+          routedHeadRevision: "head-legacy",
+          mode: "enforce",
+          selectedActors: ["Actor:Absent/Case"],
+          originalPreferredActors: ["Actor:Absent/Case", "Actor:Legacy/8"],
+          originalEligibleActors: ["Actor:Absent/Case", "Actor:Legacy/8"],
+          requestedReviewerCount: 1,
+          policyCheckRunId: null,
+          policyCheckState: "not_started",
+        },
       ]);
-      await expect(
-        db.selectFrom("routing_decisions")
-          .select(["selected_reviewer", "selected_reviewers"])
-          .where("id", "=", decision.decisionId)
-          .executeTakeFirstOrThrow(),
-      ).resolves.toEqual({
-        selected_reviewer: "@user-c91e46",
-        selected_reviewers: ["@user-c91e46", "@user-b4e82d"],
-      });
-      await expect(findReviewerReplacementOutcome(db, {
-        absenceId: absence.id,
-        absenceRevision: absence.revision,
-        decisionId: decision.decisionId,
-      })).resolves.toBe("replaced");
-    });
-  });
-
-  it("does not replace a cohort for a skipped outcome when a caller requests it", async () => {
-    await withPostgresTestDatabase(async (db) => {
-      const repositoryId = await seedRepository(db);
-      const absence = await db
-        .insertInto("reviewer_absences")
-        .values({
-          reviewer_handle: "@user-d82a5f",
-          start_at: new Date("2026-08-31T12:00:00.000Z"),
-          end_at: new Date("2026-09-02T12:00:00.000Z"),
-        })
-        .returning(["id", "revision"])
-        .executeTakeFirstOrThrow();
-      const decision = await persistDecision(db, {
-        repositoryId,
-        deliveryId: "delivery-skipped-replacement",
-        pullNumber: 7,
-        headSha: "head-1",
-        mode: "enforce",
-        action: "request_human_review",
-        actionStatus: "pending",
-        riskScore: 35,
-        selectedReviewers: ["@user-d82a5f", "@user-b4e82d"],
-        details: {},
-      });
-
-      await expect(recordReviewerReplacement(db, {
-        absenceId: absence.id,
-        absenceRevision: absence.revision,
-        decisionId: decision.decisionId,
-        unavailableReviewer: "@user-d82a5f",
-        replacementReviewer: "@user-c91e46",
-        outcome: "skipped_approved",
-        reason: "already approved",
-        startedAt: new Date("2026-09-01T12:00:00.000Z"),
-        completedAt: new Date("2026-09-01T12:01:00.000Z"),
-        replaceCohort: true,
-      })).resolves.toEqual({ inserted: true });
-      await expect(
-        db.selectFrom("routing_decisions")
-          .select(["selected_reviewer", "selected_reviewers"])
-          .where("id", "=", decision.decisionId)
-          .executeTakeFirstOrThrow(),
-      ).resolves.toEqual({
-        selected_reviewer: "@user-d82a5f",
-        selected_reviewers: ["@user-d82a5f", "@user-b4e82d"],
-      });
-    });
-  });
-
-  it("does not replace a cohort for a successful outcome when the caller disables it", async () => {
-    await withPostgresTestDatabase(async (db) => {
-      const repositoryId = await seedRepository(db);
-      const absence = await db
-        .insertInto("reviewer_absences")
-        .values({
-          reviewer_handle: "@user-d82a5f",
-          start_at: new Date("2026-08-31T12:00:00.000Z"),
-          end_at: new Date("2026-09-02T12:00:00.000Z"),
-        })
-        .returning(["id", "revision"])
-        .executeTakeFirstOrThrow();
-      const decision = await persistDecision(db, {
-        repositoryId,
-        deliveryId: "delivery-non-mutating-replacement",
-        pullNumber: 7,
-        headSha: "head-1",
-        mode: "enforce",
-        action: "request_human_review",
-        actionStatus: "pending",
-        riskScore: 35,
-        selectedReviewers: ["@user-d82a5f", "@user-b4e82d"],
-        details: {},
-      });
-
-      await expect(recordReviewerReplacement(db, {
-        absenceId: absence.id,
-        absenceRevision: absence.revision,
-        decisionId: decision.decisionId,
-        unavailableReviewer: "@user-d82a5f",
-        replacementReviewer: "@user-c91e46",
-        outcome: "replaced",
-        reason: "shadow-only result",
-        startedAt: new Date("2026-09-01T12:00:00.000Z"),
-        completedAt: new Date("2026-09-01T12:01:00.000Z"),
-        replaceCohort: false,
-      })).resolves.toEqual({ inserted: true });
-      await expect(
-        db.selectFrom("routing_decisions")
-          .select(["selected_reviewer", "selected_reviewers"])
-          .where("id", "=", decision.decisionId)
-          .executeTakeFirstOrThrow(),
-      ).resolves.toEqual({
-        selected_reviewer: "@user-d82a5f",
-        selected_reviewers: ["@user-d82a5f", "@user-b4e82d"],
-      });
     });
   });
 });
@@ -569,11 +634,14 @@ async function readOutcome(db: Parameters<Parameters<typeof withPostgresTestData
 }
 
 async function seedRepository(db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0]): Promise<string> {
-  const installation = await db
-    .insertInto("installations")
+  const workspaceId = await ensureLocalWorkspace(db);
+  const connection = await db
+    .insertInto("provider_connections")
     .values({
-      github_installation_id: "99",
-      account_login: "acme",
+      workspace_id: workspaceId,
+      provider: "github",
+      external_connection_id: "99",
+      workspace_login: "acme",
       account_type: "Organization",
       status: "active",
       permissions: {},
@@ -583,8 +651,10 @@ async function seedRepository(db: Parameters<Parameters<typeof withPostgresTestD
   const repository = await db
     .insertInto("repositories")
     .values({
-      installation_id: installation.id,
-      github_repository_id: "101",
+      workspace_id: workspaceId,
+      provider: "github",
+      provider_connection_id: connection.id,
+      external_repository_id: "101",
       owner: "acme",
       name: "api",
       default_branch: "main",

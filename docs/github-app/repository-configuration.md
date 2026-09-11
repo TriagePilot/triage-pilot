@@ -1,6 +1,21 @@
 # Repository Configuration
 
-Place configuration at `.github/triagepilot.yml` in each selected repository. Missing configuration uses safe defaults in shadow mode.
+The canonical repository configuration path is `.triagepilot.yml` at the repository root. GitHub repositories may retain `.github/triagepilot.yml` as a compatibility fallback. When both files exist, the root file takes precedence. TriagePilot always reads repository configuration from the trusted base revision, never from an unmerged pull-request head.
+
+Missing configuration uses built-in safe defaults in shadow mode. Platforms may also supply workspace or organization configuration. A repository file replaces that configuration unless it opts into inheritance:
+
+Reviewer-availability schedules are deliberately outside this contract. They are centrally administered, workspace- and provider-connection-scoped operational records stored in PostgreSQL. TriagePilot neither reads absences from repository YAML nor writes availability changes back to a repository. Availability may narrow the configured eligible pool at a routing or replacement instant, but it cannot add an owner or fallback reviewer that this file did not make eligible.
+
+| Organization configuration | Repository configuration | Effective configuration |
+| --- | --- | --- |
+| absent | absent | built-in defaults (`mode: shadow`) |
+| present | absent | organization configuration over built-in defaults |
+| absent | present, `inheritance` omitted or `false` | repository configuration over built-in defaults |
+| present | present, `inheritance` omitted or `false` | repository configuration over built-in defaults; organization values are ignored |
+| absent | present, `inheritance: true` | repository configuration over built-in defaults |
+| present | present, `inheritance: true` | repository configuration merged over organization configuration, then built-in defaults |
+
+Organization documents use the same field names but may be partial and cannot declare `inheritance`. Repository documents in replacement mode may omit fields that have built-in defaults. `inheritance: true` additionally allows a repository to inherit omitted values from organization configuration. The `inheritance` control is removed before the effective configuration is validated for execution.
 
 ```yaml
 version: 1
@@ -34,6 +49,19 @@ ownership:
   fallback_reviewers: ["@sasha"]
 ```
 
+## Inheritance and merge rules
+
+Objects merge recursively. Repository scalar values replace organization values. Arrays place repository entries first, followed by organization entries whose normalized keys do not collide:
+
+- `risk.paths` entries are keyed by normalized `pattern`;
+- `risk.suppressors` entries are keyed by the sorted, normalized `if_all_match` set;
+- `ownership.rules` entries are keyed by the sorted, normalized `paths` set;
+- scalar arrays are keyed by their trimmed, lowercase value.
+
+Duplicate keyed entries and normalized duplicate values within one scalar array are invalid and reported at the duplicate entry. Version 1 has no deletion marker: `null` does not remove an inherited value, and empty arrays or objects do not clear inherited entries. Use replacement mode when organization values must be discarded.
+
+Every resolved configuration includes a SHA-256 hash of canonical JSON and leaf-level source attribution (`default`, `organization`, or `repository`). Hashing sorts object keys recursively while retaining effective array order. The dashboard and execution path consume this same resolved result, so the displayed source cannot drift from the value that is executed.
+
 Reviewer values must be individual GitHub user handles such as `@sasha`; organization team handles are not supported. Path patterns use glob syntax.
 
 Reviewer availability is set centrally by the administrator, not in this repository file. It may change future selected cohorts and outstanding cohorts without an effective approval, but it cannot expand this configuration's eligibility or revoke an effective GitHub approval.
@@ -56,7 +84,9 @@ In enforce mode, TriagePilot also synchronizes one risk label on each routed pul
 
 Draft pull requests are silently skipped by default: TriagePilot does not score them, select reviewers, store a decision, or make a GitHub write. Set `routing.include_draft_pull_requests: true` to route drafts normally. When the default is retained, GitHub's `ready_for_review` event routes the pull request using the trusted base configuration at that time.
 
-The only accepted mode values are `shadow` and `enforce`. This repository file is the sole write control: only an explicit `mode: enforce` in the pull request's trusted base commit permits GitHub actions. TriagePilot never reads this policy from the unmerged head commit, so a pull request cannot enable writes for itself. Missing configuration stays in shadow mode; invalid configuration records a configuration-failure decision and performs no write. Follow the [rollout guide](../operations/shadow-to-enforce.md) before enabling enforce mode.
+An administrator-triggered routing recovery uses the same contract. It fetches the pull request's current base, head, and draft state, then queues a fresh operator routing run. The worker resolves this file from the current trusted base when it processes that job; recovery does not snapshot, copy, or edit repository configuration through the operations UI.
+
+The only accepted mode values are `shadow` and `enforce`. In the OSS self-hosted composition, only a trusted repository document can authorize writes. Organization-only `mode: enforce` is forced to shadow; a repository using `inheritance: true` may deliberately inherit organization enforce because the trusted repository document opted into that policy. TriagePilot never reads this policy from the unmerged head commit, so a pull request cannot enable writes for itself. Missing configuration stays in shadow mode; invalid effective configuration records a configuration-failure decision and performs no write. Follow the [rollout guide](../operations/shadow-to-enforce.md) before enabling enforce mode.
 
 ## Required human-review policy
 

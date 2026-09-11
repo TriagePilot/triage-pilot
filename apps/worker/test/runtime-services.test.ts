@@ -1,304 +1,172 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import * as database from "@triagepilot/db";
-import type { HumanReviewPolicyDecision, ReviewerReplacementCandidate } from "@triagepilot/db";
+import { describe, expect, it, vi } from "vitest";
+import type { ReviewPolicyDecision } from "@triagepilot/application";
+import type { HumanReviewPolicyDecision } from "@triagepilot/db";
 
 import {
   createWorkerHumanReviewPolicyServiceFactory,
   createWorkerReviewerAvailabilityServiceFactory,
   createWorkerRoutingServiceFactory,
 } from "../src/runtime-services";
-import { processReviewerAbsenceActivationJob } from "../src/availability-processor";
 import { PermanentJobError } from "../src/errors";
 import type { RoutingJobMessage } from "../src/processor";
 import { processHumanReviewPolicyJob } from "../src/review-policy-processor";
 
 const message: RoutingJobMessage = {
-  kind: "process_pull_request",
+  kind: "process_change_request",
   deliveryId: "delivery-1",
-  installationId: "99",
-  repositoryId: "101",
-  owner: "acme",
-  repo: "api",
-  pullNumber: 7,
-  baseSha: "trusted-base-123",
-  headSha: "unmerged-head-456",
-  eventName: "pull_request.opened",
+  eventName: "change_request.opened",
+  workspaceId: "ws_local",
+  providerConnectionId: "99",
+  changeRequest: {
+    repository: { provider: "github", externalId: "101", owner: "acme", name: "api" },
+    externalId: "7",
+    number: 7,
+    baseRevision: "trusted-base-123",
+    headRevision: "unmerged-head-456",
+  },
+  isDraft: false,
+  routingKey: "routing:ws_local:github:101:7:trusted-base-123:unmerged-head-456",
 };
 
 const policyMessage = {
   kind: "evaluate_human_review_policy" as const,
   deliveryId: "review-delivery-1",
-  installationId: "99",
-  repositoryId: "101",
-  owner: "acme",
-  repo: "api",
-  pullNumber: 7,
+  workspaceId: "ws_local",
+  providerConnectionId: "99",
+  changeRequest: {
+    repository: { provider: "github" as const, externalId: "101", owner: "acme", name: "api" },
+    externalId: "7",
+    number: 7,
+  },
 };
 
-afterEach(() => {
-  vi.restoreAllMocks();
-});
+const availabilityMessage = {
+  kind: "activate_reviewer_absence" as const,
+  workspaceId: "ws_local",
+  provider: "github" as const,
+  providerConnectionId: "99",
+  absenceId: "absence-1",
+  absenceRevision: 2,
+};
 
-describe("worker reviewer-availability runtime", () => {
-  it("recreates an installation requester after transient requester construction failure", async () => {
-    const candidate = reviewerReplacementCandidate();
-    const request = vi.fn(async () => ({
-      data: {
-        state: "open",
-        head: { sha: candidate.headSha },
-        user: { login: "user-author" },
-      },
-    }));
-    const createRequester = vi.fn()
-      .mockRejectedValueOnce(new Error("installation token unavailable"))
-      .mockResolvedValue({ request });
+describe("worker reviewer availability runtime scope", () => {
+  it("rejects a wrong workspace before database, adapter, or credential composition", async () => {
+    const database = knownRepositoryDatabase();
+    const selectFrom = vi.spyOn(database, "selectFrom");
+    const getCredential = vi.fn(async () => { throw new Error("credentials must not be read"); });
+    const createAdapter = vi.fn(() => { throw new Error("adapter must not be composed"); });
     const services = createWorkerReviewerAvailabilityServiceFactory({
-      db: {} as never,
-      github: { appId: "123", privateKey: "test-private-key" },
-      createRequester: createRequester as never,
-    })({
-      kind: "activate_reviewer_absence",
-      absenceId: "018f4f38-63ee-7ced-9af8-c1783f8cf021",
-      expectedRevision: 1,
-    });
+      db: database as never,
+      credentialProvider: { getCredential },
+      createAdapter,
+    })(availabilityMessage);
 
-    await expect(services.fetchPullRequest(candidate)).rejects.toThrow("installation token unavailable");
-    await expect(services.fetchPullRequest(candidate)).resolves.toEqual({
-      state: "open",
-      headSha: candidate.headSha,
-      authorHandle: "@user-author",
-    });
-    expect(createRequester).toHaveBeenCalledTimes(2);
+    await expect(services.provider.inspectChangeRequest({
+      workspaceId: "ws-other",
+      providerConnectionId: "99",
+      repository: { provider: "github", externalId: "101", owner: "acme", name: "api" },
+      changeRequestId: "7",
+      changeRequestNumber: 7,
+    })).rejects.toThrow("reviewer availability target scope does not match claimed job");
+
+    expect(selectFrom).not.toHaveBeenCalled();
+    expect(getCredential).not.toHaveBeenCalled();
+    expect(createAdapter).not.toHaveBeenCalled();
   });
 
-  it("fails the stored policy check when decision-scoped GitHub discovery returns no match", async () => {
-    const candidate = reviewerReplacementCandidate();
-    const request = vi.fn(async (route: string, parameters: Record<string, unknown>) => {
-      if (route === "GET /repos/{owner}/{repo}/commits/{ref}/check-runs") {
-        return { data: { check_runs: [] } };
-      }
-      if (route === "PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}") {
-        return { data: parameters };
-      }
-      throw new Error(`unexpected GitHub route: ${route}`);
-    });
-    const services = createWorkerReviewerAvailabilityServiceFactory({
-      db: knownRepositoryDatabase() as never,
-      github: { appId: "123", privateKey: "test-private-key" },
-      createRequester: vi.fn(async () => ({ request })) as never,
-    })({
-      kind: "activate_reviewer_absence",
-      absenceId: "018f4f38-63ee-7ced-9af8-c1783f8cf021",
-      expectedRevision: 1,
-    });
+  it("rejects an unsupported claimed provider before database or credential access", () => {
+    const database = knownRepositoryDatabase();
+    const selectFrom = vi.spyOn(database, "selectFrom");
+    const getCredential = vi.fn(async () => { throw new Error("credentials must not be read"); });
 
-    await services.failPolicyCheck(candidate, "replacement unavailable");
-
-    expect(request).toHaveBeenLastCalledWith(
-      "PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}",
-      expect.objectContaining({
-        owner: candidate.owner,
-        repo: candidate.repo,
-        check_run_id: "71",
-        conclusion: "failure",
-      }),
+    expect(() => createWorkerReviewerAvailabilityServiceFactory({
+      db: database as never,
+      credentialProvider: { getCredential },
+    })({ ...availabilityMessage, provider: "gitlab" })).toThrow(
+      "reviewer availability provider is not configured: gitlab",
     );
+    expect(selectFrom).not.toHaveBeenCalled();
+    expect(getCredential).not.toHaveBeenCalled();
   });
 
-  it("reconciles a partially applied reviewer replacement without duplicate writes", async () => {
-    const harness = buildAvailabilityRetryHarness({ failFirstRequestResponse: true });
+  it("rejects malformed claimed scope before database, adapter, or credential composition", () => {
+    const database = knownRepositoryDatabase();
+    const selectFrom = vi.spyOn(database, "selectFrom");
+    const getCredential = vi.fn(async () => { throw new Error("credentials must not be read"); });
+    const createAdapter = vi.fn(() => { throw new Error("adapter must not be composed"); });
 
-    await expect(processReviewerAbsenceActivationJob(harness.activation, harness.services)).rejects.toThrow(
-      "transient response failure",
+    expect(() => createWorkerReviewerAvailabilityServiceFactory({
+      db: database as never,
+      credentialProvider: { getCredential },
+      createAdapter,
+    })({ ...availabilityMessage, absenceId: " " })).toThrow(
+      "reviewer absence activation job scope is malformed",
     );
-    await expect(
-      processReviewerAbsenceActivationJob(harness.activation, harness.services),
-    ).resolves.toBeUndefined();
-
-    expect(harness.mutationCalls("DELETE")).toHaveLength(1);
-    expect(harness.mutationCalls("POST")).toHaveLength(1);
-    expect(harness.recordReplacement).toHaveBeenCalledTimes(1);
-    expect(harness.recordReplacement).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      outcome: "replaced",
-      replacementReviewer: "@user-f30c8a",
-      replaceCohort: true,
-    }));
-    expect(database.findLatestHumanReviewPolicyDecision).toHaveBeenCalledTimes(1);
-  });
-
-  it("persists a replacement on retry when GitHub writes succeeded before a database failure", async () => {
-    const harness = buildAvailabilityRetryHarness({ failFirstRecord: true });
-
-    await expect(
-      processReviewerAbsenceActivationJob(harness.activation, harness.services),
-    ).rejects.toThrow("database record failed");
-    await expect(
-      processReviewerAbsenceActivationJob(harness.activation, harness.services),
-    ).resolves.toBeUndefined();
-
-    expect(harness.mutationCalls("DELETE")).toHaveLength(1);
-    expect(harness.mutationCalls("POST")).toHaveLength(1);
-    expect(harness.recordReplacement).toHaveBeenCalledTimes(2);
-    expect(database.findLatestHumanReviewPolicyDecision).toHaveBeenCalledTimes(1);
-  });
-
-  it("replays only policy evaluation after replacement history was persisted", async () => {
-    const harness = buildAvailabilityRetryHarness({ failFirstPolicyEvaluation: true });
-
-    await expect(
-      processReviewerAbsenceActivationJob(harness.activation, harness.services),
-    ).rejects.toThrow("policy evaluation unavailable");
-    await expect(
-      processReviewerAbsenceActivationJob(harness.activation, harness.services),
-    ).resolves.toBeUndefined();
-
-    expect(harness.mutationCalls("DELETE")).toHaveLength(1);
-    expect(harness.mutationCalls("POST")).toHaveLength(1);
-    expect(harness.recordReplacement).toHaveBeenCalledTimes(1);
-    expect(database.findReviewerReplacementOutcome).toHaveBeenCalledTimes(2);
-    expect(database.findLatestHumanReviewPolicyDecision).toHaveBeenCalledTimes(2);
-  });
-
-  it("returns from every shadow write service before constructing a requester", async () => {
-    const harness = buildAvailabilityRetryHarness({});
-    const shadowCandidate = { ...harness.candidate, mode: "shadow" as const };
-
-    await harness.services.removeReviewer(shadowCandidate, "@user-d82a5f");
-    await harness.services.requestReviewer(shadowCandidate, "@user-f30c8a");
-    await harness.services.reevaluatePolicy(shadowCandidate);
-    await harness.services.failPolicyCheck(shadowCandidate, "must remain read-only");
-
-    expect(harness.createRequester).not.toHaveBeenCalled();
+    expect(selectFrom).not.toHaveBeenCalled();
+    expect(getCredential).not.toHaveBeenCalled();
+    expect(createAdapter).not.toHaveBeenCalled();
   });
 });
-
-function buildAvailabilityRetryHarness(options: {
-  failFirstRequestResponse?: boolean;
-  failFirstRecord?: boolean;
-  failFirstPolicyEvaluation?: boolean;
-}) {
-  const candidate = reviewerReplacementCandidate();
-
-  const activation = {
-    kind: "activate_reviewer_absence" as const,
-    absenceId: "018f4f38-63ee-7ced-9af8-c1783f8cf021",
-    expectedRevision: 1,
-  };
-  let recordedOutcome: database.ReviewerReplacementOutcome | null = null;
-  let failRequestResponse = options.failFirstRequestResponse ?? false;
-  let failRecord = options.failFirstRecord ?? false;
-  let failPolicyEvaluation = options.failFirstPolicyEvaluation ?? false;
-  vi.spyOn(database, "loadReviewerAbsenceActivation").mockResolvedValue({
-    absenceId: activation.absenceId,
-    revision: activation.expectedRevision,
-    reviewerHandle: "@user-d82a5f",
-    startAt: new Date("2026-08-26T10:00:00.000Z"),
-    endAt: new Date("2026-08-27T10:00:00.000Z"),
-    candidates: [candidate],
-  });
-  vi.spyOn(database, "findReviewerReplacementOutcome").mockImplementation(async () => recordedOutcome);
-  vi.spyOn(database, "listReviewerAbsenceWindows").mockResolvedValue([]);
-  const recordReplacement = vi.spyOn(database, "recordReviewerReplacement").mockImplementation(async (_db, input) => {
-    if (failRecord) {
-      failRecord = false;
-      throw new Error("database record failed");
-    }
-    recordedOutcome = input.outcome;
-    return { inserted: true };
-  });
-  vi.spyOn(database, "findLatestHumanReviewPolicyDecision").mockResolvedValue({
-    decisionId: candidate.decisionId,
-    owner: candidate.owner,
-    repo: candidate.repo,
-    pullNumber: candidate.pullNumber,
-    headSha: candidate.headSha,
-    mode: candidate.mode,
-    action: "request_human_review",
-    selectedReviewers: ["@user-f30c8a"],
-    requiredApprovalCount: 1,
-    policyCheckRunId: "71",
-    policyCheckState: "in_progress",
-  });
-  vi.spyOn(database, "updatePolicyCheckState").mockResolvedValue();
-
-  const requested = new Set(["@user-d82a5f"]);
-  const request = vi.fn(async (route: string) => {
-    if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
-      return { data: { state: "open", head: { sha: candidate.headSha }, user: { login: "user-author" } } };
-    }
-    if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") return { data: [] };
-    if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers") {
-      return { data: { users: [...requested].map((reviewer) => ({ login: reviewer.slice(1) })) } };
-    }
-    if (route === "DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers") {
-      requested.delete("@user-d82a5f");
-      return { data: {} };
-    }
-    if (route === "POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers") {
-      requested.add("@user-f30c8a");
-      if (failRequestResponse) {
-        failRequestResponse = false;
-        throw new Error("transient response failure");
-      }
-      return { data: {} };
-    }
-    if (route === "GET /repos/{owner}/{repo}/commits/{ref}/check-runs") {
-      if (failPolicyEvaluation) {
-        failPolicyEvaluation = false;
-        throw new Error("policy evaluation unavailable");
-      }
-      return { data: { check_runs: [{
-        id: 71,
-        name: "triagepilot/human-review-policy",
-        external_id: candidate.decisionId,
-        status: "in_progress",
-        conclusion: null,
-        app: { id: 123 },
-      }] } };
-    }
-    throw new Error(`unexpected GitHub route: ${route}`);
-  });
-  const createRequester = vi.fn(async () => ({ request }));
-  const services = createWorkerReviewerAvailabilityServiceFactory({
-    db: knownRepositoryDatabase() as never,
-    github: { appId: "123", privateKey: "test-private-key" },
-    createRequester: createRequester as never,
-  })(activation);
-
-  return {
-    activation,
-    candidate,
-    services,
-    createRequester,
-    recordReplacement,
-    mutationCalls(method: "DELETE" | "POST") {
-      return request.mock.calls.filter(([route]) =>
-        route === `${method} /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers`
-      );
-    },
-  };
-}
-
-function reviewerReplacementCandidate(): ReviewerReplacementCandidate {
-  return {
-    decisionId: "decision-1",
-    installationId: "99",
-    repositoryId: "101",
-    owner: "acme",
-    repo: "api",
-    pullNumber: 7,
-    headSha: "unmerged-head-456",
-    mode: "enforce",
-    selectedReviewers: ["@user-d82a5f"],
-    originalEligibleReviewers: ["@user-d82a5f", "@user-f30c8a"],
-    originalPreferredReviewers: ["@user-d82a5f", "@user-f30c8a"],
-    requiredApprovalCount: 1,
-    policyCheckRunId: "71",
-    policyCheckState: "in_progress",
-  };
-}
 
 describe("worker routing GitHub reads", () => {
+  it("exposes a provider-neutral availability port without provider reads", async () => {
+    const request = vi.fn(async () => {
+      throw new Error("availability lookup must not use the provider");
+    });
+    const services = buildServices(message, request);
+    const at = new Date("2026-10-01T08:00:00.000Z");
+
+    await expect(services.availability.findActive({
+      workspaceId: "ws_local",
+      providerConnectionId: "99",
+      actors: [],
+      at,
+    })).resolves.toEqual([]);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("rejects a wrong-workspace availability lookup before repository or provider access", async () => {
+    const request = vi.fn(async () => {
+      throw new Error("scope rejection must not use the provider");
+    });
+    const database = knownRepositoryDatabase();
+    const selectFrom = vi.spyOn(database, "selectFrom");
+    const services = buildServices(message, request, database);
+
+    await expect(services.availability.findActive({
+      workspaceId: "ws-other",
+      providerConnectionId: "99",
+      actors: ["Actor:Preferred/7"],
+      at: new Date("2026-10-01T08:00:00.000Z"),
+    })).rejects.toEqual(new Error("availability lookup scope does not match routing job"));
+    expect(selectFrom).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("rejects a wrong-provider-connection availability lookup before repository or provider access", async () => {
+    const request = vi.fn(async () => {
+      throw new Error("scope rejection must not use the provider");
+    });
+    const database = knownRepositoryDatabase();
+    const selectFrom = vi.spyOn(database, "selectFrom");
+    const services = buildServices(message, request, database);
+
+    await expect(services.availability.findActive({
+      workspaceId: "ws_local",
+      providerConnectionId: "connection-other",
+      actors: ["Actor:Preferred/7"],
+      at: new Date("2026-10-01T08:00:00.000Z"),
+    })).rejects.toEqual(new Error("availability lookup scope does not match routing job"));
+    expect(selectFrom).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("does not expose a compatibility path that persists a decision without its event", () => {
+    const services = buildServices(message, configRequester());
+
+    expect(services).not.toHaveProperty("persistDecision");
+  });
+
   it("paginates changed files while preserving GitHub response order", async () => {
     const firstPage = [
       { filename: "src/first.ts", additions: 1, deletions: 0 },
@@ -340,14 +208,17 @@ describe("worker routing GitHub reads", () => {
     expect(request).toHaveBeenCalledWith("GET /repos/{owner}/{repo}/contents/{path}", {
       owner: "acme",
       repo: "api",
-      path: ".github/triagepilot.yml",
+      path: ".triagepilot.yml",
       ref: "trusted-base-123",
     });
   });
 
   it("resolves a legacy queued payload through the current PR base and never the head SHA", async () => {
     const request = configRequester();
-    const { baseSha: _baseSha, ...legacyMessage } = message;
+    const legacyMessage: RoutingJobMessage = {
+      ...message,
+      changeRequest: { ...message.changeRequest, baseRevision: "" },
+    };
     const services = buildServices(legacyMessage, request);
 
     await expect(services.fetchConfig(legacyMessage)).resolves.toBe("version: 1\nmode: shadow\n");
@@ -361,7 +232,7 @@ describe("worker routing GitHub reads", () => {
       ["GET /repos/{owner}/{repo}/contents/{path}", {
         owner: "acme",
         repo: "api",
-        path: ".github/triagepilot.yml",
+        path: ".triagepilot.yml",
         ref: "trusted-base-123",
       }],
     ]);
@@ -613,7 +484,10 @@ describe("worker routing GitHub reads", () => {
 
     await processHumanReviewPolicyJob(policyMessage, {
       ...services,
-      findDecision: async () => decision,
+      decisions: {
+        ...services.decisions,
+        findLatest: async () => applicationDecision(decision),
+      },
     });
 
     expect(request).toHaveBeenCalledWith(
@@ -636,7 +510,13 @@ describe("worker routing GitHub reads", () => {
     });
     const services = buildPolicyServices(request, db);
     const staleDecision = humanReviewDecision({ policyCheckRunId: "71", policyCheckState: "in_progress" });
-    const processingServices = { ...services, findDecision: async () => staleDecision };
+    const processingServices = {
+      ...services,
+      decisions: {
+        ...services.decisions,
+        findLatest: async () => applicationDecision(staleDecision),
+      },
+    };
 
     await expect(processHumanReviewPolicyJob(policyMessage, processingServices)).rejects.toThrow(
       "database state persistence failed",
@@ -739,15 +619,7 @@ describe("worker routing GitHub reads", () => {
       db: knownRepositoryDatabase() as never,
       github: { appId: "123", privateKey: "test-private-key" },
       createRequester,
-    })({
-      kind: "evaluate_human_review_policy",
-      deliveryId: "review-delivery-1",
-      installationId: "99",
-      repositoryId: "101",
-      owner: "acme",
-      repo: "api",
-      pullNumber: 7,
-    });
+    })(policyMessage);
     const decision: HumanReviewPolicyDecision = {
       decisionId: "decision-1",
       owner: "acme",
@@ -1181,6 +1053,23 @@ function humanReviewDecision(
   };
 }
 
+function applicationDecision(decision: HumanReviewPolicyDecision): ReviewPolicyDecision {
+  return {
+    decisionId: decision.decisionId,
+    workspaceId: policyMessage.workspaceId,
+    repository: policyMessage.changeRequest.repository,
+    changeRequestId: policyMessage.changeRequest.externalId,
+    changeRequestNumber: decision.pullNumber,
+    headRevision: decision.headSha,
+    mode: decision.mode,
+    action: decision.action,
+    selectedActors: decision.selectedReviewers,
+    ...(decision.requiredApprovalCount === undefined ? {} : { requiredApprovalCount: decision.requiredApprovalCount }),
+    policyCheckRunId: decision.policyCheckRunId,
+    policyCheckState: decision.policyCheckState,
+  };
+}
+
 function policyStateDatabase(input: {
   checkRunId?: string;
   state?: "in_progress" | "success" | "failure";
@@ -1210,7 +1099,7 @@ function policyStateDatabase(input: {
             select: () => ({
               where: () => ({
                 where: () => ({
-                  where: () => ({ executeTakeFirst: async () => ({ id: "repository-row-1" }) }),
+                  where: () => ({ executeTakeFirst: async () => ({ repositoryId: "repository-row-1", externalConnectionId: "123" }) }),
                 }),
               }),
             }),
@@ -1273,7 +1162,7 @@ function knownRepositoryDatabase(recordedCheckRunId?: string) {
               where: () => ({
                 where: () => ({
                   where: () => ({
-                    executeTakeFirst: async () => ({ id: "repository-row-1" }),
+                    executeTakeFirst: async () => ({ repositoryId: "repository-row-1", externalConnectionId: "123" }),
                   }),
                 }),
               }),
@@ -1336,7 +1225,7 @@ function evaluationPolicyDatabase(input: {
             select: () => ({
               where: () => ({
                 where: () => ({
-                  where: () => ({ executeTakeFirst: async () => ({ id: "repository-row-1" }) }),
+                  where: () => ({ executeTakeFirst: async () => ({ repositoryId: "repository-row-1", externalConnectionId: "123" }) }),
                 }),
               }),
             }),

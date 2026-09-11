@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import type { HumanReviewPolicyDeliveryInput, RoutingDeliveryInput } from "@triagepilot/db";
 
 import { createWebApp } from "../src/app";
 import { buildServices } from "./helpers";
@@ -8,7 +7,7 @@ describe("GitHub webhook route", () => {
   it.each([
     [{ login: "someone", type: "User" }, "account_scope"],
     [{ login: "other-org", type: "Organization" }, "account_scope"],
-  ])("acknowledges but ignores out-of-scope account %#", async (owner, ignored) => {
+  ])("acknowledges but ignores an out-of-scope repository owner %#", async (owner, ignored) => {
     const acceptRoutingDelivery = vi.fn();
     const logIgnoredWebhook = vi.fn();
     const app = createWebApp(
@@ -29,6 +28,29 @@ describe("GitHub webhook route", () => {
     expect(logIgnoredWebhook.mock.calls[0]?.[0]).not.toHaveProperty("body");
   });
 
+  it("rejects a personal account whose login matches the configured organization before enqueue", async () => {
+    const acceptRoutingDelivery = vi.fn();
+    const logIgnoredWebhook = vi.fn();
+    const app = createWebApp(
+      buildServices({ githubOrganization: "acme", acceptRoutingDelivery, logIgnoredWebhook }),
+    );
+
+    const response = await signedWebhook(
+      app,
+      pullRequestBody({ owner: { login: "acme", type: "User" } }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ ok: true, ignored: "account_scope" });
+    expect(acceptRoutingDelivery).not.toHaveBeenCalled();
+    expect(logIgnoredWebhook).toHaveBeenCalledWith({
+      eventName: "pull_request",
+      deliveryId: "delivery-1",
+      accountType: "User",
+      accountLogin: "acme",
+    });
+  });
+
   it("accepts a matching organization pull request with metadata only", async () => {
     const acceptRoutingDelivery = vi.fn(async () => ({ inserted: true, jobId: "job-1" }));
     const body = pullRequestBody({ owner: { login: "AcMe", type: "Organization" } });
@@ -46,36 +68,113 @@ describe("GitHub webhook route", () => {
       installation: { githubInstallationId: "99", accountLogin: "AcMe" },
       repository: { githubRepositoryId: "101", owner: "AcMe", name: "api" },
       payload: {
-        kind: "process_pull_request",
+        kind: "process_change_request",
         deliveryId: "delivery-1",
-        installationId: "99",
-        repositoryId: "101",
-        owner: "AcMe",
-        repo: "api",
-        pullNumber: 7,
-        baseSha: "trusted-base-123",
-        headSha: "abc123",
+        eventName: "change_request.opened",
+        changeRequest: {
+          repository: { provider: "github", externalId: "101", owner: "AcMe", name: "api" },
+          externalId: "7",
+          number: 7,
+          baseRevision: "trusted-base-123",
+          headRevision: "abc123",
+        },
         isDraft: false,
-        eventName: "pull_request.opened",
-        routingKey: "routing:101:7:trusted-base-123:abc123:ready",
+        routingKey: "routing:00000000-0000-4000-8000-000000000001:github:101:7:trusted-base-123:abc123:ready",
       },
     });
   });
 
-  it("queues ready-for-review routing separately after a draft with unchanged commits", async () => {
-    const acceptedDeliveries: RoutingDeliveryInput[] = [];
-    const acceptRoutingDelivery = async (input: RoutingDeliveryInput) => {
-      acceptedDeliveries.push(input);
-      return { inserted: true, jobId: "job-1" };
-    };
+  it("builds the routing job from the provider normalizer output", async () => {
+    const acceptRoutingDelivery = vi.fn(async () => ({ inserted: true, jobId: "job-1" }));
+    const normalizeGitHubWebhook = vi.fn(() => ({
+      deliveryId: "delivery-1",
+      eventName: "change_request" as const,
+      eventAction: "synchronize",
+      provider: "github" as const,
+      externalConnectionId: "provider-connection-9",
+      providerAccount: { login: "AcMe", type: "Organization" },
+      changeRequest: {
+        repository: {
+          provider: "github" as const,
+          externalId: "repository-77",
+          owner: "AcMe",
+          name: "normalized-api",
+        },
+        externalId: "42",
+        number: 42,
+        baseRevision: "normalized-base",
+        headRevision: "normalized-head",
+      },
+      actor: { externalId: "actor-5", displayName: "event-sender-71c9ab" },
+      isDraft: true,
+    }));
+    const app = createWebApp(buildServices({ acceptRoutingDelivery, normalizeGitHubWebhook }));
+
+    const response = await signedWebhook(
+      app,
+      pullRequestBody({ owner: { login: "raw-owner-must-be-ignored", type: "User" } }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ ok: true });
+    expect(normalizeGitHubWebhook).toHaveBeenCalledWith(expect.objectContaining({
+      eventName: "pull_request",
+      deliveryId: "delivery-1",
+    }));
+    expect(acceptRoutingDelivery).toHaveBeenCalledWith(expect.objectContaining({
+      eventAction: "synchronize",
+      installation: { githubInstallationId: "provider-connection-9", accountLogin: "AcMe" },
+      repository: { githubRepositoryId: "repository-77", owner: "AcMe", name: "normalized-api" },
+      payload: {
+        kind: "process_change_request",
+        deliveryId: "delivery-1",
+        eventName: "change_request.synchronize",
+        changeRequest: {
+          repository: {
+            provider: "github",
+            externalId: "repository-77",
+            owner: "AcMe",
+            name: "normalized-api",
+          },
+          externalId: "42",
+          number: 42,
+          baseRevision: "normalized-base",
+          headRevision: "normalized-head",
+        },
+        isDraft: true,
+        routingKey: "routing:00000000-0000-4000-8000-000000000001:github:repository-77:42:normalized-base:normalized-head:draft",
+      },
+    }));
+  });
+
+  it("passes an opened draft pull request to the worker for configuration-aware routing", async () => {
+    const acceptRoutingDelivery = vi.fn(async () => ({ inserted: true, jobId: "job-1" }));
     const app = createWebApp(buildServices({ githubOrganization: "acme", acceptRoutingDelivery }));
 
-    await signedWebhook(
+    const response = await signedWebhook(
+      app,
+      pullRequestBody({ owner: { login: "acme", type: "Organization" }, draft: true }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ ok: true });
+    expect(acceptRoutingDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({ isDraft: true }),
+      }),
+    );
+  });
+
+  it("creates a distinct ready routing delivery after a draft delivery with unchanged revisions", async () => {
+    const acceptRoutingDelivery = vi.fn(async () => ({ inserted: true, jobId: "job-1" }));
+    const app = createWebApp(buildServices({ githubOrganization: "acme", acceptRoutingDelivery }));
+
+    const draftResponse = await signedWebhook(
       app,
       pullRequestBody({ owner: { login: "acme", type: "Organization" }, draft: true }),
       { deliveryId: "delivery-draft" },
     );
-    await signedWebhook(
+    const readyResponse = await signedWebhook(
       app,
       pullRequestBody({
         owner: { login: "acme", type: "Organization" },
@@ -85,17 +184,24 @@ describe("GitHub webhook route", () => {
       { deliveryId: "delivery-ready" },
     );
 
-    expect(acceptedDeliveries).toHaveLength(2);
-    expect(acceptedDeliveries[0]?.payload).toMatchObject({
-      eventName: "pull_request.opened",
-      isDraft: true,
-      routingKey: "routing:101:7:trusted-base-123:abc123:draft",
-    });
-    expect(acceptedDeliveries[1]?.payload).toMatchObject({
-      eventName: "pull_request.ready_for_review",
-      isDraft: false,
-      routingKey: "routing:101:7:trusted-base-123:abc123:ready",
-    });
+    expect(draftResponse.status).toBe(202);
+    expect(readyResponse.status).toBe(202);
+    expect(acceptRoutingDelivery).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      deliveryId: "delivery-draft",
+      eventAction: "opened",
+      payload: expect.objectContaining({
+        isDraft: true,
+        routingKey: "routing:00000000-0000-4000-8000-000000000001:github:101:7:trusted-base-123:abc123:draft",
+      }),
+    }));
+    expect(acceptRoutingDelivery).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      deliveryId: "delivery-ready",
+      eventAction: "ready_for_review",
+      payload: expect.objectContaining({
+        isDraft: false,
+        routingKey: "routing:00000000-0000-4000-8000-000000000001:github:101:7:trusted-base-123:abc123:ready",
+      }),
+    }));
   });
 
   it.each(["edited", "labeled", "review_requested", "converted_to_draft"])(
@@ -129,7 +235,7 @@ describe("GitHub webhook route", () => {
   });
 
   it("enqueues a matching organization review with only policy-evaluation metadata", async () => {
-    const acceptHumanReviewPolicyDelivery = vi.fn(async (_delivery: HumanReviewPolicyDeliveryInput) => ({
+    const acceptHumanReviewPolicyDelivery = vi.fn(async (_delivery) => ({
       inserted: true,
       jobId: "job-review-1",
     }));
@@ -151,18 +257,42 @@ describe("GitHub webhook route", () => {
         eventName: "pull_request_review",
         payload: expect.objectContaining({
           kind: "evaluate_human_review_policy",
-          pullNumber: 7,
+          changeRequest: expect.objectContaining({ number: 7 }),
         }),
       }),
     );
     expect(acceptHumanReviewPolicyDelivery.mock.calls[0]?.[0]?.payload).toEqual({
       kind: "evaluate_human_review_policy",
       deliveryId: "delivery-review-1",
-      installationId: "99",
-      repositoryId: "101",
-      owner: "AcMe",
-      repo: "api",
-      pullNumber: 7,
+      changeRequest: {
+        repository: { provider: "github", externalId: "101", owner: "AcMe", name: "api" },
+        externalId: "7",
+        number: 7,
+      },
+    });
+  });
+
+  it("rejects a personal account pull request review whose login matches the configured organization before enqueue", async () => {
+    const acceptHumanReviewPolicyDelivery = vi.fn();
+    const logIgnoredWebhook = vi.fn();
+    const app = createWebApp(
+      buildServices({ githubOrganization: "acme", acceptHumanReviewPolicyDelivery, logIgnoredWebhook }),
+    );
+
+    const response = await signedWebhook(
+      app,
+      pullRequestReviewBody({ owner: { login: "acme", type: "User" } }),
+      { eventName: "pull_request_review", deliveryId: "delivery-review-personal" },
+    );
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ ok: true, ignored: "account_scope" });
+    expect(acceptHumanReviewPolicyDelivery).not.toHaveBeenCalled();
+    expect(logIgnoredWebhook).toHaveBeenCalledWith({
+      eventName: "pull_request_review",
+      deliveryId: "delivery-review-personal",
+      accountType: "User",
+      accountLogin: "acme",
     });
   });
 
@@ -366,8 +496,10 @@ const pullRequestBody = ({
   JSON.stringify({
     action,
     installation: { id: 99 },
+    sender: { id: 502, login: "event-sender-71c9ab" },
     repository: { id: 101, name: "api", owner },
     pull_request: {
+      id: 7001,
       number: 7,
       draft,
       base: { sha: "trusted-base-123" },
@@ -379,8 +511,15 @@ const pullRequestReviewBody = ({ owner }: { owner: { login: string; type: string
   JSON.stringify({
     action: "submitted",
     installation: { id: 99 },
+    sender: { id: 503, login: "reviewer-82df10" },
     repository: { id: 101, name: "api", owner },
-    pull_request: { number: 7 },
+    pull_request: {
+      id: 7001,
+      number: 7,
+      draft: false,
+      base: { sha: "trusted-base-123" },
+      head: { sha: "abc123" },
+    },
     review: {
       state: "approved",
       body: "This review body must not enter the durable job payload.",

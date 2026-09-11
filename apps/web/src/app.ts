@@ -37,7 +37,12 @@ export function createWebApp(services: WebServices, staticAssets?: StaticAssetRe
       await services.checkDatabase();
       return c.json({ ok: true, service: "triagepilot-web" });
     } catch {
-      console.error(formatLog({ level: "error", event: "health_database_failed", service: "web" }));
+      console.error(formatLog({
+        level: "error",
+        event: "health_database_failed",
+        service: "web",
+        workspaceId: services.workspaceId,
+      }));
       return c.json({ ok: false, service: "triagepilot-web" }, 503);
     }
   });

@@ -2,7 +2,7 @@
 
 TriagePilot is a self-hosted, risk-based pull request router for GitHub teams.
 
-It receives GitHub pull request events, scores PR risk, matches changed files to ownership rules, and records the routing decision and action outcome. Repositories default to shadow mode so teams can evaluate decisions before enabling GitHub writes.
+It receives GitHub pull request events, scores PR risk, matches changed files to ownership rules, and records the routing decision and action outcome. Central reviewer-availability schedules keep absent reviewers out of new and outstanding cohorts, and authenticated recovery can re-run routing from current GitHub state when an event was missed. Repositories default to shadow mode so teams can evaluate decisions before enabling GitHub writes.
 
 ## Self-Hosted Quickstart
 
@@ -28,7 +28,7 @@ Open `http://localhost:8787` and log in with `ADMIN_USERNAME` and `ADMIN_PASSWOR
 
 ## Deployment Model
 
-The supported public deployment is Docker Compose with `web`, exactly one `worker`, and PostgreSQL. One deployment manages one configured GitHub organization and multiple selected repositories in that organization.
+The supported public deployment is Docker Compose with `web`, exactly one `worker`, and PostgreSQL. One deployment manages one configured GitHub organization and multiple selected repositories in that organization. The administrator operates the deployment's deterministic local workspace; repository policy remains file-managed, while reviewer availability is centralized operational state.
 
 ## Documentation
 
@@ -36,9 +36,17 @@ The supported public deployment is Docker Compose with `web`, exactly one `worke
 - [Architecture](docs/architecture.md)
 - [Repository configuration](docs/github-app/repository-configuration.md)
 - [Reviewer availability](docs/operations/reviewer-availability.md)
+- [Job troubleshooting and routing recovery](docs/troubleshooting/jobs.md)
+- [Required human-review policy](docs/github-app/required-human-review-policy.md)
 - [Shadow-to-enforce rollout](docs/operations/shadow-to-enforce.md)
 - [Release checklist](docs/self-hosting/release-checklist.md)
 
 ## License
 
-TriagePilot is licensed under AGPL-3.0.
+Original TriagePilot code is released under the Functional Source License, Version 1.1, Apache 2.0 Future License (`FSL-1.1-Apache-2.0`). Current public versions are Fair Source and source-available, not OSI-approved open source.
+
+Organizations may use, modify, and self-host TriagePilot for their own internal use and access. During a version's FSL period, licensees may not make that version available to others in a competing commercial product or service as defined by the complete [license](LICENSE). This is not a blanket prohibition on commercial use.
+
+Each public version becomes available under Apache License 2.0 on the second anniversary of the date that version is made available. Public Git commits, packages, images, and releases can each establish availability; release manifests record artifact publication dates for provenance and do not delay a source-availability date already recorded in Git history.
+
+The public repository's product is the self-hosted application. Synchronized registry packages are public release artifacts required by the private SaaS dependency boundary; they are not a separately supported SDK, plugin platform, or community extension surface. The separate private SaaS repository remains proprietary and does not convert to Apache 2.0 under this policy.

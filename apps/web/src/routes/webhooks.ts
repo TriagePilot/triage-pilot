@@ -1,39 +1,21 @@
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { buildRoutingKey } from "@triagepilot/shared";
+import {
+  buildRoutingKey,
+  type HumanReviewPolicyJobPayload,
+  type RoutingJobPayload,
+  type WorkspaceId,
+} from "@triagepilot/contracts";
+import type { GitHubWebhookInput, NormalizedGitHubWebhookEvent } from "@triagepilot/provider-github";
 import type {
   GitHubInstallationMetadata,
   GitHubId,
   GitHubRepositoryMetadata,
-  HumanReviewPolicyJobPayload,
-  RoutingJobPayload,
 } from "@triagepilot/shared";
-
-const ROUTING_PULL_REQUEST_ACTIONS = new Set(["opened", "reopened", "synchronize", "ready_for_review"]);
 
 const githubIdSchema = z.number().int().safe().transform((id) => String(id));
 const accountSchema = z.object({ login: z.string(), type: z.string() });
 const repositorySchema = z.object({ id: githubIdSchema, name: z.string() });
-
-const pullRequestWebhookSchema = z.object({
-  action: z.string(),
-  installation: z.object({ id: githubIdSchema }),
-  repository: repositorySchema.extend({ owner: accountSchema }),
-  pull_request: z.object({
-    number: z.number(),
-    draft: z.boolean(),
-    base: z.object({ sha: z.string().trim().min(1) }),
-    head: z.object({ sha: z.string() }),
-  }),
-});
-
-const pullRequestReviewWebhookSchema = z.object({
-  action: z.string(),
-  installation: z.object({ id: githubIdSchema }),
-  repository: repositorySchema.extend({ owner: accountSchema }),
-  pull_request: z.object({ number: z.number() }),
-  review: z.object({ state: z.string().trim().min(1) }),
-});
 
 const installationWebhookSchema = z.object({
   action: z.string(),
@@ -57,8 +39,10 @@ interface IgnoredWebhookMetadata {
 
 export interface WebhookServices {
   githubOrganization: string;
+  workspaceId: WorkspaceId;
   getWebhookSecret(): Promise<string>;
   verifySignature(input: { body: string; secret: string; signature: string | null }): Promise<void>;
+  normalizeGitHubWebhook(input: GitHubWebhookInput): NormalizedGitHubWebhookEvent | null;
   acceptRoutingDelivery(input: {
     deliveryId: string;
     eventName: string;
@@ -66,7 +50,7 @@ export interface WebhookServices {
     hookId: string | null;
     installation: GitHubInstallationMetadata;
     repository: GitHubRepositoryMetadata;
-    payload: RoutingJobPayload;
+    payload: Omit<RoutingJobPayload, "workspaceId" | "providerConnectionId">;
   }): Promise<{ inserted: boolean; jobId: string | null }>;
   acceptHumanReviewPolicyDelivery(input: {
     deliveryId: string;
@@ -75,7 +59,7 @@ export interface WebhookServices {
     hookId?: string | null;
     installation: GitHubInstallationMetadata;
     repository: GitHubRepositoryMetadata;
-    payload: HumanReviewPolicyJobPayload;
+    payload: Omit<HumanReviewPolicyJobPayload, "workspaceId" | "providerConnectionId">;
   }): Promise<{ inserted: boolean; jobId: string | null }>;
   activateConfiguredInstallation(input: GitHubInstallationMetadata): Promise<void>;
   replaceInstallationRepositories(input: {
@@ -116,87 +100,62 @@ export function githubWebhookRoutes(services: WebhookServices) {
 
     const parsedBody = body ? (JSON.parse(body) as unknown) : {};
 
-    if (eventName === "pull_request") {
-      const payload = pullRequestWebhookSchema.parse(parsedBody);
-      const account = payload.repository.owner;
-      if (!isConfiguredOrganization(account, services.githubOrganization)) {
-        return ignoreAccount(c, services, eventName, deliveryId, account);
-      }
-      if (!ROUTING_PULL_REQUEST_ACTIONS.has(payload.action)) {
+    if (eventName === "pull_request" || eventName === "pull_request_review") {
+      const normalized = services.normalizeGitHubWebhook({ eventName, deliveryId, payload: parsedBody });
+      if (normalized === null) {
         return c.json({ ok: true, ignored: "action" as const }, 202);
       }
-
-      const routingPayload: RoutingJobPayload = {
-        kind: "process_pull_request",
-        deliveryId,
-        installationId: payload.installation.id,
-        repositoryId: payload.repository.id,
-        owner: account.login,
-        repo: payload.repository.name,
-        pullNumber: payload.pull_request.number,
-        baseSha: payload.pull_request.base.sha,
-        headSha: payload.pull_request.head.sha,
-        isDraft: payload.pull_request.draft,
-        eventName: `pull_request.${payload.action}`,
-        routingKey: buildRoutingKey({
-          repositoryId: payload.repository.id,
-          pullNumber: payload.pull_request.number,
-          baseSha: payload.pull_request.base.sha,
-          headSha: payload.pull_request.head.sha,
-          isDraft: payload.pull_request.draft,
-        }),
-      };
-      const accepted = await services.acceptRoutingDelivery({
-        deliveryId,
-        eventName,
-        eventAction: payload.action,
-        hookId: c.req.header("x-github-hook-id") ?? null,
-        installation: {
-          githubInstallationId: payload.installation.id,
-          accountLogin: account.login,
-        },
-        repository: {
-          githubRepositoryId: payload.repository.id,
-          owner: account.login,
-          name: payload.repository.name,
-        },
-        payload: routingPayload,
-      });
-      return accepted.inserted
-        ? c.json({ ok: true }, 202)
-        : c.json({ ok: true, duplicate: true as const }, 202);
-    }
-
-    if (eventName === "pull_request_review") {
-      const payload = pullRequestReviewWebhookSchema.parse(parsedBody);
-      const account = payload.repository.owner;
-      if (!isConfiguredOrganization(account, services.githubOrganization)) {
-        return ignoreAccount(c, services, eventName, deliveryId, account);
+      if (!isConfiguredOrganization(normalized.providerAccount, services.githubOrganization)) {
+        return ignoreAccount(c, services, eventName, deliveryId, normalized.providerAccount);
       }
 
-      const reviewPolicyPayload: HumanReviewPolicyJobPayload = {
+      if (normalized.eventName === "change_request") {
+        const routingPayload: Omit<RoutingJobPayload, "workspaceId" | "providerConnectionId"> = {
+          kind: "process_change_request",
+          deliveryId,
+          eventName: `${normalized.eventName}.${normalized.eventAction}`,
+          changeRequest: normalized.changeRequest,
+          isDraft: normalized.isDraft,
+          routingKey: buildRoutingKey({
+            workspaceId: services.workspaceId,
+            provider: normalized.provider,
+            repositoryId: normalized.changeRequest.repository.externalId,
+            changeRequestId: normalized.changeRequest.externalId,
+            trustedConfigRevision: normalized.changeRequest.baseRevision,
+            headRevision: normalized.changeRequest.headRevision,
+            isDraft: normalized.isDraft,
+          }),
+        };
+        const accepted = await services.acceptRoutingDelivery({
+          deliveryId,
+          eventName,
+          eventAction: normalized.eventAction,
+          hookId: c.req.header("x-github-hook-id") ?? null,
+          installation: toInstallationMetadata(normalized),
+          repository: toRepositoryMetadata(normalized),
+          payload: routingPayload,
+        });
+        return accepted.inserted
+          ? c.json({ ok: true }, 202)
+          : c.json({ ok: true, duplicate: true as const }, 202);
+      }
+
+      const reviewPolicyPayload: Omit<HumanReviewPolicyJobPayload, "workspaceId" | "providerConnectionId"> = {
         kind: "evaluate_human_review_policy",
         deliveryId,
-        installationId: payload.installation.id,
-        repositoryId: payload.repository.id,
-        owner: account.login,
-        repo: payload.repository.name,
-        pullNumber: payload.pull_request.number,
+        changeRequest: {
+          repository: normalized.changeRequest.repository,
+          externalId: normalized.changeRequest.externalId,
+          number: normalized.changeRequest.number,
+        },
       };
       const accepted = await services.acceptHumanReviewPolicyDelivery({
         deliveryId,
         eventName,
-        eventAction: payload.action,
+        eventAction: normalized.eventAction,
         hookId: c.req.header("x-github-hook-id") ?? null,
-        installation: {
-          githubInstallationId: payload.installation.id,
-          accountLogin: account.login,
-        },
-        repository: {
-          githubRepositoryId: payload.repository.id,
-          owner: account.login,
-          name: payload.repository.name,
-        },
+        installation: toInstallationMetadata(normalized),
+        repository: toRepositoryMetadata(normalized),
         payload: reviewPolicyPayload,
       });
       return accepted.inserted
@@ -259,6 +218,21 @@ export function githubWebhookRoutes(services: WebhookServices) {
   });
 
   return app;
+}
+
+function toInstallationMetadata(event: NormalizedGitHubWebhookEvent): GitHubInstallationMetadata {
+  return {
+    githubInstallationId: event.externalConnectionId,
+    accountLogin: event.changeRequest.repository.owner,
+  };
+}
+
+function toRepositoryMetadata(event: NormalizedGitHubWebhookEvent): GitHubRepositoryMetadata {
+  return {
+    githubRepositoryId: event.changeRequest.repository.externalId,
+    owner: event.changeRequest.repository.owner,
+    name: event.changeRequest.repository.name,
+  };
 }
 
 function isSupportedEvent(

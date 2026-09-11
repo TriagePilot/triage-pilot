@@ -184,9 +184,19 @@ describe("administrator authentication", () => {
 
     const sessionResponse = await app.request("/api/auth/session", { headers: { cookie } });
     expect(sessionResponse.status).toBe(200);
-    expect(await sessionResponse.json()).toEqual({ authenticated: true, username: "admin" });
+    expect(await sessionResponse.json()).toEqual({
+      authenticated: true,
+      username: "admin",
+      workspaceId: "00000000-0000-4000-8000-000000000001",
+    });
 
-    expect((await app.request("/api/operations/overview", { headers: { cookie } })).status).toBe(200);
+    expect(
+      (
+        await app.request("/api/operations/overview", {
+          headers: { cookie, "x-triagepilot-workspace": "00000000-0000-4000-8000-000000000001" },
+        })
+      ).status,
+    ).toBe(200);
     expect(
       (
         await app.request("/api/operations/overview", {

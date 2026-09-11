@@ -2,31 +2,17 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
-import { getConnInfo } from "@hono/node-server/conninfo";
-import { createDatabase } from "@triagepilot/db";
-import { verifyGitHubSignature } from "@triagepilot/github";
 
 import { createWebApp, type StaticAsset } from "./app";
+import { createSelfHostedWebComposition } from "./composition/self-hosted";
 import { readWebRuntimeEnv } from "./runtime-env";
-import { createWebRuntimeServices } from "./runtime-services";
 
 const env = await readWebRuntimeEnv(process.env);
-const db = createDatabase(env.databaseUrl);
+const composition = await createSelfHostedWebComposition(env);
 const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist/public");
 
 const app = createWebApp(
-  createWebRuntimeServices({
-    db,
-    adminUsername: env.adminUsername,
-    adminPassword: env.adminPassword,
-    sessionSecret: env.sessionSecret,
-    secureCookies: env.secureCookies,
-    now: () => new Date(),
-    sourceAddress: (c) => getConnInfo(c).remote.address ?? "unknown",
-    githubOrganization: env.githubOrganization,
-    github: env.github,
-    verifySignature: verifyGitHubSignature,
-  }),
+  composition.services,
   {
     async readAsset(assetPath) {
       return readPublicAsset(publicDir, assetPath);

@@ -36,15 +36,18 @@ describe("GET /health", () => {
     expect(await response.json()).toEqual({ ok: false, service: "triagepilot-web" });
     expect(writeError).toHaveBeenCalledOnce();
     const record = String(writeError.mock.calls[0]?.[0]);
-    expect(Object.keys(JSON.parse(record))).toEqual(["timestamp", "level", "event", "service"]);
+    expect(Object.keys(JSON.parse(record))).toEqual(["timestamp", "level", "event", "service", "workspaceId"]);
     expect(JSON.parse(record)).toMatchObject({
       level: "error",
       event: "health_database_failed",
       service: "web",
+      workspaceId: "00000000-0000-4000-8000-000000000001",
     });
     expect(record).not.toContain("connection refused");
     expect(record).not.toContain("postgres://");
     expect(record).not.toContain("secret");
+    expect(record).not.toContain("DATABASE_URL");
+    expect(record).not.toContain("GITHUB_WEBHOOK_SECRET");
   });
 });
 

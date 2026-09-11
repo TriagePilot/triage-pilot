@@ -1,0 +1,43 @@
+{
+  "name": "@triagepilot/ui",
+  "version": "0.1.0",
+  "license": "FSL-1.1-Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TriagePilot/triage-pilot.git",
+    "directory": "packages/ui"
+  },
+  "type": "module",
+  "files": ["dist", "LICENSE"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./styles.css": "./dist/styles.css"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json && node ../../scripts/prepare-package.mjs --package . --asset src/styles.css=dist/styles.css",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "prepack": "node ../../scripts/prepare-package.mjs --package . --asset src/styles.css=dist/styles.css",
+    "postpack": "node ../../scripts/prepare-package.mjs --package . --cleanup"
+  },
+  "dependencies": {
+    "@triagepilot/contracts": "workspace:0.1.0"
+  },
+  "peerDependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

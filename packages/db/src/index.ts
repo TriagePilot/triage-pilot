@@ -1,91 +1,121 @@
 export {
   buildNextRunAt,
-  createJobQueue,
+  createJobClaimer,
+  createWorkspaceJobQueue,
+  prepareClaimedReviewerMutationIntent,
+  runClaimedReviewerProviderMutation,
   type EnqueueJobInput,
   type JobKind,
   type JobLease,
-  type JobQueue,
+  type JobClaimer,
   type JobRecord,
   type JobRecovery,
   type JobStatus,
   type JobTransitionResult,
+  ReviewerMutationLeaseUnavailableError,
+  type WorkspaceJobQueue,
   recoverStaleJobs,
-} from "./jobs";
-export { createDatabase } from "./database";
+} from "./jobs.js";
+export { createDatabase } from "./database.js";
 export {
-  ReviewerAbsenceConflictError,
-  ReviewerAbsenceNotFoundError,
-  ReviewerAbsenceRevisionError,
-  ReviewerAbsenceValidationError,
-  cancelReviewerAbsence,
-  createReviewerAbsence,
-  findReviewerReplacementOutcome,
-  listReviewerAbsenceWindows,
-  loadReviewerAbsenceActivation,
-  normalizeReviewerHandle,
-  readAvailabilityOverview,
-  recordReviewerReplacement,
-  updateOrganizationTimezone,
-  updateReviewerAbsence,
-  type AvailabilityOverview,
-  type RecordReviewerReplacementInput,
-  type RecordReviewerReplacementResult,
-  type ReviewerAbsenceActivation,
-  type ReviewerAbsenceMutation,
-  type ReviewerAbsenceStatus,
-  type ReviewerAbsenceView,
-  type ReviewerAbsenceWindow,
-  type ReviewerReplacementOutcome,
-  type ReviewerReplacementView,
-} from "./availability";
-export {
+  findReviewerReplacementCandidates,
   markActionFailed,
   markActionSucceeded,
   findLatestHumanReviewPolicyDecision,
-  findReviewerReplacementCandidates,
   persistDecision,
+  persistDecisionWithEvent,
   recordPolicyCheck,
   updatePolicyCheckState,
   type DecisionInput,
   type HumanReviewPolicyDecision,
   type PersistedDecision,
-  type ReviewerReplacementCandidate,
-} from "./decisions";
+  type PersistedDecisionEventContext,
+  type ReviewerReplacementCandidateDecision,
+} from "./decisions.js";
+export {
+  ProviderConnectionUnavailableError,
+  ReviewerAbsenceConflictError,
+  ReviewerAbsenceRevisionError,
+  ReviewerAvailabilityValidationError,
+  createWorkspaceReviewerAvailability,
+  prepareMutationIntentTransaction,
+  type CancelAbsenceInput,
+  type PersistReviewerReplacementInput,
+  type PersistReviewerReplacementResult,
+  type PrepareReviewerMutationIntentInput,
+  type ReviewerAbsence,
+  type ReviewerAbsenceActivation,
+  type ReviewerAbsenceWindow,
+  type ReviewerReplacement,
+  type ReviewerMutationIntent,
+  type ReviewerMutationIntentKey,
+  type ReviewerReplacementState,
+  type ReviseAbsenceInput,
+  type ScheduleAbsenceInput,
+  type WorkspaceOperationalSettings,
+  type WorkspaceReviewerAvailability,
+} from "./availability.js";
+export {
+  claimPlatformEvents,
+  createPlatformOutboxRepository,
+  markPlatformEventPublished,
+  publishPlatformOutbox,
+  stagePlatformEvent,
+  type PlatformOutboxRecord,
+  type PlatformOutboxRepository,
+} from "./outbox.js";
 export {
   acceptHumanReviewPolicyDelivery,
   acceptRoutingDelivery,
   type HumanReviewPolicyDeliveryInput,
   type RoutingDeliveryInput,
-} from "./deliveries";
-export { readWorkerHeartbeat, updateWorkerHeartbeat, type WorkerHeartbeat } from "./heartbeat";
+} from "./deliveries.js";
+export { readWorkerHeartbeat, updateWorkerHeartbeat, type WorkerHeartbeat } from "./heartbeat.js";
 export {
+  createWorkspaceRoutingRecoveryRepository,
+  enqueueRoutingRecovery,
+  findActiveExternalConnectionId,
+  findActiveRecoveryRepository,
   findRoutingRecoveryTarget,
-  type FindRoutingRecoveryTargetInput,
+  type RoutingRecoveryEnqueueInput,
   type RoutingRecoveryTarget,
-} from "./routing-recovery";
+  type RoutingRecoveryTargetRequest,
+  type WorkspaceRoutingRecoveryRepository,
+} from "./routing-recovery.js";
 export {
+  findRepositoryConfigurationTarget,
   readOperationsOverview,
   type ActionFailureOverview,
   type DecisionOverview,
   type JobFailureOverview,
   type OperationsOverview,
+  type RepositoryConfigurationTarget,
   type ReadOperationsOverviewInput,
   type RepositoryOverview,
-} from "./operations";
+} from "./operations.js";
 export {
-  activateConfiguredInstallation,
-  deleteConfiguredInstallation,
-  replaceInstallationRepositories,
-  suspendConfiguredInstallation,
-  updateInstallationRepositories,
-  upsertConfiguredInstallation,
-  type ConfiguredInstallationInput,
-  type InstallationRepositoryUpdateInput,
-} from "./installations";
+  activateConfiguredProviderConnection,
+  cleanupRevokedProviderConnections,
+  replaceProviderConnectionRepositories,
+  revokeConfiguredProviderConnection,
+  suspendConfiguredProviderConnection,
+  updateProviderConnectionRepositories,
+  upsertConfiguredProviderConnection,
+  type ConfiguredProviderConnectionInput,
+  type ProviderConnectionMetadata,
+  type ProviderConnectionRepositoryUpdateInput,
+  type ProviderRepositoryMetadata,
+} from "./provider-connections.js";
 export {
   applyFixedRetention,
   DECISION_AND_FAILURE_DAYS,
   RECEIPT_AND_COMPLETED_JOB_DAYS,
-} from "./retention";
-export { runMigrations } from "./migrate";
-export type { Database, WorkerHeartbeatTable } from "./kysely";
+} from "./retention.js";
+export { runMigrations } from "./migrate.js";
+export type { Database, DecisionOutboxTable, WorkerHeartbeatTable } from "./kysely.js";
+export {
+  createWorkspaceRepositories,
+  ensureLocalWorkspace,
+  LOCAL_WORKSPACE_EXTERNAL_KEY,
+  type WorkspaceRepositories,
+} from "./workspaces.js";

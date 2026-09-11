@@ -1,6 +1,6 @@
 import type { Kysely } from "kysely";
 
-import type { Database } from "./kysely";
+import type { Database } from "./kysely.js";
 
 export interface WorkerHeartbeat {
   workerId: string;

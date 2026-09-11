@@ -1,108 +1,88 @@
 import {
+  ProviderConnectionUnavailableError,
   ReviewerAbsenceConflictError,
-  ReviewerAbsenceNotFoundError,
   ReviewerAbsenceRevisionError,
-  ReviewerAbsenceValidationError,
-  type AvailabilityOverview,
+  ReviewerAvailabilityValidationError,
 } from "@triagepilot/db";
-import { Hono, type Context } from "hono";
+import type {
+  AvailabilitySettingsOverview,
+  ReviewerAbsenceOverview,
+  ReviewerReplacementOverview,
+} from "@triagepilot/ui";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
 
 import {
   AvailabilityInputError,
-  parseAbsenceBody,
+  parseAvailabilityBody,
+  parseAvailabilityMutation,
   parseCancellationInput,
-  parseLocalAbsenceInput,
   parseTimezoneInput,
 } from "../availability-input";
 import { requireAdminSession, type AdminSessionServices } from "./auth";
 
 export interface AvailabilityServices extends AdminSessionServices {
-  readAvailabilityOverview(input: { now: Date }): Promise<AvailabilityOverview>;
-  updateOrganizationTimezone(input: { timezone: string; now: Date }): Promise<void>;
-  createReviewerAbsence(input: {
-    reviewerHandle: string;
-    startAt: Date;
-    endAt: Date;
-    now: Date;
-  }): Promise<unknown>;
-  updateReviewerAbsence(input: {
-    absenceId: string;
-    expectedRevision: number;
-    reviewerHandle: string;
-    startAt: Date;
-    endAt: Date;
-    now: Date;
-  }): Promise<unknown>;
-  cancelReviewerAbsence(input: { absenceId: string; expectedRevision: number; now: Date }): Promise<unknown>;
+  readAvailabilitySettings(): Promise<AvailabilitySettingsOverview>;
+  updateAvailabilityTimezone(input: { timezone: string; now: Date }): Promise<AvailabilitySettingsOverview>;
+  listReviewerAbsences(): Promise<ReviewerAbsenceOverview[]>;
+  scheduleReviewerAbsence(input: {
+    externalActorId: string; startAt: Date; endAt: Date; now: Date;
+  }): Promise<ReviewerAbsenceOverview>;
+  reviseReviewerAbsence(input: {
+    absenceId: string; expectedRevision: number; externalActorId: string; startAt: Date; endAt: Date; now: Date;
+  }): Promise<ReviewerAbsenceOverview>;
+  cancelReviewerAbsence(input: {
+    absenceId: string; expectedRevision: number; now: Date;
+  }): Promise<ReviewerAbsenceOverview>;
+  listReviewerReplacementHistory(absenceId?: string): Promise<ReviewerReplacementOverview[]>;
 }
 
 export function availabilityRoutes(services: AvailabilityServices) {
   const app = new Hono();
-  const requireAdmin = requireAdminSession(services);
+  const guards = [requireAdminSession(services), requireBoundWorkspace(services)] as const;
 
-  app.get("/", requireAdmin, async (c) => {
+  app.get("/timezone", ...guards, async (c) => handleAvailabilityError(c, async () => c.json(await services.readAvailabilitySettings())));
+  app.put("/timezone", ...guards, async (c) => handleAvailabilityError(c, async () => {
+    const timezone = parseTimezoneInput(await readJson(c));
+    return c.json(await services.updateAvailabilityTimezone({ timezone, now: services.now() }));
+  }));
+  app.get("/absences", ...guards, async (c) => handleAvailabilityError(c, async () => c.json(await services.listReviewerAbsences())));
+  app.post("/absences", ...guards, async (c) => handleAvailabilityError(c, async () => {
     const now = services.now();
-    return c.json(await services.readAvailabilityOverview({ now }));
-  });
-
-  app.put("/timezone", requireAdmin, async (c) =>
-    handleAvailabilityError(c, async () => {
-      const now = services.now();
-      const timezone = parseTimezoneInput(await readJson(c));
-      await services.updateOrganizationTimezone({ timezone, now });
-      return c.json(await services.readAvailabilityOverview({ now }));
-    }),
-  );
-
-  app.post("/absences", requireAdmin, async (c) =>
-    handleAvailabilityError(c, async () => {
-      const now = services.now();
-      const current = await services.readAvailabilityOverview({ now });
-      const absence = parseLocalAbsenceInput({ ...parseAbsenceBody(await readJson(c)), timezone: current.timezone });
-      await services.createReviewerAbsence({
-        reviewerHandle: absence.reviewerHandle,
-        startAt: absence.startAt,
-        endAt: absence.endAt,
-        now,
-      });
-      return c.json(await services.readAvailabilityOverview({ now }));
-    }),
-  );
-
-  app.put("/absences/:id", requireAdmin, async (c) =>
-    handleAvailabilityError(c, async () => {
-      const now = services.now();
-      const current = await services.readAvailabilityOverview({ now });
-      const absence = parseLocalAbsenceInput({ ...parseAbsenceBody(await readJson(c)), timezone: current.timezone });
-      if (absence.expectedRevision === undefined) {
-        throw new AvailabilityInputError([{ field: "expectedRevision", message: "Expected revision is required." }]);
-      }
-      await services.updateReviewerAbsence({
-        absenceId: c.req.param("id"),
-        expectedRevision: absence.expectedRevision,
-        reviewerHandle: absence.reviewerHandle,
-        startAt: absence.startAt,
-        endAt: absence.endAt,
-        now,
-      });
-      return c.json(await services.readAvailabilityOverview({ now }));
-    }),
-  );
-
-  app.post("/absences/:id/cancel", requireAdmin, async (c) =>
-    handleAvailabilityError(c, async () => {
-      const now = services.now();
-      const cancellation = parseCancellationInput(await readJson(c));
-      await services.cancelReviewerAbsence({
-        absenceId: c.req.param("id"),
-        expectedRevision: cancellation.expectedRevision,
-        now,
-      });
-      return c.json(await services.readAvailabilityOverview({ now }));
-    }),
-  );
-
+    const settings = await services.readAvailabilitySettings();
+    const parsed = parseAvailabilityMutation({ ...parseAvailabilityBody(await readJson(c)), timezone: settings.timezone });
+    return c.json(await services.scheduleReviewerAbsence({ ...parsed, now }), 201);
+  }));
+  app.put("/absences/:id", ...guards, async (c) => handleAvailabilityError(c, async () => {
+    const now = services.now();
+    const settings = await services.readAvailabilitySettings();
+    const parsed = parseAvailabilityMutation({ ...parseAvailabilityBody(await readJson(c)), timezone: settings.timezone });
+    if (parsed.expectedRevision === undefined) {
+      throw new AvailabilityInputError([{ field: "expectedRevision", message: "Expected revision is required." }]);
+    }
+    return c.json(await services.reviseReviewerAbsence({
+      absenceId: c.req.param("id"), ...parsed, expectedRevision: parsed.expectedRevision, now,
+    }));
+  }));
+  app.post("/absences/:id/cancel", ...guards, async (c) => handleAvailabilityError(c, async () => {
+    const { expectedRevision } = parseCancellationInput(await readJson(c));
+    return c.json(await services.cancelReviewerAbsence({
+      absenceId: c.req.param("id"), expectedRevision, now: services.now(),
+    }));
+  }));
+  app.get("/replacements", ...guards, async (c) => handleAvailabilityError(c, async () => {
+    const absenceId = c.req.query("absenceId")?.trim();
+    return c.json(await services.listReviewerReplacementHistory(absenceId || undefined));
+  }));
   return app;
+}
+
+function requireBoundWorkspace(services: AvailabilityServices): MiddlewareHandler {
+  return async (c, next) => {
+    if (c.req.header("x-triagepilot-workspace") !== services.workspaceId) {
+      return c.json({ error: "workspace_scope_mismatch" }, 403);
+    }
+    await next();
+  };
 }
 
 async function readJson(c: Context): Promise<unknown> {
@@ -117,23 +97,14 @@ async function handleAvailabilityError(c: Context, action: () => Promise<Respons
   try {
     return await action();
   } catch (error) {
-    if (error instanceof AvailabilityInputError) {
-      return c.json({ error: "validation_failed", issues: error.issues }, 422);
+    if (error instanceof AvailabilityInputError) return c.json({ error: "validation_failed", issues: error.issues }, 422);
+    if (error instanceof ReviewerAvailabilityValidationError) {
+      return c.json({ error: "validation_failed", issues: [{ field: "body", message: error.message }] }, 422);
     }
-    if (error instanceof ReviewerAbsenceValidationError) {
-      return c.json({
-        error: "validation_failed",
-        issues: [{ field: "body", message: error.message }],
-      }, 422);
-    }
-    if (error instanceof ReviewerAbsenceConflictError) {
-      return c.json({ error: "conflict", message: error.message }, 422);
-    }
-    if (error instanceof ReviewerAbsenceNotFoundError) {
-      return c.json({ error: "not_found", message: error.message }, 404);
-    }
-    if (error instanceof ReviewerAbsenceRevisionError) {
-      return c.json({ error: "revision_conflict", message: error.message }, 409);
+    if (error instanceof ReviewerAbsenceConflictError) return c.json({ error: "conflict", message: error.message }, 422);
+    if (error instanceof ReviewerAbsenceRevisionError) return c.json({ error: "revision_conflict", message: error.message }, 409);
+    if (error instanceof ProviderConnectionUnavailableError) {
+      return c.json({ error: "availability_unavailable", message: "Reviewer availability is unavailable." }, 404);
     }
     throw error;
   }
