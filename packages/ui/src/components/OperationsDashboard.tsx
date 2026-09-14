@@ -16,6 +16,7 @@ export interface OperationsDashboardProps {
   initialOverview?: OperationsOverview;
   headerActions?: ReactNode;
   onUnauthorized?(message: string): void;
+  onOverviewChange?(overview: OperationsOverview): void;
 }
 
 type LoadState =
@@ -37,6 +38,7 @@ function OperationsDashboardWorkspace({
   initialOverview,
   headerActions,
   onUnauthorized,
+  onOverviewChange,
 }: OperationsDashboardProps) {
   const [state, setState] = useState<LoadState>(() => !authorization.canViewOperations
     ? { status: "failed", message: "Operations are not available for this workspace." }
@@ -55,7 +57,9 @@ function OperationsDashboardWorkspace({
     }
     setState({ status: "loading" });
     try {
-      setState({ status: "ready", overview: await api.readOperationsOverview(workspace) });
+      const overview = await api.readOperationsOverview(workspace);
+      setState({ status: "ready", overview });
+      onOverviewChange?.(overview);
     } catch (caught) {
       if (isUnauthorized(caught)) {
         onUnauthorized?.(messageFrom(caught, "The operations session has expired."));

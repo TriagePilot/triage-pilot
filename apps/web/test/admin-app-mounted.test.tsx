@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OperationsOverview } from "@triagepilot/db";
 
 import { App, Dashboard } from "../src/admin/App";
+import { createSelfHostedOperationsApi } from "../src/admin/api";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -21,6 +22,42 @@ afterEach(async () => {
 });
 
 describe("mounted admin application", () => {
+  it("keeps sidebar worker health in sync when recovery refreshes the ledger", async () => {
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      if (input === "/api/operations/routing-runs") return Response.json({ jobId: "job-2" });
+      if (input === "/api/operations/overview") {
+        return Response.json({
+          ...emptyOverview,
+          worker: { available: false, workerId: null, lastHeartbeatAt: null },
+        });
+      }
+      if (input === "/api/operations/availability/timezone") {
+        return Response.json({ timezone: "UTC", updatedAt: "2026-08-18T10:00:00.000Z" });
+      }
+      if (input === "/api/operations/availability/absences") return Response.json([]);
+      if (input === "/api/operations/availability/replacements") return Response.json([]);
+      throw new Error(`unexpected request to ${String(input)}`);
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <Dashboard username="admin" overview={emptyOverview} api={createSelfHostedOperationsApi()} onLogout={async () => {}} />,
+      );
+      await flushAsyncWork();
+    });
+    expect(container.querySelector(".worker-summary strong")?.textContent).toBe("Worker healthy");
+
+    await act(async () => {
+      buttonNamed(container, "Re-run routing")?.click();
+      await flushAsyncWork();
+    });
+    expect(container.querySelector(".status-ledger")?.textContent).toContain("Worker unavailable");
+    expect(container.querySelector(".worker-summary strong")?.textContent).toBe("Worker unavailable");
+  });
+
   it("tracks the selected operations section in navigation and breadcrumb", async () => {
     const previousHash = window.location.hash;
     const container = document.createElement("div");

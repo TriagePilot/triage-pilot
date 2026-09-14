@@ -244,7 +244,7 @@ export function LoginScreen({ error, submitting, onSubmit }: LoginScreenProps) {
             {pending ? "Signing in…" : <>Sign in <span aria-hidden="true">→</span></>}
           </button>
         </form>
-        <div className="session-note"><UiIcon name="lock" />Encrypted administrator session</div>
+        <div className="session-note"><UiIcon name="lock" />Protected administrator session</div>
       </section>
     </main>
   );
@@ -279,7 +279,10 @@ export function Dashboard({
   );
   const effectiveRepository = overview?.repositories[0];
   const hasConfiguration = Boolean(effectiveConfiguration && effectiveRepository);
+  const [currentOverview, setCurrentOverview] = useState(overview);
   const [activeSection, setActiveSection] = useState<SectionId>(() => sectionFromHash(hasConfiguration));
+
+  useEffect(() => setCurrentOverview(overview), [overview]);
 
   useEffect(() => {
     const updateSection = () => setActiveSection(sectionFromHash(hasConfiguration));
@@ -311,10 +314,10 @@ export function Dashboard({
           <span className="nav-label nav-label--secondary">Administration</span>
           {sectionLink("system-health", "health")}
         </nav>
-        <div className={`worker-summary ${overview?.worker.available ? "worker-summary--healthy" : "worker-summary--failed"}`}>
+        <div className={`worker-summary ${currentOverview?.worker.available ? "worker-summary--healthy" : "worker-summary--failed"}`}>
           <span aria-hidden="true" />
-          <strong>{overview?.worker.available ? "Worker healthy" : "Worker unavailable"}</strong>
-          <small>{overview?.worker.lastHeartbeatAt ? `Heartbeat ${new Intl.RelativeTimeFormat("en", { numeric: "auto" }).format(Math.round((new Date(overview.worker.lastHeartbeatAt).getTime() - Date.now()) / 60000), "minute")}` : "No heartbeat recorded"}</small>
+          <strong>{currentOverview?.worker.available ? "Worker healthy" : "Worker unavailable"}</strong>
+          <small>{currentOverview?.worker.lastHeartbeatAt ? `Heartbeat ${new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(new Date(currentOverview.worker.lastHeartbeatAt))}` : "No heartbeat recorded"}</small>
         </div>
         <div className="sidebar-user">
           <span className="user-avatar">{username.slice(0, 2).toUpperCase()}</span>
@@ -338,6 +341,7 @@ export function Dashboard({
             navigation={localNavigation}
             {...(overview ? { initialOverview: overview } : {})}
             {...(onUnauthorized ? { onUnauthorized } : {})}
+            onOverviewChange={setCurrentOverview}
           />
           <ReviewerAvailability
             api={api}

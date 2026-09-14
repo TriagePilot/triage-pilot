@@ -61,9 +61,9 @@ describe("admin application", () => {
   });
 
   it("keeps heartbeat copy in English when the browser default locale is Slovak", () => {
-    const RealRelativeTimeFormat = Intl.RelativeTimeFormat;
-    const formatter = vi.spyOn(Intl, "RelativeTimeFormat").mockImplementation(
-      (locales, options) => new RealRelativeTimeFormat(locales ?? "sk", options),
+    const RealDateTimeFormat = Intl.DateTimeFormat;
+    const formatter = vi.spyOn(Intl, "DateTimeFormat").mockImplementation(
+      (locales, options) => new RealDateTimeFormat(locales ?? "sk", options),
     );
     try {
       const html = renderToStaticMarkup(
@@ -73,14 +73,14 @@ describe("admin application", () => {
             ...overview,
             worker: {
               ...overview.worker,
-              lastHeartbeatAt: new Date(Date.now() - 2 * 60_000).toISOString(),
+              lastHeartbeatAt: "2026-08-18T12:00:00.000Z",
             },
           }}
           onLogout={async () => {}}
         />,
       );
 
-      expect(html).toMatch(/Heartbeat (2|3) minutes ago/);
+      expect(html).toContain("Heartbeat Aug 18, 2026");
     } finally {
       formatter.mockRestore();
     }
