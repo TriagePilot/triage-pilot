@@ -11,7 +11,7 @@ export type WebServices = WebhookServices & AuthServices & OperationsServices & 
 };
 
 export interface StaticAsset {
-  body: string;
+  body: string | Uint8Array;
   contentType: string;
 }
 
@@ -24,13 +24,13 @@ export function createWebApp(services: WebServices, staticAssets?: StaticAssetRe
   app.get("/", async (c) => {
     const asset = await staticAssets?.readAsset("index.html");
     if (!asset) return c.notFound();
-    return new Response(asset.body, { headers: { "content-type": asset.contentType } });
+    return new Response(responseBody(asset.body), { headers: { "content-type": asset.contentType } });
   });
   app.get("/assets/*", async (c) => {
     const assetPath = c.req.path.replace(/^\/+/, "");
     const asset = await staticAssets?.readAsset(assetPath);
     if (!asset) return c.notFound();
-    return new Response(asset.body, { headers: { "content-type": asset.contentType } });
+    return new Response(responseBody(asset.body), { headers: { "content-type": asset.contentType } });
   });
   app.get("/health", async (c) => {
     try {
@@ -51,4 +51,8 @@ export function createWebApp(services: WebServices, staticAssets?: StaticAssetRe
   app.route("/api/operations/availability", availabilityRoutes(services));
   app.route("/webhooks", githubWebhookRoutes(services));
   return app;
+}
+
+function responseBody(body: StaticAsset["body"]): string | ArrayBuffer {
+  return typeof body === "string" ? body : new Uint8Array(body).buffer;
 }

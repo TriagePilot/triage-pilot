@@ -72,10 +72,10 @@ function ReviewerAvailabilityWorkspace({
   }, [api, workspace, authorization.canViewOperations, initialSettings, initialAbsences, initialReplacementHistory, onUnauthorized]);
 
   if (!authorization.canViewOperations) {
-    return <section className="availability-grid"><p>You are not authorized to view reviewer availability.</p></section>;
+    return <section className="availability-grid" id="reviewer-availability"><p>You are not authorized to view reviewer availability.</p></section>;
   }
   if (loading || settings === null) {
-    return <section className="availability-grid" aria-live="polite"><p>Loading reviewer availability…</p></section>;
+    return <section className="availability-grid" id="reviewer-availability" aria-live="polite"><p>Loading reviewer availability…</p></section>;
   }
 
   const busy = pending !== null;
@@ -143,7 +143,7 @@ function ReviewerAvailabilityWorkspace({
   }
 
   return (
-    <section className="availability-grid">
+    <section className="availability-grid" id="reviewer-availability">
       <div className="availability-intro">
         <p className="eyebrow">Reviewer routing</p>
         <h2 id="availability-heading">Reviewer availability</h2>
