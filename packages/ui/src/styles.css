@@ -126,7 +126,7 @@ a { color: var(--teal-dark); text-underline-offset: 2px; }
 .availability-form label { margin-top: 8px; color: var(--ink); font-size: .72rem; font-weight: 700; }
 .availability-form small { color: var(--muted); font-size: .67rem; line-height: 1.4; }
 .availability-form__actions, .availability-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
-.availability-history { overflow: hidden; border: 1px solid var(--rule); border-radius: 8px; }
+.availability-history { border: 1px solid var(--rule); border-radius: 8px; }
 .availability-history h3 { margin: 0; border-bottom: 1px solid var(--rule); padding: 14px 16px; }
 .replacement-list { display: grid; gap: 8px; margin: 0; padding-left: 18px; }
 
