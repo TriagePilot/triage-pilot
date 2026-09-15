@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OperationsOverview } from "@triagepilot/db";
 
 import { App, Dashboard } from "../src/admin/App";
+import { createSelfHostedOperationsApi } from "../src/admin/api";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -21,6 +22,69 @@ afterEach(async () => {
 });
 
 describe("mounted admin application", () => {
+  it("keeps sidebar worker health in sync when recovery refreshes the ledger", async () => {
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      if (input === "/api/operations/routing-runs") return Response.json({ jobId: "job-2" });
+      if (input === "/api/operations/overview") {
+        return Response.json({
+          ...emptyOverview,
+          worker: { available: false, workerId: null, lastHeartbeatAt: null },
+        });
+      }
+      if (input === "/api/operations/availability/timezone") {
+        return Response.json({ timezone: "UTC", updatedAt: "2026-08-18T10:00:00.000Z" });
+      }
+      if (input === "/api/operations/availability/absences") return Response.json([]);
+      if (input === "/api/operations/availability/replacements") return Response.json([]);
+      throw new Error(`unexpected request to ${String(input)}`);
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <Dashboard username="admin" overview={emptyOverview} api={createSelfHostedOperationsApi()} onLogout={async () => {}} />,
+      );
+      await flushAsyncWork();
+    });
+    expect(container.querySelector(".worker-summary strong")?.textContent).toBe("Worker healthy");
+
+    await act(async () => {
+      buttonNamed(container, "Re-run routing")?.click();
+      await flushAsyncWork();
+    });
+    expect(container.querySelector(".status-ledger")?.textContent).toContain("Worker unavailable");
+    expect(container.querySelector(".worker-summary strong")?.textContent).toBe("Worker unavailable");
+  });
+
+  it("tracks the selected operations section in navigation and breadcrumb", async () => {
+    const previousHash = window.location.hash;
+    const container = document.createElement("div");
+    document.body.append(container);
+    try {
+      window.location.hash = "#repositories";
+      await act(async () => {
+        root = createRoot(container);
+        root.render(<Dashboard username="admin" overview={emptyOverview} onLogout={async () => {}} />);
+      });
+
+      const link = container.querySelector<HTMLAnchorElement>('a[href="#repositories"]');
+      expect(link?.getAttribute("aria-current")).toBe("location");
+      expect(container.querySelector(".app-topbar strong")?.textContent).toBe("Repositories");
+
+      await act(async () => {
+        window.location.hash = "#reviewer-availability";
+        window.dispatchEvent(new HashChangeEvent("hashchange"));
+      });
+      expect(container.querySelector<HTMLAnchorElement>('a[href="#reviewer-availability"]')?.getAttribute("aria-current")).toBe("location");
+      expect(link?.hasAttribute("aria-current")).toBe(false);
+      expect(container.querySelector(".app-topbar strong")?.textContent).toBe("Reviewer availability");
+    } finally {
+      window.location.hash = previousHash;
+    }
+  });
+
   it("exposes exactly one uniquely named region for each scrollable table", async () => {
     const container = document.createElement("div");
     document.body.append(container);
@@ -90,7 +154,7 @@ describe("mounted admin application", () => {
       await flushAsyncWork();
     });
 
-    expect(container.textContent).toContain("Administrator sign in");
+    expect(container.textContent).toContain("Sign in to TriagePilot");
     expect(container.textContent).toContain("The administrator session has expired.");
     expect(container.textContent).not.toContain("The dashboard could not load");
     expect(container.textContent).not.toContain("Retry overview");
@@ -229,7 +293,7 @@ describe("mounted admin application", () => {
       await flushAsyncWork();
     });
 
-    expect(container.textContent).toContain("Administrator sign in");
+    expect(container.textContent).toContain("Sign in to TriagePilot");
     expect(container.textContent).toContain("The administrator session has expired.");
     expect(container.textContent).not.toContain("Operations ledger");
   });

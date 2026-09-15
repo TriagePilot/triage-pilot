@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { act } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -25,6 +27,23 @@ afterEach(async () => {
 });
 
 describe("reusable reviewer availability", () => {
+  it("keeps the absence history horizontally scrollable", async () => {
+    const stylesheet = new CSSStyleSheet();
+    stylesheet.replaceSync(readFileSync(join(process.cwd(), "packages/ui/src/styles.css"), "utf8"));
+    const container = await mount(<ReviewerAvailability
+      api={api()}
+      workspace={workspace}
+      authorization={authorization}
+      initialSettings={settings}
+      initialAbsences={[absence]}
+      initialReplacementHistory={[replacement]}
+    />);
+
+    const history = container.querySelector<HTMLElement>(".availability-history");
+    expect(history).not.toBeNull();
+    expect(resolvedOverflowX(stylesheet, history!)).toBe("auto");
+  });
+
   it("renders timezone, status, and replacement history without mutation controls in read-only mode", () => {
     const html = renderToStaticMarkup(<ReviewerAvailability
       api={api()}
@@ -247,6 +266,16 @@ describe("reusable reviewer availability", () => {
     });
   });
 });
+
+function resolvedOverflowX(stylesheet: CSSStyleSheet, element: HTMLElement): string {
+  let value = "visible";
+  for (const rule of stylesheet.cssRules) {
+    if (!(rule instanceof CSSStyleRule) || !element.matches(rule.selectorText)) continue;
+    if (rule.style.overflow) value = rule.style.overflow;
+    if (rule.style.overflowX) value = rule.style.overflowX;
+  }
+  return value;
+}
 
 const workspace: WorkspaceContext = { id: "workspace-1", displayName: "Workspace one" };
 const authorization: AuthorizationCapabilities = {

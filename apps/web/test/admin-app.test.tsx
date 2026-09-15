@@ -1,5 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { App, Dashboard, LoginScreen } from "../src/admin/App";
 import type { OperationsOverview } from "../src/admin/api";
@@ -26,8 +26,64 @@ describe("admin application", () => {
     expect(html).toContain('for="admin-password"');
     expect(html).toContain('autoComplete="current-password"');
     expect(html).toContain('role="alert"');
+    expect(html).toContain("Sign in to TriagePilot");
+    expect(html).toContain("Credentials are verified on your infrastructure");
+    expect(html).toContain('src="/assets/triage-pilot-logo.png"');
+    expect(html).toContain('alt="TriagePilot"');
+    expect(html).not.toContain('class="routing-mark"');
     expect(html).not.toContain("GitHub private key");
     expect(html).not.toContain("Webhook secret");
+    expect(html).not.toContain("Remember this device");
+    expect(html).not.toContain("Forgot password");
+  });
+
+  it("wraps API-backed operations in the application navigation shell", () => {
+    const html = renderToStaticMarkup(
+      <Dashboard username="admin" overview={overview} onLogout={async () => {}} />,
+    );
+
+    expect(html).toContain('class="app-sidebar"');
+    expect(html).toContain('aria-label="Operations navigation"');
+    expect(html).toContain('href="#overview"');
+    expect(html).toContain('href="#repositories"');
+    expect(html).toContain('href="#decisions"');
+    expect(html).toContain('href="#reviewer-availability"');
+    expect(html).toContain('href="#system-health"');
+    expect(html).toContain('id="repositories"');
+    expect(html).toContain('id="decisions"');
+    expect(html).toContain('src="/assets/triage-pilot-logo.png"');
+    expect(html).toContain('role="img" aria-label="TriagePilot"');
+    expect(html).toContain("Signed in as admin");
+    expect(html).not.toContain("Global search");
+    expect(html).not.toContain("Notifications");
+    expect(html).not.toContain("PRs analyzed");
+    expect(html).not.toContain("Reviewer capacity");
+  });
+
+  it("keeps heartbeat copy in English when the browser default locale is Slovak", () => {
+    const RealDateTimeFormat = Intl.DateTimeFormat;
+    const formatter = vi.spyOn(Intl, "DateTimeFormat").mockImplementation(
+      (locales, options) => new RealDateTimeFormat(locales ?? "sk", options),
+    );
+    try {
+      const html = renderToStaticMarkup(
+        <Dashboard
+          username="admin"
+          overview={{
+            ...overview,
+            worker: {
+              ...overview.worker,
+              lastHeartbeatAt: "2026-08-18T12:00:00.000Z",
+            },
+          }}
+          onLogout={async () => {}}
+        />,
+      );
+
+      expect(html).toContain("Heartbeat Aug 18, 2026");
+    } finally {
+      formatter.mockRestore();
+    }
   });
 
   it("renders the operational chain, recovery controls, and semantic data tables", () => {

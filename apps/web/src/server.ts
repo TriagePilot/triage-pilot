@@ -28,7 +28,7 @@ async function readPublicAsset(publicRoot: string, assetPath: string): Promise<S
   if (!resolved.startsWith(`${publicRoot}${path.sep}`) && resolved !== publicRoot) return null;
 
   try {
-    const body = await fs.readFile(resolved, "utf8");
+    const body = await fs.readFile(resolved);
     return { body, contentType: contentTypeFor(resolved) };
   } catch (error) {
     if (isNotFound(error)) return null;
@@ -41,6 +41,7 @@ function contentTypeFor(filePath: string): string {
   if (filePath.endsWith(".js")) return "text/javascript; charset=utf-8";
   if (filePath.endsWith(".css")) return "text/css; charset=utf-8";
   if (filePath.endsWith(".svg")) return "image/svg+xml";
+  if (filePath.endsWith(".png")) return "image/png";
   return "application/octet-stream";
 }
 

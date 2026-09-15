@@ -16,6 +16,7 @@ export interface OperationsDashboardProps {
   initialOverview?: OperationsOverview;
   headerActions?: ReactNode;
   onUnauthorized?(message: string): void;
+  onOverviewChange?(overview: OperationsOverview): void;
 }
 
 type LoadState =
@@ -37,6 +38,7 @@ function OperationsDashboardWorkspace({
   initialOverview,
   headerActions,
   onUnauthorized,
+  onOverviewChange,
 }: OperationsDashboardProps) {
   const [state, setState] = useState<LoadState>(() => !authorization.canViewOperations
     ? { status: "failed", message: "Operations are not available for this workspace." }
@@ -55,7 +57,9 @@ function OperationsDashboardWorkspace({
     }
     setState({ status: "loading" });
     try {
-      setState({ status: "ready", overview: await api.readOperationsOverview(workspace) });
+      const overview = await api.readOperationsOverview(workspace);
+      setState({ status: "ready", overview });
+      onOverviewChange?.(overview);
     } catch (caught) {
       if (isUnauthorized(caught)) {
         onUnauthorized?.(messageFrom(caught, "The operations session has expired."));
@@ -144,11 +148,11 @@ function OperationsDashboardWorkspace({
 
   const overview = state.overview;
   return (
-    <section className="operations-dashboard">
+    <section className="operations-dashboard" id="overview">
       <div className="operations-heading">
         <div>
-          <p className="eyebrow">TriagePilot / read-only</p>
           <h1 id="dashboard-title">Operations ledger</h1>
+          <p className="lede">Monitor routing health and review the decisions made by this installation.</p>
         </div>
         {headerActions || authorization.canManageConfiguration ? (
           <div className="operations-actions">
@@ -162,7 +166,7 @@ function OperationsDashboardWorkspace({
         ) : null}
       </div>
 
-      <section className="status-ledger" aria-label="Installation status">
+      <section className="status-ledger" id="system-health" aria-label="Installation status">
         {overview.statuses.map((status) => (
           <StatusNode
             key={status.id}
@@ -483,7 +487,7 @@ function DataSection({
   children: React.ReactNode;
 }) {
   return (
-    <section className={`data-section data-section--${tone}`}>
+    <section className={`data-section data-section--${tone}`} id={id}>
       <div className="section-heading">
         <h2 id={`${id}-heading`}>{title}</h2>
         <span className="count" aria-label={`${count} records`}>{count}</span>

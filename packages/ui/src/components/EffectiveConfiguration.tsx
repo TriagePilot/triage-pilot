@@ -82,7 +82,7 @@ export function EffectiveConfiguration({
 
   const configuration = state.configuration;
   return (
-    <section className="effective-configuration data-section" aria-labelledby="effective-configuration-heading">
+    <section className="effective-configuration data-section" id="effective-configuration" aria-labelledby="effective-configuration-heading">
       <div className="section-heading">
         <h2 id="effective-configuration-heading">Effective configuration</h2>
         {authorization.canManageConfiguration ? (

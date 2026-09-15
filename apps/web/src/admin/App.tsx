@@ -20,6 +20,16 @@ import {
 } from "./api";
 
 type AuthState = "checking" | "signed-out" | "signed-in";
+type SectionId = "overview" | "repositories" | "decisions" | "reviewer-availability" | "effective-configuration" | "system-health";
+
+const sectionLabels: Record<SectionId, string> = {
+  overview: "Overview",
+  repositories: "Repositories",
+  decisions: "Routing decisions",
+  "reviewer-availability": "Reviewer availability",
+  "effective-configuration": "Configuration",
+  "system-health": "System health",
+};
 
 const localWorkspaceDisplayName = "Self-hosted";
 const selfHostedAuthorization: AuthorizationCapabilities = {
@@ -187,14 +197,18 @@ export function LoginScreen({ error, submitting, onSubmit }: LoginScreenProps) {
   }
 
   return (
-    <main className="center-stage">
+    <main className="center-stage login-stage">
       <section className="login-card" aria-labelledby="login-title">
-        <div className="product-mark" aria-hidden="true">
-          TP
+        <div className="login-brand">
+          <Brand />
+          <span className="admin-badge"><span aria-hidden="true" />Admin</span>
         </div>
-        <p className="eyebrow">Self-hosted operations</p>
-        <h1 id="login-title">Administrator sign in</h1>
-        <p className="lede">Inspect routing health for this TriagePilot installation.</p>
+        <h1 id="login-title">Sign in to TriagePilot</h1>
+        <p className="lede">Access routing health, reviewer availability, and operational records for this installation.</p>
+        <div className="installation-note">
+          <UiIcon name="shield" />
+          <span><strong>Self-hosted installation</strong>Credentials are verified on your infrastructure</span>
+        </div>
         {error ? (
           <p id="login-error" role="alert" className="notice notice--danger">
             {error}
@@ -202,28 +216,35 @@ export function LoginScreen({ error, submitting, onSubmit }: LoginScreenProps) {
         ) : null}
         <form onSubmit={(event) => void submit(event)} aria-describedby={error ? "login-error" : undefined}>
           <label htmlFor="admin-username">Username</label>
-          <input
-            id="admin-username"
-            name="username"
-            autoComplete="username"
-            value={username}
-            onChange={(event) => setUsername(event.target.value)}
-            required
-          />
+          <div className="input-shell">
+            <UiIcon name="user" />
+            <input
+              id="admin-username"
+              name="username"
+              autoComplete="username"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              required
+            />
+          </div>
           <label htmlFor="admin-password">Password</label>
-          <input
-            id="admin-password"
-            name="password"
-            type="password"
-            autoComplete="current-password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            required
-          />
+          <div className="input-shell">
+            <UiIcon name="lock" />
+            <input
+              id="admin-password"
+              name="password"
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              required
+            />
+          </div>
           <button type="submit" disabled={pending}>
-            {pending ? "Signing in…" : "Sign in"}
+            {pending ? "Signing in…" : <>Sign in <span aria-hidden="true">→</span></>}
           </button>
         </form>
+        <div className="session-note"><UiIcon name="lock" />Protected administrator session</div>
       </section>
     </main>
   );
@@ -257,56 +278,132 @@ export function Dashboard({
     [providedApi, overview, onUnauthorized],
   );
   const effectiveRepository = overview?.repositories[0];
+  const hasConfiguration = Boolean(effectiveConfiguration && effectiveRepository);
+  const [currentOverview, setCurrentOverview] = useState(overview);
+  const [activeSection, setActiveSection] = useState<SectionId>(() => sectionFromHash(hasConfiguration));
+
+  useEffect(() => setCurrentOverview(overview), [overview]);
+
+  useEffect(() => {
+    const updateSection = () => setActiveSection(sectionFromHash(hasConfiguration));
+    window.addEventListener("hashchange", updateSection);
+    updateSection();
+    return () => window.removeEventListener("hashchange", updateSection);
+  }, [hasConfiguration]);
+
+  function sectionLink(id: SectionId, icon: string) {
+    const active = activeSection === id;
+    return <a className={`nav-link${active ? " nav-link--active" : ""}`} href={`#${id}`} aria-current={active ? "location" : undefined}><UiIcon name={icon} />{sectionLabels[id]}</a>;
+  }
 
   return (
-    <main className="shell" aria-labelledby="dashboard-title">
-      {error ? (
-        <p role="alert" className="notice notice--danger dashboard-notice">
-          {error}
-        </p>
-      ) : null}
-
-      <OperationsDashboard
-        api={api}
-        workspace={workspace}
-        authorization={selfHostedAuthorization}
-        navigation={localNavigation}
-        {...(overview ? { initialOverview: overview } : {})}
-        headerActions={
+    <div className="app-shell">
+      <aside className="app-sidebar">
+        <Brand inverse />
+        <div className="workspace-card">
+          <span className="workspace-avatar">S</span>
+          <span><small>Installation</small><strong>{workspace.displayName}</strong></span>
+        </div>
+        <nav aria-label="Operations navigation">
+          <span className="nav-label">Workspace</span>
+          {sectionLink("overview", "overview")}
+          {sectionLink("repositories", "repository")}
+          {sectionLink("decisions", "route")}
+          {sectionLink("reviewer-availability", "user")}
+          {hasConfiguration ? sectionLink("effective-configuration", "settings") : null}
+          <span className="nav-label nav-label--secondary">Administration</span>
+          {sectionLink("system-health", "health")}
+        </nav>
+        <div className={`worker-summary ${currentOverview?.worker.available ? "worker-summary--healthy" : "worker-summary--failed"}`}>
+          <span aria-hidden="true" />
+          <strong>{currentOverview?.worker.available ? "Worker healthy" : "Worker unavailable"}</strong>
+          <small>{currentOverview?.worker.lastHeartbeatAt ? `Heartbeat ${new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(new Date(currentOverview.worker.lastHeartbeatAt))}` : "No heartbeat recorded"}</small>
+        </div>
+        <div className="sidebar-user">
+          <span className="user-avatar">{username.slice(0, 2).toUpperCase()}</span>
+          <span><strong>{username}</strong><small>Administrator</small></span>
+        </div>
+      </aside>
+      <div className="app-workspace">
+        <header className="app-topbar">
+          <div><span>Workspace</span><span aria-hidden="true">/</span><strong>{sectionLabels[activeSection]}</strong></div>
           <div className="operator">
             <span>Signed in as {username}</span>
-            <button className="button--quiet" type="button" onClick={() => void onLogout()}>
-              Sign out
-            </button>
+            <button className="button--quiet" type="button" onClick={() => void onLogout()}>Sign out</button>
           </div>
-        }
-        {...(onUnauthorized ? { onUnauthorized } : {})}
-      />
-      <ReviewerAvailability
-        api={api}
-        workspace={workspace}
-        authorization={selfHostedAuthorization}
-        {...(onUnauthorized ? { onUnauthorized } : {})}
-      />
-      {effectiveConfiguration && effectiveRepository ? (
-        <EffectiveConfiguration
-          api={api}
-          workspace={workspace}
-          repository={effectiveRepository}
-          authorization={selfHostedAuthorization}
-          navigation={localNavigation}
-          initialConfiguration={effectiveConfiguration}
-        />
-      ) : null}
-    </main>
+        </header>
+        <main className="shell" aria-labelledby="dashboard-title">
+          {error ? <p role="alert" className="notice notice--danger dashboard-notice">{error}</p> : null}
+          <OperationsDashboard
+            api={api}
+            workspace={workspace}
+            authorization={selfHostedAuthorization}
+            navigation={localNavigation}
+            {...(overview ? { initialOverview: overview } : {})}
+            {...(onUnauthorized ? { onUnauthorized } : {})}
+            onOverviewChange={setCurrentOverview}
+          />
+          <ReviewerAvailability
+            api={api}
+            workspace={workspace}
+            authorization={selfHostedAuthorization}
+            {...(onUnauthorized ? { onUnauthorized } : {})}
+          />
+          {effectiveConfiguration && effectiveRepository ? (
+            <EffectiveConfiguration
+              api={api}
+              workspace={workspace}
+              repository={effectiveRepository}
+              authorization={selfHostedAuthorization}
+              navigation={localNavigation}
+              initialConfiguration={effectiveConfiguration}
+            />
+          ) : null}
+        </main>
+      </div>
+    </div>
   );
+}
+
+function Brand({ inverse = false }: { inverse?: boolean }) {
+  const logo = "/assets/triage-pilot-logo.png";
+  if (inverse) {
+    return (
+      <div className="brand brand--inverse" role="img" aria-label="TriagePilot">
+        <span className="brand-crop brand-crop--mark"><img src={logo} alt="" /></span>
+        <span className="brand-crop brand-crop--wordmark"><img src={logo} alt="" /></span>
+      </div>
+    );
+  }
+  return <div className="brand"><img src={logo} alt="TriagePilot" /></div>;
+}
+
+function sectionFromHash(hasConfiguration: boolean): SectionId {
+  if (typeof window === "undefined") return "overview";
+  const hash = window.location.hash.slice(1);
+  if (hash === "effective-configuration" && !hasConfiguration) return "overview";
+  return Object.hasOwn(sectionLabels, hash) ? hash as SectionId : "overview";
+}
+
+function UiIcon({ name }: { name: string }) {
+  const paths: Record<string, React.ReactNode> = {
+    shield: <path d="M12 3 5 6v5c0 4.6 3 8.2 7 10 4-1.8 7-5.4 7-10V6l-7-3Zm-3 9 2 2 4-5" />,
+    user: <><circle cx="12" cy="8" r="3" /><path d="M6 20c.6-4 2.6-6 6-6s5.4 2 6 6" /></>,
+    lock: <><rect x="5" y="10" width="14" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></>,
+    overview: <><rect x="4" y="4" width="6" height="6" rx="1" /><rect x="14" y="4" width="6" height="6" rx="1" /><rect x="4" y="14" width="6" height="6" rx="1" /><rect x="14" y="14" width="6" height="6" rx="1" /></>,
+    repository: <><path d="M5 4h12a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2V4Z" /><path d="M8 8h7M8 12h7" /></>,
+    route: <><circle cx="6" cy="6" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="18" cy="18" r="2" /><path d="M8 6h4a6 6 0 0 1 6 6v4" /></>,
+    settings: <><circle cx="12" cy="12" r="3" /><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1m0-12.8-2.1 2.1m-8.6 8.6-2.1 2.1" /></>,
+    health: <path d="M3 12h4l2-5 4 10 2-5h6" />,
+  };
+  return <svg className="ui-icon" viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>;
 }
 
 function LoadingScreen({ message }: { message: string }) {
   return (
     <main className="center-stage">
       <section className="state-card" role="status" aria-live="polite">
-        <div className="product-mark" aria-hidden="true">TP</div>
+        <Brand />
         <p className="eyebrow">Self-hosted operations</p>
         <h1>{message}</h1>
         <p className="lede">Reading the current installation state.</p>
