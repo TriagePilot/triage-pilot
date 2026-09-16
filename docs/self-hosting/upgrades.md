@@ -16,10 +16,10 @@ Tagged releases publish a versioned OCI image to GitHub Container Registry and a
 ```yaml
 services:
   web:
-    image: ghcr.io/triagepilot/triage-pilot:0.1.0
+    image: ghcr.io/triagepilot/triage-pilot:1.0.0
     build: !reset null
   worker:
-    image: ghcr.io/triagepilot/triage-pilot:0.1.0
+    image: ghcr.io/triagepilot/triage-pilot:1.0.0
     build: !reset null
 ```
 

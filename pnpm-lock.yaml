@@ -109,19 +109,19 @@ importers:
   packages/application:
     dependencies:
       '@triagepilot/config':
-        specifier: workspace:0.1.0
+        specifier: workspace:1.0.0
         version: link:../config
       '@triagepilot/contracts':
-        specifier: workspace:0.1.0
+        specifier: workspace:1.0.0
         version: link:../contracts
       '@triagepilot/core':
-        specifier: workspace:0.1.0
+        specifier: workspace:1.0.0
         version: link:../core
 
   packages/config:
     dependencies:
       '@triagepilot/contracts':
-        specifier: workspace:0.1.0
+        specifier: workspace:1.0.0
         version: link:../contracts
       yaml:
         specifier: ^2.6.1
@@ -135,7 +135,7 @@ importers:
   packages/core:
     dependencies:
       '@triagepilot/contracts':
-        specifier: workspace:0.1.0
+        specifier: workspace:1.0.0
         version: link:../contracts
       minimatch:
         specifier: ^10.0.1
@@ -144,7 +144,7 @@ importers:
   packages/db:
     dependencies:
       '@triagepilot/contracts':
-        specifier: workspace:0.1.0
+        specifier: workspace:1.0.0
         version: link:../contracts
       kysely:
         specifier: ^0.28.17
@@ -166,7 +166,7 @@ importers:
         specifier: ^9.1.4
         version: 9.2.4
       '@triagepilot/contracts':
-        specifier: workspace:0.1.0
+        specifier: workspace:1.0.0
         version: link:../contracts
       '@types/node':
         specifier: ^22.10.2
@@ -184,7 +184,7 @@ importers:
   packages/ui:
     dependencies:
       '@triagepilot/contracts':
-        specifier: workspace:0.1.0
+        specifier: workspace:1.0.0
         version: link:../contracts
     devDependencies:
       '@types/react':

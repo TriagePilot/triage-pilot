@@ -1,6 +1,6 @@
 {
   "name": "@triagepilot/application",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "license": "FSL-1.1-Apache-2.0",
   "repository": {
     "type": "git",
@@ -24,9 +24,9 @@
     "postpack": "node ../../scripts/prepare-package.mjs --package . --cleanup"
   },
   "dependencies": {
-    "@triagepilot/config": "workspace:0.1.0",
-    "@triagepilot/contracts": "workspace:0.1.0",
-    "@triagepilot/core": "workspace:0.1.0"
+    "@triagepilot/config": "workspace:1.0.0",
+    "@triagepilot/contracts": "workspace:1.0.0",
+    "@triagepilot/core": "workspace:1.0.0"
   },
   "publishConfig": {
     "access": "public"

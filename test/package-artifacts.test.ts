@@ -46,6 +46,7 @@ type ArtifactRegistry = {
 let packDirectory: string;
 let packedPackages: PackedPackage[];
 let rootLicense: string;
+let artifactVersion: string;
 let artifactWorkspace: string;
 let artifactRegistry: ArtifactRegistry;
 
@@ -54,6 +55,7 @@ describe("published package artifacts", () => {
     packDirectory = await mkdtemp(join(tmpdir(), "triagepilot-artifacts-"));
     artifactWorkspace = await createArtifactWorkspace();
     rootLicense = await readFile(join(artifactWorkspace, "LICENSE"), "utf8");
+    artifactVersion = await readVersion(join(artifactWorkspace, "package.json"));
     await runPnpm(["install", "--frozen-lockfile"], artifactWorkspace);
     await runPnpm(["build"], artifactWorkspace);
     packedPackages = [];
@@ -104,7 +106,7 @@ describe("published package artifacts", () => {
       });
     }
 
-    artifactRegistry = await startArtifactRegistry(packedPackages);
+    artifactRegistry = await startArtifactRegistry(packedPackages, artifactVersion);
   }, 180_000);
 
   afterAll(async () => {
@@ -114,7 +116,6 @@ describe("published package artifacts", () => {
   });
 
   it("packs synchronized compiled artifacts without source or private graph leakage", async () => {
-    const rootVersion = await readVersion(join(artifactWorkspace, "package.json"));
     const packedMetadataDates = new Set(
       packedPackages.map((artifact) =>
         [
@@ -130,7 +131,7 @@ describe("published package artifacts", () => {
     expect(packedPackages).toHaveLength(publishedPackages.length);
     expect(packedMetadataDates).toEqual(new Set([`${publishedAt} -> ${futureLicenseEffectiveAt}`]));
     for (const artifact of packedPackages) {
-      expect(readString(artifact.packedManifest.version, `${artifact.name} version`)).toBe(rootVersion);
+      expect(readString(artifact.packedManifest.version, `${artifact.name} version`)).toBe(artifactVersion);
       expect(readString(artifact.packedManifest.license, `${artifact.name} license`)).toBe(licenseId);
       expect(readString(artifact.packedManifest.publishedAt, `${artifact.name} publishedAt`)).toBe(publishedAt);
       expect(readString(artifact.packedManifest.futureLicenseEffectiveAt, `${artifact.name} futureLicenseEffectiveAt`)).toBe(
@@ -166,7 +167,7 @@ describe("published package artifacts", () => {
       for (const [dependencyName, version] of Object.entries(artifact.dependencyVersions)) {
         expect(version, `${artifact.name} -> ${dependencyName}`).not.toMatch(/^(workspace|file|link):/);
         if (publishedPackages.includes(dependencyName as PublishedPackageName)) {
-          expect(version, `${artifact.name} -> ${dependencyName}`).toBe(rootVersion);
+          expect(version, `${artifact.name} -> ${dependencyName}`).toBe(artifactVersion);
         }
       }
 
@@ -193,7 +194,7 @@ describe("published package artifacts", () => {
           name: "artifact-consumer",
           private: true,
           type: "module",
-          dependencies: Object.fromEntries(publishedPackages.map((packageName) => [packageName, "0.1.0"])),
+          dependencies: Object.fromEntries(publishedPackages.map((packageName) => [packageName, artifactVersion])),
           devDependencies: {
             "@types/node": "^22.10.2",
             "@types/react": "^18.3.18",
@@ -302,7 +303,7 @@ async function createArtifactWorkspace() {
   return workspace;
 }
 
-async function startArtifactRegistry(artifacts: PackedPackage[]): Promise<ArtifactRegistry> {
+async function startArtifactRegistry(artifacts: PackedPackage[], version: string): Promise<ArtifactRegistry> {
   const entries = await Promise.all(
     artifacts.map(async (artifact) => ({
       ...artifact,
@@ -326,8 +327,8 @@ async function startArtifactRegistry(artifacts: PackedPackage[]): Promise<Artifa
       response.end(
         JSON.stringify({
           name: packageEntry.name,
-          "dist-tags": { latest: "0.1.0" },
-          versions: { "0.1.0": manifest },
+          "dist-tags": { latest: version },
+          versions: { [version]: manifest },
         }),
       );
       return;
