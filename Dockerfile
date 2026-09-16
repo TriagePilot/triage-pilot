@@ -11,6 +11,9 @@ COPY apps/web/package.json apps/web/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY packages/shared/package.json packages/shared/package.json
 COPY packages/config/package.json packages/config/package.json
+COPY packages/application/package.json packages/application/package.json
+COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/ui/package.json packages/ui/package.json
 COPY packages/core/package.json packages/core/package.json
 COPY packages/db/package.json packages/db/package.json
 COPY packages/provider-github/package.json packages/provider-github/package.json
@@ -18,7 +21,7 @@ RUN pnpm install --frozen-lockfile
 
 FROM deps AS build
 COPY . .
-RUN pnpm build
+RUN PNPM_CONFIG_RECURSIVE_INSTALL=false pnpm build
 
 FROM base AS runtime
 ARG TRIAGEPILOT_VERSION=0.1.0
