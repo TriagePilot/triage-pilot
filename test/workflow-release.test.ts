@@ -86,8 +86,10 @@ describe("release workflow guardrails", () => {
     expect(release).toContain('oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d');
     expect(release).toContain("node scripts/publish-release-artifacts.mjs");
     expect(release).toContain("npm install --global npm@11.5.1");
-    expect(release).not.toContain("secrets.NPM_TOKEN");
-    expect(release).not.toContain("NODE_AUTH_TOKEN:");
+    expect(release).toMatch(
+      /- name: Publish verified artifacts idempotently\n\s+env:\n\s+GH_TOKEN: \$\{\{ secrets\.GITHUB_TOKEN \}\}\n\s+NODE_AUTH_TOKEN: \$\{\{ secrets\.NPM_TOKEN \}\}/,
+    );
+    expect(release.split("NODE_AUTH_TOKEN:")).toHaveLength(2);
     expect(release).toContain("attestations: write");
     expect(release).toContain("artifact-metadata: write");
     expect(release).toContain("actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6");
