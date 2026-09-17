@@ -21,7 +21,7 @@ RUN pnpm install --frozen-lockfile
 
 FROM deps AS build
 COPY . .
-RUN PNPM_CONFIG_RECURSIVE_INSTALL=false pnpm build
+RUN pnpm build
 
 FROM base AS runtime
 ARG TRIAGEPILOT_VERSION=1.1.0
