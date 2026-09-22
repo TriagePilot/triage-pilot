@@ -1,16 +1,21 @@
 # Production Compose
 
-Use Docker Compose for the first supported self-hosted production path.
+Use Docker Compose for the first supported self-hosted production path. The recommended deployment uses the versioned public image through `docker-compose.release.yml`; build-from-source Compose remains available when you need to inspect or modify the application.
 
 ## Start Order
 
 ```bash
-docker compose up -d postgres
-docker compose run --rm web pnpm db:migrate
-docker compose up -d web worker
+docker compose -f docker-compose.yml -f docker-compose.release.yml pull web worker
+docker compose -f docker-compose.yml -f docker-compose.release.yml up -d postgres
+docker compose -f docker-compose.yml -f docker-compose.release.yml run --rm web pnpm db:migrate
+docker compose -f docker-compose.yml -f docker-compose.release.yml up -d web worker
 ```
 
-The supported stack is `web`, exactly one `worker`, and PostgreSQL. Do not scale the worker above one replica.
+The supported stack is `web`, exactly one `worker`, and PostgreSQL. The web and worker containers use the same `TRIAGEPILOT_IMAGE` reference but start different commands. Do not scale the worker above one replica.
+
+The overlay defaults to the repository's current release tag. For an immutable production deployment, set `TRIAGEPILOT_IMAGE` in `.env` to the version-and-digest reference recorded in that release's `release-manifest.json`. Update both application services together by changing this single value.
+
+To build from source, omit `docker-compose.release.yml`, run `docker compose build --pull`, and use the base `docker compose` command for the same start order.
 
 ## TLS
 
@@ -44,7 +49,7 @@ services:
     depends_on: !reset {}
 ```
 
-Run the same migration command before starting `web` and `worker`.
+Run the same migration command before starting `web` and `worker`. Include the release overlay and your local external-database override in every application command when deploying the published image.
 
 ## Secrets
 

@@ -2,28 +2,24 @@
 
 ```bash
 git pull --ff-only
-docker compose build --pull
-docker compose stop web worker
-docker compose up -d postgres
-docker compose run --rm web pnpm db:migrate
-docker compose up -d web worker
+docker compose -f docker-compose.yml -f docker-compose.release.yml pull web worker
+docker compose -f docker-compose.yml -f docker-compose.release.yml stop web worker
+docker compose -f docker-compose.yml -f docker-compose.release.yml up -d postgres
+docker compose -f docker-compose.yml -f docker-compose.release.yml run --rm web pnpm db:migrate
+docker compose -f docker-compose.yml -f docker-compose.release.yml up -d web worker
 ```
 
-Read the release notes before upgrading. Build or pull the new image first, stop both application processes, apply every migration exactly once, and then restart `web` and the single `worker`. Back up PostgreSQL before the migration step.
+Read the release notes before upgrading. Set `TRIAGEPILOT_IMAGE` in `.env` when you need an exact version or version-and-digest reference; otherwise the release overlay uses the version paired with the checked-out repository. Pull the new image first, stop both application processes, apply every migration exactly once, and then restart `web` and the single `worker`. Back up PostgreSQL before the migration step.
 
-Tagged releases publish a versioned OCI image to GitHub Container Registry and a release manifest that records the exact package tarballs, highest public migration, image digest, source commit, `FSL-1.1-Apache-2.0` license identifier, artifact publication timestamp, and artifact Apache 2.0 future-license timestamp. Build-from-source Compose remains the reference deployment, but the release image can be pinned exactly with a small override:
+Tagged releases publish a versioned OCI image to GitHub Container Registry and a release manifest that records the exact package tarballs, highest public migration, image digest, source commit, `FSL-1.1-Apache-2.0` license identifier, artifact publication timestamp, and artifact Apache 2.0 future-license timestamp. The release overlay applies one image reference to both application services:
 
-```yaml
-services:
-  web:
-    image: ghcr.io/triagepilot/triage-pilot:1.1.0
-    build: !reset null
-  worker:
-    image: ghcr.io/triagepilot/triage-pilot:1.1.0
-    build: !reset null
+```dotenv
+TRIAGEPILOT_IMAGE=ghcr.io/triagepilot/triage-pilot:1.1.0@sha256:02465d76467f1471b572a9605564c3b67bdbdb23e96cd773c4ca0ab205f39e4d
 ```
 
 For exact pinning, pair the version tag with the published digest from `release-manifest.json` and your release evidence checksums. Do not advance only one package or only the image: the supported upgrade unit is the synchronized public release.
+
+For a build-from-source deployment, replace the pull step with `docker compose build --pull` and run the remaining commands without `docker-compose.release.yml`.
 
 The FSL-to-Apache-2.0 conversion applies separately to each version on the second anniversary of the date that version was made available. Older public versions may already be available under Apache 2.0 while newer versions remain under FSL. Manifest timestamps describe artifact publication provenance and do not override an earlier source-availability date recorded by public Git history. Third-party dependencies retain their original licenses and required notices.
 

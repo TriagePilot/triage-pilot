@@ -15,16 +15,18 @@ openssl rand -hex 32
 
 Use the generated values for `ADMIN_PASSWORD`, `SESSION_SECRET`, and `GITHUB_WEBHOOK_SECRET`. Set `ADMIN_USERNAME`, `GITHUB_ORGANIZATION`, `GITHUB_APP_ID`, and `GITHUB_PRIVATE_KEY` in `.env`; leave no `replace-with-` values. Never commit `.env` or a GitHub App private key. For mounted secrets, use the corresponding `_FILE` setting instead of the direct setting; the full quickstart explains the required read-only mounts.
 
-Then start TriagePilot:
+Then start TriagePilot with the published release image:
 
 ```bash
-docker compose build --pull
-docker compose up -d postgres
-docker compose run --rm web pnpm db:migrate
-docker compose up -d web worker
+docker compose -f docker-compose.yml -f docker-compose.release.yml pull web worker
+docker compose -f docker-compose.yml -f docker-compose.release.yml up -d postgres
+docker compose -f docker-compose.yml -f docker-compose.release.yml run --rm web pnpm db:migrate
+docker compose -f docker-compose.yml -f docker-compose.release.yml up -d web worker
 ```
 
-Open `http://localhost:8787` and log in with `ADMIN_USERNAME` and `ADMIN_PASSWORD`. See the [full quickstart](docs/self-hosting/quickstart.md) for GitHub App creation, selected-repository installation, secret files, and production notes.
+The release overlay runs both application services from `ghcr.io/triagepilot/triage-pilot:1.1.0`: one container starts the web server and a second starts the worker. PostgreSQL remains the separate `postgres:16` service. Open `http://localhost:8787` and log in with `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
+
+See the [full quickstart](docs/self-hosting/quickstart.md) for the build-from-source alternative, GitHub App creation, selected-repository installation, secret files, and production notes.
 
 ## Deployment Model
 
