@@ -52,6 +52,12 @@ then
   exit 1
 fi
 
+if find -L /app -type l -print -quit | grep -q .
+then
+  echo "broken symbolic link found in runtime image" >&2
+  exit 1
+fi
+
 for tool in pnpm tsx tsc vite vitest; do
   if command -v "$tool" >/dev/null 2>&1; then
     echo "development tool available at runtime: $tool" >&2

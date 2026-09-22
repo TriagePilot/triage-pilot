@@ -42,7 +42,8 @@ RUN --mount=type=cache,id=triagepilot-pnpm,target=/pnpm/store,sharing=locked \
       packages/ui/node_modules && \
     pnpm install --prod --offline --frozen-lockfile \
       --filter '@triagepilot/web...' \
-      --filter '@triagepilot/worker...'
+      --filter '@triagepilot/worker...' && \
+    rm /app/node_modules/.pnpm/node_modules/@triagepilot/ui
 
 FROM build AS runtime-artifacts
 RUN find \
