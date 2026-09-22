@@ -30,6 +30,8 @@ Use the generated values for `ADMIN_PASSWORD`, `SESSION_SECRET`, and `GITHUB_WEB
 
 The release overlay uses the same versioned image for two separate application containers: `web` runs the default web-server command and `worker` overrides it with the worker command. PostgreSQL runs separately from `postgres:16`.
 
+The commands below name Compose files explicitly, so Compose does not automatically load `docker-compose.override.yml`. If your deployment has a local override for secret mounts, bindings, networks, resources, or other site-specific configuration, append it after the release overlay in every command, for example `-f docker-compose.yml -f docker-compose.release.yml -f docker-compose.override.yml`. Later files take precedence.
+
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.release.yml pull web worker
 docker compose -f docker-compose.yml -f docker-compose.release.yml up -d postgres

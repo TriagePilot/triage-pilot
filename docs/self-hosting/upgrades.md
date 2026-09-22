@@ -1,5 +1,7 @@
 # Upgrades
 
+The commands below name Compose files explicitly, so Compose does not automatically load `docker-compose.override.yml`. Append every local deployment override after `docker-compose.release.yml` in each command—for example `-f docker-compose.yml -f docker-compose.release.yml -f docker-compose.override.yml`—to preserve secret mounts, bindings, networks, resource limits, and other site-specific settings during the upgrade. Later files take precedence.
+
 ```bash
 git pull --ff-only
 docker compose -f docker-compose.yml -f docker-compose.release.yml pull web worker

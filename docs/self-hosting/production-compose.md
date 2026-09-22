@@ -2,6 +2,8 @@
 
 Use Docker Compose for the first supported self-hosted production path. The recommended deployment uses the versioned public image through `docker-compose.release.yml`; build-from-source Compose remains available when you need to inspect or modify the application.
 
+Explicit `-f` arguments disable automatic loading of `docker-compose.override.yml`. Append every local deployment override after `docker-compose.release.yml` in all commands so secret mounts, host bindings, networks, resource limits, and other production settings remain active. For example, use `-f docker-compose.yml -f docker-compose.release.yml -f docker-compose.override.yml`; later files take precedence.
+
 ## Start Order
 
 ```bash
@@ -49,7 +51,7 @@ services:
     depends_on: !reset {}
 ```
 
-Run the same migration command before starting `web` and `worker`. Include the release overlay and your local external-database override in every application command when deploying the published image.
+Run the same migration command before starting `web` and `worker`. Include the release overlay followed by your local external-database override in every application command when deploying the published image.
 
 ## Secrets
 
