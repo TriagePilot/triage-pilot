@@ -72,12 +72,12 @@ export function validateComposeSmokeConfig(config, sources) {
     webIdentity: hasExactApplicationIdentity(
       web,
       REPOSITORY_ROOT,
-      ["pnpm", "--filter", "@triagepilot/web", "start"],
+      ["node", "apps/web/dist/server.js"],
     ),
     workerIdentity: hasExactApplicationIdentity(
       worker,
       REPOSITORY_ROOT,
-      ["pnpm", "--filter", "@triagepilot/worker", "start"],
+      ["node", "apps/worker/dist/main.js"],
     ),
     postgresHealthcheck: hasExactHealthcheck(postgres, ["CMD-SHELL", "pg_isready -U triagepilot -d triagepilot"]),
     webHealthcheck: hasExactHealthcheck(web, [

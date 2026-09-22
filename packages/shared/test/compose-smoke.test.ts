@@ -686,7 +686,7 @@ function validConfig(): SmokeConfig {
           context: repositoryRoot,
           dockerfile: "Dockerfile",
         },
-        command: ["pnpm", "--filter", "@triagepilot/web", "start"],
+        command: ["node", "apps/web/dist/server.js"],
         entrypoint: null,
         healthcheck: {
           test: [
@@ -735,7 +735,7 @@ function validConfig(): SmokeConfig {
           context: repositoryRoot,
           dockerfile: "Dockerfile",
         },
-        command: ["pnpm", "--filter", "@triagepilot/worker", "start"],
+        command: ["node", "apps/worker/dist/main.js"],
         entrypoint: null,
         environment: {
           NODE_ENV: "production",
@@ -955,7 +955,7 @@ process.stdout.write(JSON.stringify({
   },
   web: {
     build: { context: repositoryRoot, dockerfile: "Dockerfile" },
-    command: ["pnpm", "--filter", "@triagepilot/web", "start"],
+    command: ["node", "apps/web/dist/server.js"],
     entrypoint: null,
     healthcheck: {
       test: [
@@ -1001,7 +1001,7 @@ process.stdout.write(JSON.stringify({
   },
   worker: {
     build: { context: repositoryRoot, dockerfile: "Dockerfile" },
-    command: ["pnpm", "--filter", "@triagepilot/worker", "start"],
+    command: ["node", "apps/worker/dist/main.js"],
     entrypoint: null,
     environment: {
       NODE_ENV: env.NODE_ENV,

@@ -124,6 +124,9 @@ jobs:
             --tag "triagepilot-release:${{ steps.release_meta.outputs.version }}" \
             .
 
+      - name: Verify production image contents
+        run: node scripts/verify-production-image.mjs "triagepilot-release:${{ steps.release_meta.outputs.version }}"
+
       - name: Build publishable OCI image archive
         run: |
           set -Eeuo pipefail

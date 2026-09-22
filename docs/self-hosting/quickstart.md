@@ -32,7 +32,7 @@ and start the services:
 ```bash
 docker compose build --pull
 docker compose up -d postgres
-docker compose run --rm web pnpm db:migrate
+docker compose run --rm web node packages/db/dist/migrate.js
 docker compose up -d web worker
 ```
 

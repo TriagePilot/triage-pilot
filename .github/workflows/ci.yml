@@ -50,7 +50,8 @@ jobs:
         run: git cat-file -e "${TRIAGEPILOT_UPGRADE_PREVIOUS_RELEASE_COMMIT}^{commit}"
       - run: pnpm check:package-boundary
       - run: docker compose config
-      - run: docker build .
+      - run: docker build --tag triagepilot-ci:production .
+      - run: node scripts/verify-production-image.mjs triagepilot-ci:production
       - run: bash scripts/test-previous-release-upgrade.sh
       - run: pnpm check:public-boundary
       - name: Scan tracked history for secrets

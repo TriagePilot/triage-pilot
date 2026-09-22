@@ -19,7 +19,8 @@ pnpm build
 DATABASE_URL=postgres://triagepilot:triagepilot@localhost:5432/triagepilot pnpm db:migrate
 pnpm check:package-boundary
 docker compose config
-docker build .
+docker build --tag triagepilot-release-check:production .
+node scripts/verify-production-image.mjs triagepilot-release-check:production
 bash scripts/test-previous-release-upgrade.sh
 pnpm check:public-boundary
 pnpm smoke:compose
@@ -27,7 +28,7 @@ gitleaks detect --source . --no-banner
 test -f LICENSE -a -f SECURITY.md -a -f CONTRIBUTING.md -a -f CODE_OF_CONDUCT.md
 ```
 
-Record the command outputs and identify the authentication, installation-token, organization/workspace scope, delivery deduplication, routing recovery, reviewer availability and replacement finalizer, status-first connection revocation, shadow and enforce processing, dashboard, and retention tests. Confirm the migration used an empty database, the previous-release upgrade reached `0010_provider_connection_preemptive_revocations.sql` and recorded both `0005_reviewer_availability.sql` and `0005_workspace_scope.sql`, the Compose smoke endpoint returned HTTP 200, the secret and public-boundary scans reported no findings, and pull-request CI did not publish an image.
+Record the command outputs and identify the authentication, installation-token, organization/workspace scope, delivery deduplication, routing recovery, reviewer availability and replacement finalizer, status-first connection revocation, shadow and enforce processing, dashboard, and retention tests. Confirm the image verifier reported a non-root compiled runtime without source or development tooling, the migration used an empty database, the previous-release upgrade reached `0010_provider_connection_preemptive_revocations.sql` and recorded both `0005_reviewer_availability.sql` and `0005_workspace_scope.sql`, the Compose smoke endpoint returned HTTP 200, the secret and public-boundary scans reported no findings, and pull-request CI did not publish an image.
 
 Use a fresh disposable PostgreSQL server for release evidence; do not point the integration gate at a persistent deployment database. On a constrained local Docker runtime, database-backed Vitest files may exhaust the shared server when run in parallel. In that environment, retain the unconstrained result as diagnostic evidence and rerun the database-backed batch against a fresh disposable server with `--maxWorkers=1 --minWorkers=1`. This is local runner guidance, not permission to replace or weaken the canonical `pnpm test` command in CI or the final release record.
 

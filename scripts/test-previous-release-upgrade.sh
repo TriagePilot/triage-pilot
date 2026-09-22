@@ -239,7 +239,7 @@ services:
 
   web-current:
     image: \${TRIAGEPILOT_UPGRADE_CURRENT_IMAGE}
-    command: pnpm --filter @triagepilot/web start
+    command: node apps/web/dist/server.js
     restart: unless-stopped
     environment:
       NODE_ENV: \${NODE_ENV}
@@ -281,7 +281,7 @@ services:
 
   migrate-current:
     image: \${TRIAGEPILOT_UPGRADE_CURRENT_IMAGE}
-    command: pnpm db:migrate
+    command: node packages/db/dist/migrate.js
     restart: "no"
     environment:
       DATABASE_URL: \${DATABASE_URL}

@@ -6,11 +6,13 @@ Use Docker Compose for the first supported self-hosted production path.
 
 ```bash
 docker compose up -d postgres
-docker compose run --rm web pnpm db:migrate
+docker compose run --rm web node packages/db/dist/migrate.js
 docker compose up -d web worker
 ```
 
 The supported stack is `web`, exactly one `worker`, and PostgreSQL. Do not scale the worker above one replica.
+
+The production image runs precompiled JavaScript directly on Node.js as an unprivileged user. It intentionally does not include pnpm, TypeScript, tests, or repository source; use the documented `node` migration command inside the image rather than source-checkout package scripts.
 
 ## TLS
 
