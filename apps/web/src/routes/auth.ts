@@ -3,13 +3,13 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 import type { WorkspaceId } from "@triagepilot/contracts";
 
-import { createLoginThrottle } from "../auth/login-throttle";
+import { createLoginThrottle } from "../auth/login-throttle.js";
 import {
   createSessionToken,
   SESSION_COOKIE,
   sessionCookieOptions,
   verifySessionToken,
-} from "../auth/session";
+} from "../auth/session.js";
 
 export interface AdminSessionServices {
   adminUsername: string;

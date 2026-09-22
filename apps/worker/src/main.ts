@@ -2,8 +2,8 @@ import { pathToFileURL } from "node:url";
 
 import { formatLog } from "@triagepilot/shared";
 
-import { createSelfHostedWorkerComposition } from "./composition/self-hosted";
-import { readWorkerEnv } from "./env";
+import { createSelfHostedWorkerComposition } from "./composition/self-hosted.js";
+import { readWorkerEnv } from "./env.js";
 
 export async function runWorkerProcess(source: NodeJS.ProcessEnv = process.env): Promise<void> {
   const env = await readWorkerEnv(source);

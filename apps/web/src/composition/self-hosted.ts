@@ -27,9 +27,9 @@ import {
   verifyGitHubSignature,
 } from "@triagepilot/provider-github";
 
-import type { WebServices } from "../app";
-import type { WebRuntimeEnv } from "../runtime-env";
-import { createWebRuntimeServices } from "../runtime-services";
+import type { WebServices } from "../app.js";
+import type { WebRuntimeEnv } from "../runtime-env.js";
+import { createWebRuntimeServices } from "../runtime-services.js";
 
 type DatabaseClient = ReturnType<typeof createDatabase>;
 

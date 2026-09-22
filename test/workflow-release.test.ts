@@ -3,6 +3,16 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 describe("release workflow guardrails", () => {
+  it("runs CI and release verification on Node 24", async () => {
+    for (const workflow of ["ci.yml", "release.yml"]) {
+      const content = await readFile(new URL(`../.github/workflows/${workflow}`, import.meta.url), "utf8");
+      const configuredVersions = [...content.matchAll(/node-version:\s*(\d+)/g)].map((match) => match[1]);
+
+      expect(configuredVersions.length).toBeGreaterThan(0);
+      expect(new Set(configuredVersions)).toEqual(new Set(["24"]));
+    }
+  });
+
   it("declares the canonical GitHub repository in every OIDC-published npm package", async () => {
     for (const packageDirectory of ["contracts", "config", "core", "application", "db", "provider-github", "ui"]) {
       const manifest = JSON.parse(

@@ -8,7 +8,7 @@ import {
 } from "@triagepilot/application";
 import type { ReviewerAbsenceActivationJobPayload } from "@triagepilot/contracts";
 import type { ProviderKind } from "@triagepilot/contracts";
-import { classifyWorkerError, PermanentJobError } from "./errors";
+import { classifyWorkerError, PermanentJobError } from "./errors.js";
 
 export type ReviewerAvailabilityServices = ReviewerAvailabilityPorts;
 export interface ReviewerAbsenceActivationJobMessage extends ReviewerAbsenceActivationJobPayload {

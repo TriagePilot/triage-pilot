@@ -6,7 +6,7 @@ import {
   RoutingRecoveryValidationError,
 } from "@triagepilot/application";
 
-import { requireAdminSession, type AdminSessionServices } from "./auth";
+import { requireAdminSession, type AdminSessionServices } from "./auth.js";
 
 export interface OperationsServices extends AdminSessionServices {
   listOperationsOverview(): Promise<OperationsOverview>;

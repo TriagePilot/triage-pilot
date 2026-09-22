@@ -20,7 +20,7 @@
     "db:migrate": "pnpm --filter @triagepilot/db migrate"
   },
   "devDependencies": {
-    "@types/node": "^22.10.2",
+    "@types/node": "^24.0.0",
     "happy-dom": "^20.11.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",

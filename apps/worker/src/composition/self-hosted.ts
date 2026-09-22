@@ -24,26 +24,26 @@ import {
   GitHubCredentialProvider,
 } from "@triagepilot/provider-github";
 
-import type { WorkerEnv } from "../env";
-import { runPlatformOutboxDrain, runWorkerMaintenance, runWorkerStartup } from "../maintenance";
-import type { RoutingJobMessage, RoutingJobServices } from "../processor";
-import { processRoutingJob } from "../processor";
-import { processHumanReviewPolicyJob } from "../review-policy-processor";
-import type { HumanReviewPolicyServices } from "../review-policy-processor";
+import type { WorkerEnv } from "../env.js";
+import { runPlatformOutboxDrain, runWorkerMaintenance, runWorkerStartup } from "../maintenance.js";
+import type { RoutingJobMessage, RoutingJobServices } from "../processor.js";
+import { processRoutingJob } from "../processor.js";
+import { processHumanReviewPolicyJob } from "../review-policy-processor.js";
+import type { HumanReviewPolicyServices } from "../review-policy-processor.js";
 import {
   markReviewerReplacementRecoveryExhausted,
   processReviewerAbsenceActivationJob,
   recoverReviewerReplacementFinalizer,
   type ReviewerAbsenceActivationJobMessage,
   type ReviewerAvailabilityServices,
-} from "../availability-processor";
-import { runWorkerOnce } from "../runner";
+} from "../availability-processor.js";
+import { runWorkerOnce } from "../runner.js";
 import {
   createNoopPlatformEventSink,
   createWorkerHumanReviewPolicyServiceFactory,
   createWorkerReviewerAvailabilityServiceFactory,
   createWorkerRoutingServiceFactory,
-} from "../runtime-services";
+} from "../runtime-services.js";
 
 type DatabaseClient = ReturnType<typeof createDatabase>;
 type RequesterFactory = typeof createInstallationRequester;

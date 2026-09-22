@@ -3,9 +3,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 
-import { createWebApp, type StaticAsset } from "./app";
-import { createSelfHostedWebComposition } from "./composition/self-hosted";
-import { readWebRuntimeEnv } from "./runtime-env";
+import { createWebApp, type StaticAsset } from "./app.js";
+import { createSelfHostedWebComposition } from "./composition/self-hosted.js";
+import { readWebRuntimeEnv } from "./runtime-env.js";
 
 const env = await readWebRuntimeEnv(process.env);
 const composition = await createSelfHostedWebComposition(env);
