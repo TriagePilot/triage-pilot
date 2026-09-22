@@ -23,6 +23,16 @@ describe("release workflow guardrails", () => {
     expect(ci).toContain('git cat-file -e "${TRIAGEPILOT_UPGRADE_PREVIOUS_RELEASE_COMMIT}^{commit}"');
   });
 
+  it("checks out the triggering ref explicitly so annotated release tags remain tag objects", async () => {
+    const release = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+    const checkoutBlocks = release.match(/- uses: actions\/checkout@[0-9a-f]{40}\n\s+with:\n(?: {10}.+\n)+/g) ?? [];
+
+    expect(checkoutBlocks).toHaveLength(2);
+    for (const checkoutBlock of checkoutBlocks) {
+      expect(checkoutBlock).toContain("ref: ${{ github.ref }}");
+    }
+  });
+
   it("waits for the upgrade database healthcheck rather than its temporary initialization server", async () => {
     const upgrade = await readFile(new URL("../scripts/test-previous-release-upgrade.sh", import.meta.url), "utf8");
 
