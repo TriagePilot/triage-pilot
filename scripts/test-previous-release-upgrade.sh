@@ -141,6 +141,11 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$private_key_
 openssl rand -hex 32 > "$webhook_secret_file"
 openssl rand -hex 24 > "$admin_password_file"
 openssl rand -hex 32 > "$session_secret_file"
+node "$repository_root/scripts/prepare-runtime-secret-files.mjs" \
+  "$private_key_file" \
+  "$webhook_secret_file" \
+  "$admin_password_file" \
+  "$session_secret_file"
 
 mkdir -p "$previous_checkout"
 if ! git -C "$repository_root" cat-file -e "${previous_release_commit}^{commit}" 2>/dev/null; then

@@ -70,3 +70,5 @@ Generate independent administrator password, session-signing secret, and webhook
 | Webhook secret | `GITHUB_WEBHOOK_SECRET` | `GITHUB_WEBHOOK_SECRET_FILE` |
 
 Do not set both the direct and file form of the same secret. Mount secret files read-only and set each `_FILE` value to its in-container path. The worker requires the App ID and private key but does not require or receive the webhook secret.
+
+The production image runs as UID/GID `1000:1000`, so every bind-mounted secret must be readable by that identity. Either make the file owned by `1000:1000` with mode `0400`, or keep it in a host directory accessible only to the deployment administrator and give the file mode `0444`; the read-only mount prevents container-side modification. A root-owned `0600` file is intentionally unreadable to the non-root application and prevents startup.
