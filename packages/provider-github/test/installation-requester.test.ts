@@ -14,7 +14,9 @@ describe("createInstallationRequester", () => {
     mocks.App.mockReset();
     mocks.getInstallationOctokit.mockReset();
     mocks.getInstallationOctokit.mockResolvedValue({ request: vi.fn() });
-    mocks.App.mockImplementation(() => ({ getInstallationOctokit: mocks.getInstallationOctokit }));
+    mocks.App.mockImplementation(function App() {
+      return { getInstallationOctokit: mocks.getInstallationOctokit };
+    });
   });
 
   it("creates an installation-scoped requester from configured App credentials", async () => {
