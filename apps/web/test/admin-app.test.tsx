@@ -63,7 +63,9 @@ describe("admin application", () => {
   it("keeps heartbeat copy in English when the browser default locale is Slovak", () => {
     const RealDateTimeFormat = Intl.DateTimeFormat;
     const formatter = vi.spyOn(Intl, "DateTimeFormat").mockImplementation(
-      (locales, options) => new RealDateTimeFormat(locales ?? "sk", options),
+      function DateTimeFormat(locales, options) {
+        return new RealDateTimeFormat(locales ?? "sk", options);
+      },
     );
     try {
       const html = renderToStaticMarkup(
