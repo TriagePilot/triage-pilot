@@ -3,6 +3,36 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 describe("release workflow guardrails", () => {
+  it("keeps the v1.1.1 release version synchronized across publishable artifacts", async () => {
+    const expectedVersion = "1.1.1";
+    const packageDirectories = ["contracts", "config", "core", "application", "db", "provider-github", "ui"];
+    const rootManifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+    const dockerfile = await readFile(new URL("../Dockerfile", import.meta.url), "utf8");
+    const lockfile = await readFile(new URL("../pnpm-lock.yaml", import.meta.url), "utf8");
+
+    expect(rootManifest.version).toBe(expectedVersion);
+    expect(dockerfile).toContain(`ARG TRIAGEPILOT_VERSION=${expectedVersion}`);
+
+    let internalDependencyCount = 0;
+    for (const packageDirectory of packageDirectories) {
+      const manifest = JSON.parse(
+        await readFile(new URL(`../packages/${packageDirectory}/package.json`, import.meta.url), "utf8"),
+      );
+      expect(manifest.version, `packages/${packageDirectory}`).toBe(expectedVersion);
+
+      for (const [dependencyName, dependencyVersion] of Object.entries(manifest.dependencies ?? {})) {
+        if (dependencyName.startsWith("@triagepilot/")) {
+          expect(dependencyVersion, `${manifest.name} -> ${dependencyName}`).toBe(`workspace:${expectedVersion}`);
+          internalDependencyCount += 1;
+        }
+      }
+    }
+
+    expect(internalDependencyCount).toBe(8);
+    expect(lockfile.match(new RegExp(`specifier: workspace:${expectedVersion.replaceAll(".", "\\.")}`, "g"))).toHaveLength(8);
+    expect(lockfile).not.toContain("workspace:1.1.0");
+  });
+
   it("runs CI and release verification on Node 24", async () => {
     for (const workflow of ["ci.yml", "release.yml"]) {
       const content = await readFile(new URL(`../.github/workflows/${workflow}`, import.meta.url), "utf8");
@@ -126,9 +156,12 @@ describe("release workflow guardrails", () => {
     expect(release).toContain("node scripts/publish-release-artifacts.mjs");
     expect(release).toContain("npm install --global npm@11.5.1");
     expect(release).toMatch(
-      /- name: Publish verified artifacts idempotently\n\s+env:\n\s+GH_TOKEN: \$\{\{ secrets\.GITHUB_TOKEN \}\}\n\s+NODE_AUTH_TOKEN: \$\{\{ secrets\.NPM_TOKEN \}\}/,
+      /- name: Publish verified artifacts idempotently\n\s+env:\n\s+GH_TOKEN: \$\{\{ secrets\.GITHUB_TOKEN \}\}\n\s+run:/,
     );
-    expect(release.split("NODE_AUTH_TOKEN:")).toHaveLength(2);
+    expect(release).not.toContain("secrets.NPM_TOKEN");
+    expect(release).not.toContain("NODE_AUTH_TOKEN");
+    expect(release).toContain("environment: public-release");
+    expect(release).toContain("id-token: write");
     expect(release).toContain("attestations: write");
     expect(release).toContain("artifact-metadata: write");
     expect(release).toContain("actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6");

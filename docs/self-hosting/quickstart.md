@@ -39,7 +39,7 @@ docker compose -f docker-compose.yml -f docker-compose.release.yml run --rm web 
 docker compose -f docker-compose.yml -f docker-compose.release.yml up -d web worker
 ```
 
-The overlay defaults to `ghcr.io/triagepilot/triage-pilot:1.1.0`, published for `linux/amd64` and `linux/arm64`. To use another exact release or pin the release manifest's digest, set the complete reference in `.env` before running Compose:
+The overlay defaults to `ghcr.io/triagepilot/triage-pilot:1.1.1`, published for `linux/amd64` and `linux/arm64`. To use another exact release or pin the release manifest's digest, set the complete reference in `.env` before running Compose. For example, the previous `v1.1.0` release can be pinned exactly:
 
 ```dotenv
 TRIAGEPILOT_IMAGE=ghcr.io/triagepilot/triage-pilot:1.1.0@sha256:02465d76467f1471b572a9605564c3b67bdbdb23e96cd773c4ca0ab205f39e4d
