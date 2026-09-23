@@ -1,8 +1,8 @@
 services:
   web:
-    image: ${TRIAGEPILOT_IMAGE:-ghcr.io/triagepilot/triage-pilot:1.1.0}
+    image: ${TRIAGEPILOT_IMAGE:-ghcr.io/triagepilot/triage-pilot:1.1.1}
     build: !reset null
 
   worker:
-    image: ${TRIAGEPILOT_IMAGE:-ghcr.io/triagepilot/triage-pilot:1.1.0}
+    image: ${TRIAGEPILOT_IMAGE:-ghcr.io/triagepilot/triage-pilot:1.1.1}
     build: !reset null

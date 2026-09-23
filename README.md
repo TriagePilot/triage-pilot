@@ -24,7 +24,7 @@ docker compose -f docker-compose.yml -f docker-compose.release.yml run --rm web 
 docker compose -f docker-compose.yml -f docker-compose.release.yml up -d web worker
 ```
 
-The release overlay runs both application services from `ghcr.io/triagepilot/triage-pilot:1.1.0`: one container starts the web server and a second starts the worker. PostgreSQL remains the separate `postgres:16` service. Open `http://localhost:8787` and log in with `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
+The release overlay runs both application services from `ghcr.io/triagepilot/triage-pilot:1.1.1`: one container starts the web server and a second starts the worker. PostgreSQL remains the separate `postgres:16` service. Open `http://localhost:8787` and log in with `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
 
 See the [full quickstart](docs/self-hosting/quickstart.md) for the build-from-source alternative, GitHub App creation, selected-repository installation, secret files, and production notes.
 
