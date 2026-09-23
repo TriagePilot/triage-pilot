@@ -3,6 +3,36 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 describe("release workflow guardrails", () => {
+  it("keeps the v1.1.1 release version synchronized across publishable artifacts", async () => {
+    const expectedVersion = "1.1.1";
+    const packageDirectories = ["contracts", "config", "core", "application", "db", "provider-github", "ui"];
+    const rootManifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+    const dockerfile = await readFile(new URL("../Dockerfile", import.meta.url), "utf8");
+    const lockfile = await readFile(new URL("../pnpm-lock.yaml", import.meta.url), "utf8");
+
+    expect(rootManifest.version).toBe(expectedVersion);
+    expect(dockerfile).toContain(`ARG TRIAGEPILOT_VERSION=${expectedVersion}`);
+
+    let internalDependencyCount = 0;
+    for (const packageDirectory of packageDirectories) {
+      const manifest = JSON.parse(
+        await readFile(new URL(`../packages/${packageDirectory}/package.json`, import.meta.url), "utf8"),
+      );
+      expect(manifest.version, `packages/${packageDirectory}`).toBe(expectedVersion);
+
+      for (const [dependencyName, dependencyVersion] of Object.entries(manifest.dependencies ?? {})) {
+        if (dependencyName.startsWith("@triagepilot/")) {
+          expect(dependencyVersion, `${manifest.name} -> ${dependencyName}`).toBe(`workspace:${expectedVersion}`);
+          internalDependencyCount += 1;
+        }
+      }
+    }
+
+    expect(internalDependencyCount).toBe(8);
+    expect(lockfile.match(new RegExp(`specifier: workspace:${expectedVersion.replaceAll(".", "\\.")}`, "g"))).toHaveLength(8);
+    expect(lockfile).not.toContain("workspace:1.1.0");
+  });
+
   it("runs CI and release verification on Node 24", async () => {
     for (const workflow of ["ci.yml", "release.yml"]) {
       const content = await readFile(new URL(`../.github/workflows/${workflow}`, import.meta.url), "utf8");
