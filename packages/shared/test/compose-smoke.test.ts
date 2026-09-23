@@ -686,7 +686,7 @@ function validConfig(): SmokeConfig {
           context: repositoryRoot,
           dockerfile: "Dockerfile",
         },
-        command: ["pnpm", "--filter", "@triagepilot/web", "start"],
+        command: ["node", "apps/web/dist/server.js"],
         entrypoint: null,
         healthcheck: {
           test: [
@@ -735,7 +735,7 @@ function validConfig(): SmokeConfig {
           context: repositoryRoot,
           dockerfile: "Dockerfile",
         },
-        command: ["pnpm", "--filter", "@triagepilot/worker", "start"],
+        command: ["node", "apps/worker/dist/main.js"],
         entrypoint: null,
         environment: {
           NODE_ENV: "production",
@@ -915,12 +915,21 @@ if [[ "$compose_file_count" != 2 || "$environment_file_count" != 1 ]]; then
 fi
 if [[ "$*" == *"config --format json"* ]]; then
   node - "$environment_file" "$3" "$5" <<'NODE'
-const { readFileSync } = require("node:fs");
+const { readFileSync, statSync } = require("node:fs");
 const { dirname } = require("node:path");
 const env = Object.fromEntries(readFileSync(process.argv[2], "utf8").trim().split("\\n").map((line) => {
   const separator = line.indexOf("=");
   return [line.slice(0, separator), line.slice(separator + 1)];
 }));
+for (const name of [
+  "SMOKE_PRIVATE_KEY_HOST_PATH",
+  "SMOKE_WEBHOOK_SECRET_HOST_PATH",
+  "SMOKE_ADMIN_PASSWORD_HOST_PATH",
+  "SMOKE_SESSION_SECRET_HOST_PATH",
+]) {
+  const mode = statSync(env[name]).mode & 0o777;
+  if (mode !== 0o444) throw new Error("runtime secret " + name + " has mode " + mode.toString(8));
+}
 const project = process.argv[3];
 const repositoryRoot = dirname(process.argv[4]);
 const mount = (source, target) => ({ type: "bind", source, target, read_only: true });
@@ -955,7 +964,7 @@ process.stdout.write(JSON.stringify({
   },
   web: {
     build: { context: repositoryRoot, dockerfile: "Dockerfile" },
-    command: ["pnpm", "--filter", "@triagepilot/web", "start"],
+    command: ["node", "apps/web/dist/server.js"],
     entrypoint: null,
     healthcheck: {
       test: [
@@ -1001,7 +1010,7 @@ process.stdout.write(JSON.stringify({
   },
   worker: {
     build: { context: repositoryRoot, dockerfile: "Dockerfile" },
-    command: ["pnpm", "--filter", "@triagepilot/worker", "start"],
+    command: ["node", "apps/worker/dist/main.js"],
     entrypoint: null,
     environment: {
       NODE_ENV: env.NODE_ENV,

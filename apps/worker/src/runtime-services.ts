@@ -49,10 +49,10 @@ import {
   type RoutingApplicationPorts,
 } from "@triagepilot/application";
 
-import type { RoutingJobMessage, RoutingJobServices } from "./processor";
-import { classifyWorkerError, PermanentJobError } from "./errors";
-import { processHumanReviewPolicyJob, type HumanReviewPolicyServices } from "./review-policy-processor";
-import type { ReviewerAbsenceActivationJobMessage } from "./availability-processor";
+import type { RoutingJobMessage, RoutingJobServices } from "./processor.js";
+import { classifyWorkerError, PermanentJobError } from "./errors.js";
+import { processHumanReviewPolicyJob, type HumanReviewPolicyServices } from "./review-policy-processor.js";
+import type { ReviewerAbsenceActivationJobMessage } from "./availability-processor.js";
 
 type Requester = Awaited<ReturnType<typeof createInstallationRequester>>;
 type DatabaseClient = ReturnType<typeof createDatabase>;

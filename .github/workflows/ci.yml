@@ -34,7 +34,7 @@ jobs:
           version: 11.1.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
@@ -50,7 +50,8 @@ jobs:
         run: git cat-file -e "${TRIAGEPILOT_UPGRADE_PREVIOUS_RELEASE_COMMIT}^{commit}"
       - run: pnpm check:package-boundary
       - run: docker compose config
-      - run: docker build .
+      - run: docker build --tag triagepilot-ci:production .
+      - run: node scripts/verify-production-image.mjs triagepilot-ci:production
       - run: bash scripts/test-previous-release-upgrade.sh
       - run: pnpm check:public-boundary
       - name: Scan tracked history for secrets
@@ -68,5 +69,5 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: 22
+          node-version: 24
       - run: bash scripts/compose-smoke.sh

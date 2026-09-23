@@ -18,7 +18,7 @@ services:
 
   web:
     build: .
-    command: pnpm --filter @triagepilot/web start
+    command: node apps/web/dist/server.js
     restart: unless-stopped
     environment:
       NODE_ENV: ${NODE_ENV:-production}
@@ -48,7 +48,7 @@ services:
 
   worker:
     build: .
-    command: pnpm --filter @triagepilot/worker start
+    command: node apps/worker/dist/main.js
     restart: unless-stopped
     environment:
       NODE_ENV: ${NODE_ENV:-production}

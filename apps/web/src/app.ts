@@ -1,10 +1,10 @@
 import { Hono } from "hono";
 import { formatLog } from "@triagepilot/shared";
 
-import { authRoutes, type AuthServices } from "./routes/auth";
-import { availabilityRoutes, type AvailabilityServices } from "./routes/availability";
-import { operationsRoutes, type OperationsServices } from "./routes/operations";
-import { githubWebhookRoutes, type WebhookServices } from "./routes/webhooks";
+import { authRoutes, type AuthServices } from "./routes/auth.js";
+import { availabilityRoutes, type AvailabilityServices } from "./routes/availability.js";
+import { operationsRoutes, type OperationsServices } from "./routes/operations.js";
+import { githubWebhookRoutes, type WebhookServices } from "./routes/webhooks.js";
 
 export type WebServices = WebhookServices & AuthServices & OperationsServices & AvailabilityServices & {
   checkDatabase(): Promise<void>;

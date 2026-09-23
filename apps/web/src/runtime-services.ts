@@ -18,7 +18,7 @@ import {
 import { formatLog } from "@triagepilot/shared";
 import { sql } from "kysely";
 
-import type { WebServices } from "./app";
+import type { WebServices } from "./app.js";
 
 interface WebRuntimeServicesInput {
   db: ReturnType<typeof createDatabase>;

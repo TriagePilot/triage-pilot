@@ -118,6 +118,11 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$private_key_
 openssl rand -hex 32 > "$webhook_secret_file"
 openssl rand -hex 24 > "$admin_password_file"
 openssl rand -hex 32 > "$session_secret_file"
+node "$repository_root/scripts/prepare-runtime-secret-files.mjs" \
+  "$private_key_file" \
+  "$webhook_secret_file" \
+  "$admin_password_file" \
+  "$session_secret_file"
 
 cat > "$environment_file" <<EOF
 NODE_ENV=production
@@ -180,7 +185,7 @@ compose config --format json | node "$validator" --config-sources \
   "$admin_password_file" \
   "$session_secret_file"
 compose up -d postgres
-compose run --rm web pnpm db:migrate
+compose run --rm web node packages/db/dist/migrate.js
 compose up -d web worker
 
 published_address="$(compose port web 8787)"

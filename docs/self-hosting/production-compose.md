@@ -9,7 +9,7 @@ Explicit `-f` arguments disable automatic loading of `docker-compose.override.ym
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.release.yml pull web worker
 docker compose -f docker-compose.yml -f docker-compose.release.yml up -d postgres
-docker compose -f docker-compose.yml -f docker-compose.release.yml run --rm web pnpm db:migrate
+docker compose -f docker-compose.yml -f docker-compose.release.yml run --rm web node packages/db/dist/migrate.js
 docker compose -f docker-compose.yml -f docker-compose.release.yml up -d web worker
 ```
 
@@ -18,6 +18,8 @@ The supported stack is `web`, exactly one `worker`, and PostgreSQL. The web and 
 The overlay defaults to the repository's current release tag. For an immutable production deployment, set `TRIAGEPILOT_IMAGE` in `.env` to the version-and-digest reference recorded in that release's `release-manifest.json`. Update both application services together by changing this single value.
 
 To build from source, omit `docker-compose.release.yml`, run `docker compose build --pull`, and use the base `docker compose` command for the same start order.
+
+The production image runs precompiled JavaScript directly on Node.js as an unprivileged user. It intentionally does not include pnpm, TypeScript, tests, or repository source; use the documented `node` migration command inside the image rather than source-checkout package scripts.
 
 ## TLS
 
@@ -68,3 +70,5 @@ Generate independent administrator password, session-signing secret, and webhook
 | Webhook secret | `GITHUB_WEBHOOK_SECRET` | `GITHUB_WEBHOOK_SECRET_FILE` |
 
 Do not set both the direct and file form of the same secret. Mount secret files read-only and set each `_FILE` value to its in-container path. The worker requires the App ID and private key but does not require or receive the webhook secret.
+
+The production image runs as UID/GID `1000:1000`, so every bind-mounted secret must be readable by that identity. Either make the file owned by `1000:1000` with mode `0400`, or keep it in a host directory accessible only to the deployment administrator and give the file mode `0444`; the read-only mount prevents container-side modification. A root-owned `0600` file is intentionally unreadable to the non-root application and prevents startup.

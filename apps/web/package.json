@@ -3,10 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vite build && tsc -p tsconfig.json --noEmit",
+    "build": "rm -rf dist && vite build && tsc -p tsconfig.build.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx watch src/server.ts",
-    "start": "tsx src/server.ts"
+    "start": "node dist/server.js"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.15",
@@ -17,17 +17,17 @@
     "@triagepilot/db": "workspace:*",
     "@triagepilot/provider-github": "workspace:*",
     "@triagepilot/shared": "workspace:*",
-    "@triagepilot/ui": "workspace:*",
-    "@vitejs/plugin-react": "^4.3.4",
     "hono": "^4.13.5",
     "kysely": "^0.28.17",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "vite": "^6.0.7",
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@triagepilot/ui": "workspace:*",
     "@types/react": "^18.3.18",
-    "@types/react-dom": "^18.3.5"
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^6.0.7"
   }
 }

@@ -47,7 +47,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
 
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
@@ -123,6 +123,9 @@ jobs:
             --build-arg "TRIAGEPILOT_FUTURE_LICENSE_EFFECTIVE_AT=${{ steps.release_meta.outputs.artifact_future_license_effective_at }}" \
             --tag "triagepilot-release:${{ steps.release_meta.outputs.version }}" \
             .
+
+      - name: Verify production image contents
+        run: node scripts/verify-production-image.mjs "triagepilot-release:${{ steps.release_meta.outputs.version }}"
 
       - name: Build publishable OCI image archive
         run: |
@@ -282,7 +285,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
 
       - name: Install npm CLI with trusted publishing support

@@ -17,8 +17,8 @@ import {
   parseAvailabilityMutation,
   parseCancellationInput,
   parseTimezoneInput,
-} from "../availability-input";
-import { requireAdminSession, type AdminSessionServices } from "./auth";
+} from "../availability-input.js";
+import { requireAdminSession, type AdminSessionServices } from "./auth.js";
 
 export interface AvailabilityServices extends AdminSessionServices {
   readAvailabilitySettings(): Promise<AvailabilitySettingsOverview>;

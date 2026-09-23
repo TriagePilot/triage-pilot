@@ -7,7 +7,7 @@ git pull --ff-only
 docker compose -f docker-compose.yml -f docker-compose.release.yml pull web worker
 docker compose -f docker-compose.yml -f docker-compose.release.yml stop web worker
 docker compose -f docker-compose.yml -f docker-compose.release.yml up -d postgres
-docker compose -f docker-compose.yml -f docker-compose.release.yml run --rm web pnpm db:migrate
+docker compose -f docker-compose.yml -f docker-compose.release.yml run --rm web node packages/db/dist/migrate.js
 docker compose -f docker-compose.yml -f docker-compose.release.yml up -d web worker
 ```
 

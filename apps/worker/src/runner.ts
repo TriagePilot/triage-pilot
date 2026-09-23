@@ -7,13 +7,13 @@ import {
   type ReviewerReplacementFinalizerRecovery,
 } from "@triagepilot/application";
 
-import type { RoutingJobMessage, RoutingJobServices } from "./processor";
-import type { HumanReviewPolicyServices } from "./review-policy-processor";
-import { classifyWorkerError, PermanentJobError, StaleJobLeaseError } from "./errors";
+import type { RoutingJobMessage, RoutingJobServices } from "./processor.js";
+import type { HumanReviewPolicyServices } from "./review-policy-processor.js";
+import { classifyWorkerError, PermanentJobError, StaleJobLeaseError } from "./errors.js";
 import type {
   ReviewerAbsenceActivationJobMessage,
   ReviewerAvailabilityServices,
-} from "./availability-processor";
+} from "./availability-processor.js";
 
 const POLICY_CHECK_FINALIZATION_ATTEMPTS = 3;
 const REVIEWER_REPLACEMENT_RECOVERY_ATTEMPTS = 3;

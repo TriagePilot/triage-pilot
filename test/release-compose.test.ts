@@ -37,11 +37,11 @@ describe("release image Compose deployment", () => {
 
     expect(config.services.web).toMatchObject({
       image: expectedImage,
-      command: ["pnpm", "--filter", "@triagepilot/web", "start"],
+      command: ["node", "apps/web/dist/server.js"],
     });
     expect(config.services.worker).toMatchObject({
       image: expectedImage,
-      command: ["pnpm", "--filter", "@triagepilot/worker", "start"],
+      command: ["node", "apps/worker/dist/main.js"],
     });
     expect(config.services.web).not.toHaveProperty("build");
     expect(config.services.worker).not.toHaveProperty("build");

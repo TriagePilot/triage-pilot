@@ -3,6 +3,35 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 describe("release workflow guardrails", () => {
+  it("runs CI and release verification on Node 24", async () => {
+    for (const workflow of ["ci.yml", "release.yml"]) {
+      const content = await readFile(new URL(`../.github/workflows/${workflow}`, import.meta.url), "utf8");
+      const configuredVersions = [...content.matchAll(/node-version:\s*(\d+)/g)].map((match) => match[1]);
+
+      expect(configuredVersions.length).toBeGreaterThan(0);
+      expect(new Set(configuredVersions)).toEqual(new Set(["24"]));
+    }
+  });
+
+  it("verifies the hardened production image before CI and release smoke tests", async () => {
+    const ci = await readFile(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+    const release = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+
+    expect(ci).toContain("docker build --tag triagepilot-ci:production .");
+    expect(ci).toContain("node scripts/verify-production-image.mjs triagepilot-ci:production");
+    expect(release).toContain(
+      'node scripts/verify-production-image.mjs "triagepilot-release:${{ steps.release_meta.outputs.version }}"',
+    );
+  });
+
+  it("uses compiled commands for the current upgrade image while retaining the previous image contract", async () => {
+    const upgrade = await readFile(new URL("../scripts/test-previous-release-upgrade.sh", import.meta.url), "utf8");
+
+    expect(upgrade).toContain("command: pnpm --filter @triagepilot/web start");
+    expect(upgrade).toContain("command: node apps/web/dist/server.js");
+    expect(upgrade).toContain("command: node packages/db/dist/migrate.js");
+  });
+
   it("declares the canonical GitHub repository in every OIDC-published npm package", async () => {
     for (const packageDirectory of ["contracts", "config", "core", "application", "db", "provider-github", "ui"]) {
       const manifest = JSON.parse(
