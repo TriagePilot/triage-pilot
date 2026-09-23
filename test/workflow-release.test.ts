@@ -126,9 +126,12 @@ describe("release workflow guardrails", () => {
     expect(release).toContain("node scripts/publish-release-artifacts.mjs");
     expect(release).toContain("npm install --global npm@11.5.1");
     expect(release).toMatch(
-      /- name: Publish verified artifacts idempotently\n\s+env:\n\s+GH_TOKEN: \$\{\{ secrets\.GITHUB_TOKEN \}\}\n\s+NODE_AUTH_TOKEN: \$\{\{ secrets\.NPM_TOKEN \}\}/,
+      /- name: Publish verified artifacts idempotently\n\s+env:\n\s+GH_TOKEN: \$\{\{ secrets\.GITHUB_TOKEN \}\}\n\s+run:/,
     );
-    expect(release.split("NODE_AUTH_TOKEN:")).toHaveLength(2);
+    expect(release).not.toContain("secrets.NPM_TOKEN");
+    expect(release).not.toContain("NODE_AUTH_TOKEN");
+    expect(release).toContain("environment: public-release");
+    expect(release).toContain("id-token: write");
     expect(release).toContain("attestations: write");
     expect(release).toContain("artifact-metadata: write");
     expect(release).toContain("actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6");
