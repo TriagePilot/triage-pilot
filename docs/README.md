@@ -21,7 +21,6 @@
 
 ## Develop And Extend
 
-- [Approved self-hosting design](specs/2026-07-07-open-source-self-hosting-design.md)
 - [Architecture](architecture.md)
 - [Agent development guide](../AGENTS.md)
 - [Deployment overlays](operations/deployment-overlays.md)

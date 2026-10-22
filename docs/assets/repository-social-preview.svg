@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">TriagePilot — Self-hosted GitHub reviewer routing</title>
+  <desc id="desc">PR changes flow through risk, ownership, and availability to a reviewer decision. Evaluate in write-free shadow mode.</desc>
+  <rect width="1280" height="640" fill="#063b66"/>
+  <circle cx="1200" cy="40" r="290" fill="#08b7b6" opacity=".07"/>
+  <path d="M64 80h32v32H64z" fill="#08b7b6" rx="6"/>
+  <path d="m72 96 6 6 11-13" fill="none" stroke="#063b66" stroke-width="4"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <text x="112" y="105" font-size="34" font-weight="700" fill="#fff">Triage<tspan fill="#08b7b6">Pilot</tspan></text>
+    <text x="64" y="190" font-size="46" font-weight="700" fill="#fff">Self-hosted GitHub reviewer routing</text>
+    <text x="64" y="236" font-size="24" fill="#bdd4e4">Make reviewer selection inspectable.</text>
+    <rect x="64" y="308" width="260" height="150" rx="18" fill="#fff"/>
+    <text x="92" y="347" font-size="16" font-weight="700" fill="#60758a">01 / INPUT</text>
+    <text x="92" y="401" font-size="30" font-weight="700" fill="#063b66">PR changes</text>
+    <rect x="394" y="308" width="422" height="150" rx="18" fill="#fff"/>
+    <text x="422" y="347" font-size="16" font-weight="700" fill="#60758a">02 / ROUTING SIGNALS</text>
+    <text x="422" y="393" font-size="28" font-weight="700" fill="#063b66">Risk + ownership</text>
+    <text x="422" y="430" font-size="28" font-weight="700" fill="#063b66">+ availability</text>
+    <rect x="886" y="308" width="330" height="150" rx="18" fill="#fff"/>
+    <text x="914" y="347" font-size="16" font-weight="700" fill="#60758a">03 / OUTPUT</text>
+    <text x="914" y="393" font-size="30" font-weight="700" fill="#063b66">Reviewer</text>
+    <text x="914" y="430" font-size="30" font-weight="700" fill="#063b66">decision</text>
+    <text x="64" y="550" font-size="30" font-weight="700" fill="#08b7b6">Evaluate in write-free shadow mode.</text>
+  </g>
+  <g stroke="#08b7b6" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M340 383h36m-10-10 10 10-10 10"/>
+    <path d="M832 383h36m-10-10 10 10-10 10"/>
+  </g>
+</svg>
