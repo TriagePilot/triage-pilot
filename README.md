@@ -1,32 +1,29 @@
 # TriagePilot
 
-TriagePilot is a self-hosted, risk-based pull request router for GitHub teams.
+TriagePilot is self-hosted GitHub pull request reviewer routing based on change risk, code ownership, and reviewer availability.
 
-It receives GitHub pull request events, scores PR risk, matches changed files to ownership rules, and records the routing decision and action outcome. Central reviewer-availability schedules keep absent reviewers out of new and outstanding cohorts, and authenticated recovery can re-run routing from current GitHub state when an event was missed. Repositories default to shadow mode so teams can evaluate decisions before enabling GitHub writes.
+It is for GitHub teams whose ownership rules, reviewer absences, or reviewer-selection decisions have become difficult to manage manually.
 
-## Self-Hosted Quickstart
+Your first outcome is an inspectable routing decision in the operations dashboard, recorded in **shadow mode without GitHub writes**. Review the decision before choosing whether to enable enforce mode.
 
-```bash
-cp .env.example .env
-openssl rand -hex 24
-openssl rand -hex 32
-openssl rand -hex 32
-```
+**[Run TriagePilot in shadow mode](docs/self-hosting/quickstart.md)**
 
-Use the generated values for `ADMIN_PASSWORD`, `SESSION_SECRET`, and `GITHUB_WEBHOOK_SECRET`. Set `ADMIN_USERNAME`, `GITHUB_ORGANIZATION`, `GITHUB_APP_ID`, and `GITHUB_PRIVATE_KEY` in `.env`; leave no `replace-with-` values. Never commit `.env` or a GitHub App private key. For mounted secrets, use the corresponding `_FILE` setting instead of the direct setting; the full quickstart explains the required read-only mounts.
+You need Docker Engine with Docker Compose v2 and permission to create and install an organization GitHub App with the [required permissions](docs/github-app/permissions.md). The supported stack runs `web`, exactly one `worker`, and PostgreSQL; one deployment serves one GitHub organization and its selected repositories.
 
-Then start TriagePilot with the published release image:
+## Get help
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.release.yml pull web worker
-docker compose -f docker-compose.yml -f docker-compose.release.yml up -d postgres
-docker compose -f docker-compose.yml -f docker-compose.release.yml run --rm web node packages/db/dist/migrate.js
-docker compose -f docker-compose.yml -f docker-compose.release.yml up -d web worker
-```
+- [Setup help](https://github.com/TriagePilot/triage-pilot/issues/new?template=setup-help.yml) for installation and configuration problems.
+- [Report a bug](https://github.com/TriagePilot/triage-pilot/issues/new?template=bug-report.yml) for product behavior, routing, or documentation problems.
+- [Request a feature](https://github.com/TriagePilot/triage-pilot/issues/new?template=feature-request.yml) to describe a workflow need.
+- [Private security reporting](SECURITY.md): follow the security policy; do not post suspected vulnerabilities in public issues.
 
-The release overlay runs both application services from `ghcr.io/triagepilot/triage-pilot:1.1.1`: one container starts the web server and a second starts the worker. PostgreSQL remains the separate `postgres:16` service. Open `http://localhost:8787` and log in with `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
+Sanitize diagnostics before sharing. Exclude credentials, private keys, tokens, webhook payloads, and confidential pull request contents. Reports and feedback are welcome; external code and documentation contributions remain [closed](CONTRIBUTING.md).
 
-See the [full quickstart](docs/self-hosting/quickstart.md) for the build-from-source alternative, GitHub App creation, selected-repository installation, secret files, and production notes.
+## Why this exists / alternatives
+
+Manual assignment can be sufficient when a team can readily identify an available reviewer. CODEOWNERS can be sufficient when file ownership is the main input to reviewer requests.
+
+Evaluate TriagePilot when reviewer selection needs to combine changed-file ownership, reviewer availability, and change risk. Shadow mode lets you inspect its decisions against your team's expectations before enabling supported GitHub writes. It does not replace your team's review judgment or branch protection.
 
 ## Deployment Model
 

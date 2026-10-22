@@ -1,0 +1,6 @@
+blank_issues_enabled: false
+contact_links:
+- name: Private security reporting
+  url: https://github.com/TriagePilot/triage-pilot/blob/main/SECURITY.md
+  about: Read the private reporting instructions. Never disclose vulnerabilities in
+    public issues.

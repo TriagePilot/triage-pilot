@@ -1,0 +1,74 @@
+name: Bug report
+description: Report product behavior, routing, or documentation problems.
+body:
+- type: markdown
+  attributes:
+    value: Do not report security vulnerabilities here; follow the [security policy](https://github.com/TriagePilot/triage-pilot/blob/main/SECURITY.md).
+      Exclude credentials, private keys, tokens, webhook payloads, and confidential PR contents. Share
+      only sanitized diagnostics.
+- type: dropdown
+  id: category
+  attributes:
+    label: Bug category
+    description: Choose the closest category.
+    options:
+    - Product behavior
+    - Routing
+    - Documentation
+  validations:
+    required: true
+- type: input
+  id: version
+  attributes:
+    label: Version or commit
+    description: Exact release, image tag/digest, or source commit.
+  validations:
+    required: true
+- type: dropdown
+  id: mode
+  attributes:
+    label: Routing mode
+    description: Select the mode in the trusted base configuration.
+    options:
+    - Shadow
+    - Enforce
+    - Not configured / unknown
+  validations:
+    required: true
+- type: textarea
+  id: environment
+  attributes:
+    label: Deployment environment
+    description: Docker/Compose versions, OS/architecture, and published-image or source deployment. Do
+      not include .env contents.
+  validations:
+    required: true
+- type: textarea
+  id: steps
+  attributes:
+    label: Steps to reproduce
+    description: Minimal sanitized steps, including the documentation page if relevant.
+  validations:
+    required: true
+- type: textarea
+  id: expected
+  attributes:
+    label: Expected behavior
+    description: What should happen?
+  validations:
+    required: true
+- type: textarea
+  id: actual
+  attributes:
+    label: Actual behavior
+    description: What happened instead?
+  validations:
+    required: true
+- type: textarea
+  id: diagnostics
+  attributes:
+    label: Sanitized diagnostics
+    description: Relevant errors, job/decision status, and redacted configuration snippets. State "none"
+      if unavailable.
+  validations:
+    required: true

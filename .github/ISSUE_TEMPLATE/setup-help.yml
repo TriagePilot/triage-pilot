@@ -1,0 +1,69 @@
+name: Setup help
+description: Get help installing or configuring TriagePilot.
+body:
+- type: markdown
+  attributes:
+    value: Do not report security vulnerabilities here; follow the [security policy](https://github.com/TriagePilot/triage-pilot/blob/main/SECURITY.md).
+      Exclude credentials, private keys, tokens, webhook payloads, and confidential PR contents. Share
+      only sanitized diagnostics.
+- type: input
+  id: version
+  attributes:
+    label: Version or commit
+    description: Exact release, image tag/digest, or source commit.
+  validations:
+    required: true
+- type: dropdown
+  id: mode
+  attributes:
+    label: Routing mode
+    description: Select the mode in the trusted base configuration.
+    options:
+    - Shadow
+    - Enforce
+    - Not configured / unknown
+  validations:
+    required: true
+- type: textarea
+  id: environment
+  attributes:
+    label: Deployment environment
+    description: Docker/Compose versions, OS/architecture, and published-image or source deployment. Do
+      not include .env contents.
+  validations:
+    required: true
+- type: textarea
+  id: guide
+  attributes:
+    label: Guide and failing step
+    description: Link the guide and name the failing step.
+  validations:
+    required: true
+- type: textarea
+  id: steps
+  attributes:
+    label: Steps to reproduce
+    description: What have you tried? Use sanitized examples.
+  validations:
+    required: true
+- type: textarea
+  id: expected
+  attributes:
+    label: Expected behavior
+    description: What did you expect to see?
+  validations:
+    required: true
+- type: textarea
+  id: actual
+  attributes:
+    label: Actual behavior
+    description: What happened instead?
+  validations:
+    required: true
+- type: textarea
+  id: diagnostics
+  attributes:
+    label: Sanitized diagnostics
+    description: Health/heartbeat state and relevant redacted errors. State "none" if unavailable.
+  validations:
+    required: true

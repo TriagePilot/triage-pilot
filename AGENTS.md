@@ -12,7 +12,7 @@ TriagePilot is an FSL-1.1-Apache-2.0 self-hosted GitHub pull-request routing app
 - `packages/provider-github`: GitHub App authentication, webhooks, and API adapter.
 - `packages/shared`: shared types and constants.
 
-Read `docs/specs/2026-07-07-open-source-self-hosting-design.md` before planning product work. Read `docs/architecture.md` before changing process boundaries. Read `docs/github-app/repository-configuration.md` before changing the repository configuration contract.
+Read `README.md` and `docs/self-hosting/quickstart.md` for the supported self-hosting scope before planning product work. Read `docs/architecture.md` before changing process boundaries. Read `docs/github-app/repository-configuration.md` before changing the repository configuration contract.
 
 ## Development Rules
 
