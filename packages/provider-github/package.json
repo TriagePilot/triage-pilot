@@ -27,7 +27,7 @@
     "@triagepilot/contracts": "workspace:1.1.1",
     "@octokit/app": "^15.1.2",
     "@octokit/request": "^9.1.4",
-    "zod": "^3.24.1"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@types/node": "^24.0.0"
