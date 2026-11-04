@@ -9,7 +9,7 @@
     "start": "node dist/server.js"
   },
   "dependencies": {
-    "@hono/node-server": "^1.19.15",
+    "@hono/node-server": "^2.1.3",
     "@triagepilot/application": "workspace:*",
     "@triagepilot/config": "workspace:*",
     "@triagepilot/contracts": "workspace:*",
