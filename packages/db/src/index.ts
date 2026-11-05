@@ -119,3 +119,9 @@ export {
   LOCAL_WORKSPACE_EXTERNAL_KEY,
   type WorkspaceRepositories,
 } from "./workspaces.js";
+export {
+  AnalyticsScopeUnavailableError,
+  assertAnalyticsScopeActive,
+  readTrackedPullRequests,
+  resolveAnalyticsScope,
+} from "./reviewer-backlog.js";
