@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createSelfHostedOperationsApi,
+  createSelfHostedAnalyticsApi,
   fetchEffectiveConfigurationForWorkspace,
   fetchOperationsOverviewForWorkspace,
   getSession,
@@ -241,3 +242,24 @@ const absence = {
   endAt: "2026-09-01T15:00:00.000Z", status: "upcoming", revision: 1, cancelledAt: null,
   createdAt: "2026-08-18T10:00:00.000Z", updatedAt: "2026-08-18T10:00:00.000Z",
 };
+
+it("encodes separate analytics queries, workspace cookies and abort signals", async () => {
+  const fetcher = vi.fn().mockImplementation(async () => Response.json({}));
+  vi.stubGlobal("fetch", fetcher);
+  const signal = new AbortController().signal;
+  const client = createSelfHostedAnalyticsApi();
+  await client.readAnalytics(workspace, { periodDays: 30, mode: "auto", repositoryIds: ["repo &/one", "repo?two"], averageReviewMinutes: 45 }, signal);
+  await client.readCurrentWorkload(workspace, { repositoryIds: ["repo &/one"], averageReviewMinutes: 45, forceRefresh: true }, signal);
+  expect(fetcher.mock.calls).toEqual([
+    ["/api/analytics?periodDays=30&mode=auto&averageReviewMinutes=45&repositoryId=repo+%26%2Fone&repositoryId=repo%3Ftwo", { credentials: "same-origin", headers: { "x-triagepilot-workspace": workspace.id }, signal }],
+    ["/api/analytics/workload?averageReviewMinutes=45&repositoryId=repo+%26%2Fone&forceRefresh=true", { credentials: "same-origin", headers: { "x-triagepilot-workspace": workspace.id }, signal }],
+  ]);
+});
+it("maps analytics server failures and expires the administrator session", async () => {
+  const onUnauthorized = vi.fn();
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(Response.json({ error: "analytics_unavailable" }, { status: 503 })).mockResolvedValueOnce(new Response(null, { status: 401 })));
+  const client = createSelfHostedAnalyticsApi({ onUnauthorized });
+  await expect(client.readCurrentWorkload(workspace, { repositoryIds: [], averageReviewMinutes: 30 })).rejects.toMatchObject({ status: 503, message: "Could not load the current reviewer workload." });
+  await expect(client.readAnalytics(workspace, { periodDays: 30, mode: "auto", repositoryIds: [], averageReviewMinutes: 30 })).rejects.toMatchObject({ status: 401 });
+  expect(onUnauthorized).toHaveBeenCalledWith("The administrator session has expired.");
+});

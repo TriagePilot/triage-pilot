@@ -1,4 +1,5 @@
 import type {
+  AnalyticsApiClient,
   AvailabilitySettingsOverview,
   EffectiveConfigurationOverview,
   OperationsApiClient,
@@ -198,3 +199,34 @@ function workspaceHeaders(workspace: WorkspaceContext): HeadersInit {
 }
 
 export type { EffectiveConfigurationOverview, OperationsOverview };
+
+export function createSelfHostedAnalyticsApi(input: {
+  onUnauthorized?(message: string): void;
+} = {}): AnalyticsApiClient {
+  async function read<T>(workspace: WorkspaceContext, path: string, query: URLSearchParams, fallback: string, signal?: AbortSignal): Promise<T> {
+    return withUnauthorized(input.onUnauthorized, async () => {
+      const response = await fetch(`/api/analytics${path}?${query}`, {
+        credentials: "same-origin", headers: workspaceHeaders(workspace), ...(signal ? { signal } : {}),
+      });
+      if (response.status === 401) throw new AdminApiError("The administrator session has expired.", 401);
+      if (!response.ok) {
+        const body = await response.json().catch(() => null) as { message?: string } | null;
+        throw new AdminApiError(body?.message ?? fallback, response.status);
+      }
+      return response.json() as Promise<T>;
+    });
+  }
+  return {
+    readAnalytics(workspace, query, signal) {
+      const params = new URLSearchParams({ periodDays: String(query.periodDays), mode: query.mode, averageReviewMinutes: String(query.averageReviewMinutes) });
+      for (const id of query.repositoryIds) params.append("repositoryId", id);
+      return read(workspace, "", params, "Could not load the analytics history.", signal);
+    },
+    readCurrentWorkload(workspace, query, signal) {
+      const params = new URLSearchParams({ averageReviewMinutes: String(query.averageReviewMinutes) });
+      for (const id of query.repositoryIds) params.append("repositoryId", id);
+      if (query.forceRefresh !== undefined) params.set("forceRefresh", String(query.forceRefresh));
+      return read(workspace, "/workload", params, "Could not load the current reviewer workload.", signal);
+    },
+  };
+}

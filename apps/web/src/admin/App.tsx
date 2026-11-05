@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
+  Analytics,
+  type AnalyticsApiClient,
   EffectiveConfiguration,
   OperationsDashboard,
   ReviewerAvailability,
@@ -13,6 +15,7 @@ import {
 
 import {
   AdminApiError,
+  createSelfHostedAnalyticsApi,
   createSelfHostedOperationsApi,
   getSession,
   login,
@@ -20,9 +23,10 @@ import {
 } from "./api";
 
 type AuthState = "checking" | "signed-out" | "signed-in";
-type SectionId = "overview" | "repositories" | "decisions" | "reviewer-availability" | "effective-configuration" | "system-health";
+type SectionId = "analytics" | "overview" | "repositories" | "decisions" | "reviewer-availability" | "effective-configuration" | "system-health";
 
 const sectionLabels: Record<SectionId, string> = {
+  analytics: "Analytics",
   overview: "Overview",
   repositories: "Repositories",
   decisions: "Routing decisions",
@@ -259,6 +263,7 @@ interface DashboardProps {
   onLogout(): Promise<void>;
   onUnauthorized?(message: string): void;
   api?: OperationsApiClient;
+  analyticsApi?: AnalyticsApiClient;
 }
 
 export function Dashboard({
@@ -270,6 +275,7 @@ export function Dashboard({
   onLogout,
   onUnauthorized,
   api: providedApi,
+  analyticsApi: providedAnalyticsApi,
 }: DashboardProps) {
   const api = useMemo(
     () => providedApi ?? (overview
@@ -277,6 +283,7 @@ export function Dashboard({
       : createSelfHostedOperationsApi(onUnauthorized ? { onUnauthorized } : {})),
     [providedApi, overview, onUnauthorized],
   );
+  const analyticsApi = useMemo(() => providedAnalyticsApi ?? createSelfHostedAnalyticsApi(onUnauthorized ? { onUnauthorized } : {}), [providedAnalyticsApi, onUnauthorized]);
   const effectiveRepository = overview?.repositories[0];
   const hasConfiguration = Boolean(effectiveConfiguration && effectiveRepository);
   const [currentOverview, setCurrentOverview] = useState(overview);
@@ -309,6 +316,7 @@ export function Dashboard({
           {sectionLink("overview", "overview")}
           {sectionLink("repositories", "repository")}
           {sectionLink("decisions", "route")}
+          {sectionLink("analytics", "overview")}
           {sectionLink("reviewer-availability", "user")}
           {hasConfiguration ? sectionLink("effective-configuration", "settings") : null}
           <span className="nav-label nav-label--secondary">Administration</span>
@@ -332,33 +340,36 @@ export function Dashboard({
             <button className="button--quiet" type="button" onClick={() => void onLogout()}>Sign out</button>
           </div>
         </header>
-        <main className="shell" aria-labelledby="dashboard-title">
+        <main className="shell" aria-label={activeSection === "analytics" ? "Analytics" : undefined} aria-labelledby={activeSection === "analytics" ? undefined : "dashboard-title"}>
           {error ? <p role="alert" className="notice notice--danger dashboard-notice">{error}</p> : null}
-          <OperationsDashboard
-            api={api}
-            workspace={workspace}
-            authorization={selfHostedAuthorization}
-            navigation={localNavigation}
-            {...(overview ? { initialOverview: overview } : {})}
-            {...(onUnauthorized ? { onUnauthorized } : {})}
-            onOverviewChange={setCurrentOverview}
-          />
-          <ReviewerAvailability
-            api={api}
-            workspace={workspace}
-            authorization={selfHostedAuthorization}
-            {...(onUnauthorized ? { onUnauthorized } : {})}
-          />
-          {effectiveConfiguration && effectiveRepository ? (
-            <EffectiveConfiguration
+          {activeSection === "analytics" ? <Analytics api={analyticsApi} workspace={workspace} authorization={selfHostedAuthorization} {...(onUnauthorized ? { onUnauthorized } : {})} /> : null}
+          <div hidden={activeSection === "analytics"} className="operations-pages">
+            <OperationsDashboard
               api={api}
               workspace={workspace}
-              repository={effectiveRepository}
               authorization={selfHostedAuthorization}
               navigation={localNavigation}
-              initialConfiguration={effectiveConfiguration}
+              {...(overview ? { initialOverview: overview } : {})}
+              {...(onUnauthorized ? { onUnauthorized } : {})}
+              onOverviewChange={setCurrentOverview}
             />
-          ) : null}
+            <ReviewerAvailability
+              api={api}
+              workspace={workspace}
+              authorization={selfHostedAuthorization}
+              {...(onUnauthorized ? { onUnauthorized } : {})}
+            />
+            {effectiveConfiguration && effectiveRepository ? (
+              <EffectiveConfiguration
+                api={api}
+                workspace={workspace}
+                repository={effectiveRepository}
+                authorization={selfHostedAuthorization}
+                navigation={localNavigation}
+                initialConfiguration={effectiveConfiguration}
+              />
+            ) : null}
+          </div>
         </main>
       </div>
     </div>
