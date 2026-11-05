@@ -24,6 +24,7 @@ import {
   GitHubCredentialProvider,
 } from "@triagepilot/provider-github";
 
+import { createWorkerReviewerBacklogService } from "../reviewer-backlog.js";
 import type { WorkerEnv } from "../env.js";
 import { runPlatformOutboxDrain, runWorkerMaintenance, runWorkerStartup } from "../maintenance.js";
 import type { RoutingJobMessage, RoutingJobServices } from "../processor.js";
@@ -92,8 +93,11 @@ export async function createSelfHostedWorkerComposition(
   const platformEventSink = dependencies.platformEventSink ?? createNoopPlatformEventSink();
   const credentialProvider = new GitHubCredentialProvider(env.github);
   const createRequester = dependencies.createRequester ?? createInstallationRequester;
+  const reviewerBacklog = createWorkerReviewerBacklogService({ db, workspaceId, githubOrganization: env.githubOrganization, credentialProvider, createRequester, clock });
   const buildRoutingServices = createWorkerRoutingServiceFactory({
     db,
+    reviewerBacklog,
+    githubOrganization: env.githubOrganization,
     credentialProvider,
     createRequester,
     createAdapter: (requester) => new GitHubAdapter(requester),

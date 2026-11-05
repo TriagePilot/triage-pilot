@@ -18,6 +18,7 @@ export {
 } from "./jobs.js";
 export { createDatabase } from "./database.js";
 export {
+  findSucceededRoutingDecision,
   findReviewerReplacementCandidates,
   markActionFailed,
   markActionSucceeded,

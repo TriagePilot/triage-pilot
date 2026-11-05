@@ -497,3 +497,48 @@ ownership:
     expect(ports.enqueueReviewPolicy).not.toHaveBeenCalled();
   });
 });
+
+describe("tracked backlog routing", () => {
+  it("replays completed results before configuration or any provider I/O", async () => {
+    const ports = buildPorts();
+    ports.decisions.findCompleted = vi.fn(async () => ({ decisionId: "original", mode: "enforce", actionStatus: "succeeded" }));
+    await expect(processChangeRequest(job, ports)).resolves.toEqual({ status: "decided", decisionId: "original", mode: "enforce", actionStatus: "succeeded" });
+    expect(ports.resolveConfiguration).not.toHaveBeenCalled();
+    expect(ports.reviewerLoad).not.toHaveBeenCalled();
+    expect(ports.decisions.persistWithEvent).not.toHaveBeenCalled();
+  });
+  it("uses complete pending loads and records their provenance in shadow", async () => {
+    const ports = buildPorts(effectiveConfiguration('version: 1\nmode: shadow\nrouting:\n  high_risk_reviewers: 1\nrisk:\n  paths:\n    - pattern: "**"\n      weight: 60\n      tag: code\nownership:\n  fallback_reviewers: ["@fallback"]\n  rules:\n    - paths: ["**"]\n      reviewers: ["@busy", "@idle"]\n'));
+    vi.mocked(ports.provider.fetchChangedFiles).mockResolvedValue([{ path: "src/code.ts", additions: 100, deletions: 100 }]);
+    const observation = { status: "complete", source: "tracked_github_pending", observedAt: "2026-08-27T10:00:00.000Z", trackedSince: "2026-05-29T10:00:00.000Z", loads: { "@busy": 5, "@idle": 1 }, reason: null } as const;
+    ports.reviewerBacklog = vi.fn(async () => observation);
+    ports.resolveTrackedPullRequest = async () => ({ repositoryRecordId: "record", repository: job.changeRequest.repository, providerConnectionId: job.providerConnectionId, changeRequestId: "7", changeRequestNumber: 7 });
+    await processChangeRequest(job, ports);
+    const decision = vi.mocked(ports.decisions.persistWithEvent).mock.calls[0]![0];
+    expect(decision.selectedActors).toEqual(["@idle"]);
+    expect(decision.details).toMatchObject({ routing: { loadObservation: observation } });
+    expect(ports.reviewerLoad).not.toHaveBeenCalled();
+    expect(ports.provider.applyActions).not.toHaveBeenCalled();
+    expect(ports.reviewerBacklog).toHaveBeenCalledWith(expect.objectContaining({ exclude: expect.objectContaining({ repository: job.changeRequest.repository, changeRequestId: "7", changeRequestNumber: 7 }) }));
+  });
+  it("records whole-vector fallback without inventing measurements or changing stable selection", async () => {
+    const configuration = effectiveConfiguration('version: 1\nmode: shadow\nrisk:\n  paths:\n    - pattern: README.md\n      weight: 40\n      tag: docs\nownership:\n  fallback_reviewers: ["@busy", "@idle"]\n');
+    const legacy = buildPorts(configuration);
+    await processChangeRequest(job, legacy);
+    const ports = buildPorts(configuration);
+    ports.resolveTrackedPullRequest = async () => ({ repositoryRecordId: "record", repository: job.changeRequest.repository, providerConnectionId: job.providerConnectionId, changeRequestId: "7", changeRequestNumber: 7 });
+    const observation = { status: "fallback", source: "tracked_github_pending", observedAt: null, trackedSince: "2026-05-29T10:00:00.000Z", loads: {}, reason: "timeout" } as const;
+    ports.reviewerBacklog = vi.fn(async () => observation);
+    await processChangeRequest(job, ports);
+    const decision = vi.mocked(ports.decisions.persistWithEvent).mock.calls[0]![0];
+    expect(decision.selectedActors).toEqual(vi.mocked(legacy.decisions.persistWithEvent).mock.calls[0]![0].selectedActors);
+    expect(decision.details).toMatchObject({ routing: { loadObservation: observation } });
+    expect(vi.mocked(legacy.decisions.persistWithEvent).mock.calls[0]![0].details).not.toHaveProperty("routing.loadObservation");
+  });
+  it("skips optional backlog for low risk no-human routing", async () => {
+    const ports = buildPorts();
+    ports.reviewerBacklog = vi.fn();
+    await processChangeRequest(job, ports);
+    expect(ports.reviewerBacklog).not.toHaveBeenCalled();
+  });
+});

@@ -9,6 +9,7 @@ import {
   type ProviderKind,
   type RepositoryMode,
   type RoutingAction,
+  type RoutingJobPayload,
   type WorkspaceId,
 } from "@triagepilot/contracts";
 
@@ -624,4 +625,31 @@ export async function markActionFailed(
 
 function legacyConfigHash(details: unknown): string {
   return createHash("sha256").update(JSON.stringify(details)).digest("hex");
+}
+
+/** Completed replay lookup is constrained to the current authorized repository identity. */
+export async function findSucceededRoutingDecision(db: Kysely<Database>, workspaceId: WorkspaceId, job: RoutingJobPayload): Promise<{ decisionId: string; mode: RepositoryMode; actionStatus: "succeeded" } | null> {
+  if (workspaceId !== job.workspaceId) return null;
+  const row = await db.selectFrom("routing_decisions")
+    .innerJoin("repositories", join => join.onRef("repositories.id", "=", "routing_decisions.repository_id").onRef("repositories.workspace_id", "=", "routing_decisions.workspace_id"))
+    .innerJoin("provider_connections", join => join.onRef("provider_connections.id", "=", "repositories.provider_connection_id").onRef("provider_connections.workspace_id", "=", "repositories.workspace_id").onRef("provider_connections.provider", "=", "repositories.provider"))
+    .select(["routing_decisions.id as decisionId", "routing_decisions.mode"])
+    .where("routing_decisions.workspace_id", "=", workspaceId)
+    .where("routing_decisions.routing_key", "=", job.routingKey)
+    .where("routing_decisions.change_request_id", "=", job.changeRequest.externalId)
+    .where("routing_decisions.pull_number", "=", job.changeRequest.number)
+    .where("routing_decisions.head_sha", "=", job.changeRequest.headRevision)
+    .where("routing_decisions.action_status", "=", "succeeded")
+    .where("repositories.provider", "=", job.changeRequest.repository.provider)
+    .where("repositories.external_repository_id", "=", job.changeRequest.repository.externalId)
+    .where("repositories.owner", "=", job.changeRequest.repository.owner)
+    .where("repositories.name", "=", job.changeRequest.repository.name)
+    .where("provider_connections.id", "=", job.providerConnectionId)
+    .where("provider_connections.status", "=", "active")
+    .where(eb => eb.not(eb.exists(eb.selectFrom("provider_connection_revocations").select("revoked_connection_id")
+      .whereRef("provider_connection_revocations.workspace_id", "=", "provider_connections.workspace_id")
+      .whereRef("provider_connection_revocations.provider", "=", "provider_connections.provider")
+      .whereRef("provider_connection_revocations.external_connection_id", "=", "provider_connections.external_connection_id"))))
+    .executeTakeFirst();
+  return row ? { ...row, actionStatus: "succeeded" } : null;
 }

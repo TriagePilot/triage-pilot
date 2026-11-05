@@ -126,6 +126,28 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("self-hosted worker compo
     });
   });
 
+  it("replays a succeeded decision through fresh scoped DB authority with no provider I/O", async () => {
+    await withPostgresTestDatabaseUrl(async databaseUrl => {
+      await runMigrations(databaseUrl);
+      const requester = decisionRequester();
+      const composition = await createSelfHostedWorkerComposition(workerEnv(databaseUrl), { createRequester: async () => ({ request: requester }) });
+      try {
+        const { providerConnectionId } = await insertKnownRepository(composition);
+        const job = routingJob(composition.workspaceId, providerConnectionId);
+        await processRoutingJob(job, composition.buildRoutingServices(job));
+        await composition.db.updateTable("routing_decisions").set({ mode: "enforce", action_status: "succeeded" }).where("routing_key", "=", job.routingKey).execute();
+        const before = await composition.db.selectFrom("routing_decisions").selectAll().executeTakeFirstOrThrow();
+        requester.mockClear();
+        await processRoutingJob(job, composition.buildRoutingServices(job));
+        expect(requester).not.toHaveBeenCalled();
+        expect(await composition.db.selectFrom("routing_decisions").selectAll().executeTakeFirstOrThrow()).toEqual(before);
+        await composition.db.updateTable("provider_connections").set({ status: "suspended" }).where("id", "=", providerConnectionId).execute();
+        await expect(processRoutingJob(job, composition.buildRoutingServices(job))).rejects.toThrow("not known");
+        expect(requester).not.toHaveBeenCalled();
+      } finally { await composition.close(); }
+    });
+  });
+
   it("dispatches a claimed reviewer absence activation without provider access when no candidate exists", async () => {
     await withPostgresTestDatabaseUrl(async (databaseUrl) => {
       await runMigrations(databaseUrl);

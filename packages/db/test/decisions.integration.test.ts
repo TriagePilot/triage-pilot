@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  findSucceededRoutingDecision,
   findReviewerReplacementCandidates,
   findLatestHumanReviewPolicyDecision,
   ensureLocalWorkspace,
@@ -13,6 +14,25 @@ import {
 import { withPostgresTestDatabase } from "./postgres";
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () => {
+  it("replays only succeeded decisions with matching live scope and head", async () => {
+    await withPostgresTestDatabase(async db => {
+      const repositoryId = await seedRepository(db);
+      const workspaceId = await ensureLocalWorkspace(db);
+      const repository = await db.selectFrom("repositories").select("provider_connection_id").where("id", "=", repositoryId).executeTakeFirstOrThrow();
+      const job = { kind: "process_change_request" as const, workspaceId, providerConnectionId: repository.provider_connection_id, deliveryId: "delivery-replay", routingKey: "routing-replay", eventName: "change_request.opened", isDraft: false,
+        changeRequest: { repository: { provider: "github" as const, externalId: "101", owner: "acme", name: "api" }, externalId: "7", number: 7, baseRevision: "base", headRevision: "head" } };
+      const persisted = await persistDecision(db, workspaceId, { repositoryId, deliveryId: job.deliveryId, routingKey: job.routingKey, changeRequestId: "7", pullNumber: 7, headSha: "head", mode: "enforce", action: "request_human_review", actionStatus: "pending", riskScore: 50, details: { original: true } });
+      expect(await findSucceededRoutingDecision(db, workspaceId, job)).toBeNull();
+      await markActionSucceeded(db, workspaceId, persisted.decisionId, new Date());
+      expect(await findSucceededRoutingDecision(db, workspaceId, job)).toEqual({ decisionId: persisted.decisionId, mode: "enforce", actionStatus: "succeeded" });
+      expect(await findSucceededRoutingDecision(db, workspaceId, { ...job, changeRequest: { ...job.changeRequest, headRevision: "other" } })).toBeNull();
+      expect(await findSucceededRoutingDecision(db, workspaceId, { ...job, providerConnectionId: "00000000-0000-0000-0000-000000000000" })).toBeNull();
+      expect(await findSucceededRoutingDecision(db, "other", job)).toBeNull();
+      await db.updateTable("provider_connections").set({ status: "suspended" }).where("id", "=", job.providerConnectionId).execute();
+      expect(await findSucceededRoutingDecision(db, workspaceId, job)).toBeNull();
+    });
+  });
+
   it("persists non-empty configuration diagnostics as a JSON array", async () => {
     await withPostgresTestDatabase(async (db) => {
       const repositoryId = await seedRepository(db);

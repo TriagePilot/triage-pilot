@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ReviewPolicyDecision } from "@triagepilot/application";
+import { processChangeRequest, type ReviewPolicyDecision } from "@triagepilot/application";
+import { parseTriagePilotConfig } from "@triagepilot/config";
 import type { HumanReviewPolicyDecision } from "@triagepilot/db";
 
 import {
@@ -137,6 +138,44 @@ describe("worker reviewer availability runtime scope", () => {
 });
 
 describe("worker routing GitHub reads", () => {
+  it("invalidates an accepted reviewer request when the later policy enqueue fails", async () => {
+    const invalidate = vi.fn();
+    const request = actionRequester("unmerged-head-456");
+    const services = createWorkerRoutingServiceFactory({ db: knownRepositoryDatabase() as never, github: { appId: "123", privateKey: "key" }, createRequester: async () => ({ request }), reviewerBacklog: { readLoad: vi.fn(), readCurrent: vi.fn(), invalidate } })(message);
+    const parsed = parseTriagePilotConfig('version: 1\nmode: enforce\nrisk:\n  paths:\n    - pattern: README.md\n      weight: 50\n      tag: docs\nownership:\n  fallback_reviewers: ["@reviewer"]\n');
+    if (!parsed.ok) throw new Error("invalid fixture");
+    services.resolveConfiguration = async () => ({ ok: true, config: parsed.config, diagnostics: [], provenance: { organizationVersion: null, repositoryPath: ".triagepilot.yml", repositoryRevision: "base", inheritanceMode: "inherit", effectiveHash: "hash", sources: {} } });
+    services.availability.findActive = async () => [];
+    services.decisions.findCompleted = async () => null;
+    services.decisions.persistWithEvent = async () => ({ decisionId: "decision-1", actionStatus: "pending", actionError: null, actionAppliedAt: null });
+    services.decisions.markActionFailed = vi.fn();
+    services.provider.fetchChangeRequestMetadata = async () => ({ author: "@author", sourceBranch: "feature", targetBranch: "main", currentHeadRevision: "unmerged-head-456" });
+    services.provider.fetchChangedFiles = async () => [{ path: "README.md", additions: 1, deletions: 0 }];
+    services.provider.fetchCommitMessages = async () => [];
+    services.provider.fetchCurrentRevisionApprovals = async () => [];
+    services.reviewerBacklog = async () => ({ status: "complete", source: "tracked_github_pending", observedAt: new Date().toISOString(), trackedSince: new Date().toISOString(), loads: { "@reviewer": 0 }, reason: null });
+    services.enqueueReviewPolicy = async () => { throw new Error("later policy enqueue failed"); };
+    await expect(processChangeRequest(message, services)).rejects.toThrow("later policy enqueue failed");
+    expect(request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", expect.objectContaining({ reviewers: ["reviewer"] }));
+    expect(invalidate).toHaveBeenCalledOnce();
+    expect(services.decisions.markActionFailed).toHaveBeenCalled();
+  });
+
+  it.each(["accepted", "timeout", "read-failure"])("invalidates precisely at reviewer mutation attempts: %s", async outcome => {
+    const invalidate = vi.fn();
+    const base = actionRequester("unmerged-head-456");
+    const request = vi.fn(async (route: string, parameters: Record<string, unknown>) => {
+      if (outcome === "read-failure" && route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") throw new Error("read failed");
+      if (outcome === "timeout" && route === "POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers") throw new Error("unknown request result timeout");
+      return base(route, parameters);
+    });
+    const services = createWorkerRoutingServiceFactory({ db: knownRepositoryDatabase() as never, github: { appId: "123", privateKey: "key" }, createRequester: async () => ({ request }), reviewerBacklog: { readLoad: vi.fn(), readCurrent: vi.fn(), invalidate } })(message);
+    const attempt = services.applyDecisionActions({ action: "request_human_review", expectedHeadSha: "unmerged-head-456", decisionId: "decision-1", riskTier: "medium", selectedReviewers: ["@reviewer"], reviewersToRequest: ["@reviewer"] });
+    if (outcome === "accepted") await attempt;
+    else await expect(attempt).rejects.toThrow(outcome === "timeout" ? "timeout" : "read failed");
+    expect(invalidate).toHaveBeenCalledTimes(outcome === "read-failure" ? 0 : 1);
+  });
+
   it("exposes a provider-neutral availability port without provider reads", async () => {
     const request = vi.fn(async () => {
       throw new Error("availability lookup must not use the provider");

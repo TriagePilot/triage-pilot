@@ -24,6 +24,8 @@ import {
   ReviewerMutationLeaseUnavailableError,
   runClaimedReviewerProviderMutation,
   findLatestHumanReviewPolicyDecision,
+  findSucceededRoutingDecision,
+  ProviderConnectionUnavailableError,
   markActionFailed as persistActionFailed,
   markActionSucceeded as persistActionSucceeded,
   persistDecisionWithEvent,
@@ -48,6 +50,7 @@ import {
   type ReviewerReplacementFinalizerRecord,
   type ReviewerReplacementRecoveryRecord,
   type RoutingApplicationPorts,
+  type ReviewerBacklogService,
 } from "@triagepilot/application";
 
 import type { RoutingJobMessage, RoutingJobServices } from "./processor.js";
@@ -69,6 +72,8 @@ interface WorkerServiceFactoryInput {
   createConfigurationSource?: ConfigurationSourceFactory;
   clock?: Clock;
   providerMutationTimeoutMs?: number;
+  reviewerBacklog?: ReviewerBacklogService;
+  githubOrganization?: string;
 }
 
 export function createNoopPlatformEventSink(): PlatformEventSink {
@@ -97,14 +102,16 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
     const { changeRequest } = message;
     const { repository } = changeRequest;
     let requesterPromise: Promise<Requester> | null = null;
-    let knownRepositoryPromise: Promise<KnownRepository> | null = null;
+    let requesterConnectionId: string | null = null;
     let pullRequestPromise: Promise<unknown> | null = null;
     let persistedDecisionId: string | null = null;
     const clock = input.clock ?? { now: () => new Date() };
     const availability = createWorkspaceReviewerAvailability(input.db, message.workspaceId);
 
     async function requester(): Promise<Requester> {
-      await repositoryId();
+      const current = await knownRepository();
+      if (requesterConnectionId !== null && requesterConnectionId !== current.externalConnectionId) throw new ProviderConnectionUnavailableError("Cached installation identity changed");
+      requesterConnectionId = current.externalConnectionId;
       const credentials = await credentialProvider.getCredential({
         workspaceId: message.workspaceId,
         providerConnectionId: message.providerConnectionId,
@@ -112,9 +119,14 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
       requesterPromise ??= (input.createRequester ?? createInstallationRequester)({
         appId: credentials.appId,
         privateKey: credentials.privateKey,
-        installationId: toSafeInteger((await knownRepository()).externalConnectionId),
+        installationId: toSafeInteger(current.externalConnectionId),
       });
-      return requesterPromise;
+      const raw = await requesterPromise;
+      return { async request(route, parameters) {
+        const live = await findKnownRepository(input.db, message, input.githubOrganization);
+        if (live.externalConnectionId !== requesterConnectionId) throw new ProviderConnectionUnavailableError("Cached installation identity changed");
+        return raw.request(route, parameters);
+      } };
     }
 
     async function repositoryId(): Promise<string> {
@@ -122,11 +134,11 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
     }
 
     async function knownRepository(): Promise<KnownRepository> {
-      knownRepositoryPromise ??= findKnownRepository(input.db, message);
-      return knownRepositoryPromise;
+      return findKnownRepository(input.db, message, input.githubOrganization);
     }
 
     async function pullRequest(): Promise<unknown> {
+      await knownRepository();
       pullRequestPromise ??= (async () => {
         const response = await (await requester()).request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
           owner: repository.owner,
@@ -266,7 +278,11 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
               body: formatRoutingComment({ action: action.action, riskTier: action.risk.tier, risk: action.risk }),
             });
             if (route === "human_review" && action.actorsToRequest.length > 0) {
-              await adapter.requestHumanReviewers({ pullRequest, reviewers: action.actorsToRequest });
+              try {
+                await adapter.requestHumanReviewers({ pullRequest, reviewers: action.actorsToRequest });
+              } finally {
+                input.reviewerBacklog?.invalidate({ workspaceId: message.workspaceId, providerConnectionId: message.providerConnectionId });
+              }
             }
             if (action.action === "policy_approval") {
               await adapter.submitPolicyApproval({
@@ -298,8 +314,26 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
         });
       },
 
+      ...(input.reviewerBacklog ? {
+        async resolveTrackedPullRequest() {
+          return { repositoryRecordId: await repositoryId(), repository, providerConnectionId: message.providerConnectionId, changeRequestId: changeRequest.externalId, changeRequestNumber: changeRequest.number };
+        },
+        async reviewerBacklog(loadInput: Parameters<ReviewerBacklogService["readLoad"]>[0]) {
+          const known = await knownRepository();
+          if (loadInput.workspaceId !== message.workspaceId || loadInput.providerConnectionId !== message.providerConnectionId
+            || loadInput.exclude.repositoryRecordId !== known.repositoryId
+            || JSON.stringify(loadInput.exclude.repository) !== JSON.stringify(repository)
+            || loadInput.exclude.changeRequestId !== changeRequest.externalId || loadInput.exclude.changeRequestNumber !== changeRequest.number) {
+            throw new ProviderConnectionUnavailableError("Backlog query does not match routing job");
+          }
+          return input.reviewerBacklog!.readLoad(loadInput);
+        },
+      } : {}),
       async reviewerLoad(reviewersInput) {
-        return Object.fromEntries(reviewersInput.actors.map((actor) => [actor, 0]));
+        if (!input.reviewerBacklog) return Object.fromEntries(reviewersInput.actors.map((actor) => [actor, 0]));
+        const observation = await input.reviewerBacklog.readLoad({ workspaceId: message.workspaceId, providerConnectionId: message.providerConnectionId, actors: reviewersInput.actors,
+          exclude: { repositoryRecordId: await repositoryId(), repository, providerConnectionId: message.providerConnectionId, changeRequestId: changeRequest.externalId, changeRequestNumber: changeRequest.number } });
+        return observation.status === "complete" ? observation.loads : {};
       },
 
       availability: {
@@ -317,6 +351,14 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
       },
 
       decisions: {
+        async findCompleted(job) {
+          if (job.workspaceId !== message.workspaceId || job.providerConnectionId !== message.providerConnectionId
+            || JSON.stringify(job.changeRequest) !== JSON.stringify(message.changeRequest)) {
+            throw new ProviderConnectionUnavailableError("Completed lookup does not match routing job");
+          }
+          await knownRepository();
+          return findSucceededRoutingDecision(input.db, message.workspaceId, job);
+        },
         async persistWithEvent(decision, event) {
           const persisted = await persistDecisionWithEvent(input.db, message.workspaceId, {
             decision: {
@@ -1246,6 +1288,7 @@ async function findKnownRepository(
     providerConnectionId: string;
     changeRequest: { repository: RepositoryRef };
   },
+  githubOrganization?: string,
 ): Promise<KnownRepository> {
   const repository = await db
     .selectFrom("repositories")
@@ -1255,6 +1298,8 @@ async function findKnownRepository(
     .select([
       "repositories.id as repositoryId",
       "provider_connections.external_connection_id as externalConnectionId",
+      "provider_connections.workspace_login as workspaceLogin",
+      "provider_connections.account_type as accountType",
     ])
     .where("repositories.workspace_id", "=", message.workspaceId)
     .where((eb) => eb.and([
@@ -1267,10 +1312,18 @@ async function findKnownRepository(
       eb("provider_connections.id", "=", message.providerConnectionId),
       eb("provider_connections.provider", "=", message.changeRequest.repository.provider),
       eb("provider_connections.status", "=", "active"),
+      eb.not(eb.exists(eb.selectFrom("provider_connection_revocations").select("revoked_connection_id")
+      .whereRef("provider_connection_revocations.workspace_id", "=", "provider_connections.workspace_id")
+      .whereRef("provider_connection_revocations.provider", "=", "provider_connections.provider")
+      .whereRef("provider_connection_revocations.external_connection_id", "=", "provider_connections.external_connection_id"))),
     ]))
     .executeTakeFirst();
-  if (!repository) {
-    throw new Error(`repository ${message.changeRequest.repository.externalId} is not known`);
+  if (!repository || (githubOrganization !== undefined && (
+    message.changeRequest.repository.owner.toLowerCase() !== githubOrganization.toLowerCase()
+    || repository.workspaceLogin.toLowerCase() !== githubOrganization.toLowerCase()
+    || repository.accountType?.toLowerCase() !== "organization"
+  ))) {
+    throw new ProviderConnectionUnavailableError(`repository ${message.changeRequest.repository.externalId} is not known`);
   }
   return repository;
 }
