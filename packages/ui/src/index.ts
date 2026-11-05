@@ -32,3 +32,6 @@ export type {
   ReviewerReplacementOverview,
   WorkspaceContext,
 } from "./api.js";
+export { Analytics, type AnalyticsProps } from "./components/Analytics.js";
+export { AnalyticsCharts } from "./components/AnalyticsCharts.js";
+export type { AnalyticsApiClient } from "./analytics-api.js";
