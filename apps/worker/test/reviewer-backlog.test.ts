@@ -33,8 +33,51 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker backlog host", ()
       expect(request).toHaveBeenCalledTimes(callsBeforeSuspension);
     });
   });
+  it.each([401, 403, 404])("preserves raw installation-token authority failures (HTTP %s)", async status => {
+    await withTokenFailureInput(async input => {
+      const error = Object.assign(new Error("token authorization failed"), { status });
+      for (const stage of ["credential", "requester"] as const) {
+        const createRequester = vi.fn(async () => { throw error; });
+        const service = createWorkerReviewerBacklogService({ ...input.factory,
+          credentialProvider: { getCredential: async () => { if (stage === "credential") throw error; return { appId: "1", privateKey: "key" }; } },
+          createRequester,
+        });
+        await expect(service.readLoad(input.load)).rejects.toBe(error);
+        expect(createRequester).toHaveBeenCalledTimes(stage === "credential" ? 0 : 1);
+      }
+    });
+  });
+
+  it.each([
+    { message: "token request failed", response: { headers: { "Retry-After": "3" } } },
+    { message: "token request failed", response: { headers: { "X-RateLimit-Remaining": "0" } } },
+    { message: "secondary rate limit", response: { headers: {} } },
+  ])("retains transient rate-limited token 403: $message $response", async detail => {
+    await withTokenFailureInput(async input => {
+      const error = Object.assign(new Error(detail.message), { status: 403, response: detail.response });
+      const service = createWorkerReviewerBacklogService({ ...input.factory, createRequester: async () => { throw error; } });
+      expect(await service.readLoad(input.load)).toMatchObject({ status: "fallback", loads: {}, reason: "rate_limited" });
+    });
+  });
+
   it("rejects a different workspace without database access", async () => {
     const service = createWorkerReviewerBacklogService({ db: {} as never, workspaceId: "expected", githubOrganization: "acme", credentialProvider: { getCredential: vi.fn() }, createRequester: vi.fn(), clock: { now: () => new Date() } });
     await expect(service.readCurrent({ workspaceId: "other", providerConnectionId: "connection", repositoryIds: [] })).rejects.toThrow("workspace mismatch");
   });
 });
+
+async function withTokenFailureInput(run: (input: {
+  factory: Parameters<typeof createWorkerReviewerBacklogService>[0];
+  load: Parameters<ReturnType<typeof createWorkerReviewerBacklogService>["readLoad"]>[0];
+}) => Promise<void>) {
+  await withPostgresTestDatabase(async db => {
+    const workspaceId = await ensureLocalWorkspace(db);
+    const connection = await db.insertInto("provider_connections").values({ workspace_id: workspaceId, provider: "github", external_connection_id: "99", workspace_login: "acme", account_type: "Organization", status: "active", permissions: {} }).returning("id").executeTakeFirstOrThrow();
+    const repository = { provider: "github" as const, externalId: "101", owner: "acme", name: "api" };
+    const row = await db.insertInto("repositories").values({ workspace_id: workspaceId, provider: "github", provider_connection_id: connection.id, external_repository_id: "101", owner: "acme", name: "api", default_branch: "main", config_state: "unknown" }).returning("id").executeTakeFirstOrThrow();
+    await run({
+      factory: { db, workspaceId, githubOrganization: "acme", credentialProvider: { getCredential: async () => ({ appId: "1", privateKey: "key" }) }, createRequester: vi.fn(), clock: { now: () => new Date() } },
+      load: { workspaceId, providerConnectionId: connection.id, actors: ["@reviewer"], exclude: { repositoryRecordId: row.id, repository, providerConnectionId: connection.id, changeRequestId: "7", changeRequestNumber: 7 } },
+    });
+  });
+}

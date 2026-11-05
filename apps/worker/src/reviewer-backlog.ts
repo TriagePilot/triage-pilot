@@ -38,6 +38,19 @@ export function createWorkerReviewerBacklogService(input: {
         if (error.reason === "forbidden" || error.reason === "not_found") return "authority";
         return error.reason;
       }
+      // Credential/token acquisition can fail before the GitHub adapter boundary.
+      if (typeof error === "object" && error !== null && "status" in error) {
+        if (error.status === 401 || error.status === 404) return "authority";
+        if (error.status === 403) {
+          const response = "response" in error ? error.response : null;
+          const headers = typeof response === "object" && response !== null && "headers" in response ? response.headers : null;
+          const entries = typeof headers === "object" && headers !== null ? Object.entries(headers) : [];
+          const rateLimited = entries.some(([key, value]) => key.toLowerCase() === "retry-after"
+            || (key.toLowerCase() === "x-ratelimit-remaining" && String(value) === "0"))
+            || ("message" in error && typeof error.message === "string" && /rate limit|secondary limit|abuse|spam/i.test(error.message));
+          return rateLimited ? "rate_limited" : "authority";
+        }
+      }
       return "provider_unavailable";
     },
   });
