@@ -705,6 +705,7 @@ describe("activateReviewerAbsence", () => {
       unavailableActorId: activation.externalActorId,
       replacementActorId: "@user-c91e46",
       mutationIntentId: preparedIntent.id,
+      selectionContext: null,
       outcome: "replaced",
       reason: `Replaced unavailable actor ${activation.externalActorId} with @user-c91e46.`,
       state: "finalizer_pending",
@@ -1073,6 +1074,12 @@ describe("activateReviewerAbsence", () => {
   });
 
   it("uses durable intent after prepare, DELETE, POST, and process death without selecting a second actor", async () => {
+    const originalObservation = {
+      status: "complete" as const, source: "tracked_github_pending" as const,
+      observedAt: "2026-09-01T09:59:00.000Z", trackedSince: "2026-06-03T09:59:00.000Z",
+      loads: { "@user-c91e46": 0, "@user-f37a82": 9 }, reason: null,
+    };
+
     const crashCandidate = {
       ...candidate,
       selectedActors: [activation.externalActorId, "@user-7c1f9b"],
@@ -1092,7 +1099,7 @@ describe("activateReviewerAbsence", () => {
     const loadMutationIntent = vi.fn(async () => durableIntent);
     const prepareMutationIntent = vi.fn(async (input: Omit<typeof preparedIntent, "id">) => {
       ordering.push("prepare");
-      durableIntent ??= { id: preparedIntent.id, ...input };
+      durableIntent ??= { id: preparedIntent.id, ...input, selectionContext: originalObservation };
       return durableIntent;
     });
     const provider = {
@@ -1184,6 +1191,7 @@ describe("activateReviewerAbsence", () => {
     expect(retryPorts.availability.persistReplacement).toHaveBeenCalledWith(expect.objectContaining({
       replacementActorId: "@user-c91e46",
       mutationIntentId: preparedIntent.id,
+      selectionContext: originalObservation,
       outcome: "replaced",
       replaceCohort: true,
     }));

@@ -9,8 +9,10 @@ import type {
   ReviewerAbsenceActivationJobPayload,
   ReviewerReplacementEventV1,
   ReviewerReplacementOutcome,
+  ReviewerLoadObservation,
   WorkspaceId,
 } from "@triagepilot/contracts";
+import { isReviewerLoadObservation } from "@triagepilot/contracts";
 import {
   activeApprovedReviewers,
   selectReplacement,
@@ -84,6 +86,7 @@ export interface ReviewerMutationIntentKey {
 }
 
 export interface PrepareReviewerMutationIntentInput extends ReviewerMutationIntentKey {
+  selectionContext?: ReviewerLoadObservation | null;
   provider: ProviderKind;
   repositoryId: string;
   changeRequestId: ChangeRequestId;
@@ -124,6 +127,7 @@ export type ReviewerReplacementProvenance<
       : never;
 
 interface PersistReviewerReplacementCommon {
+  selectionContext?: ReviewerLoadObservation | null;
   provider: ProviderKind;
   providerConnectionId: ProviderConnectionId;
   absenceId: string;
@@ -159,6 +163,7 @@ type ReviewerReplacementFinalizerOutcome =
   | "no_replacement_available";
 
 interface ReviewerReplacementFinalizerRecordCommon {
+  selectionContext?: ReviewerLoadObservation | null;
   id: string;
   workspaceId: WorkspaceId;
   provider: ProviderKind;
@@ -179,6 +184,7 @@ export type ReviewerReplacementFinalizerRecord =
   ReviewerReplacementFinalizerRecordFor<ReviewerReplacementFinalizerOutcome>;
 
 export interface ReviewerReplacementRecoveryRecord {
+  selectionContext?: ReviewerLoadObservation | null;
   id: string;
   workspaceId: WorkspaceId;
   provider: ProviderKind;
@@ -210,6 +216,7 @@ export function assertReviewerReplacementRecoveryRecord(
     || !isReviewerReplacementState(value.state)
   ) throw new ReviewerReplacementContractError("Reviewer replacement recovery record is malformed");
   const record = value;
+  assertSelectionContext(record.selectionContext, record.provider);
   assertReviewerReplacementProvenance(value);
   if (
     (record.outcome === "permanent_failure"
@@ -389,6 +396,7 @@ export type ReviewerAbsenceActivationOutcome =
   };
 
 type PlannedReplacement = {
+  selectionContext?: ReviewerLoadObservation | null;
   outcome: ReviewerReplacementOutcome;
   replacementActor: ExternalActorId | null;
   reason: string;
@@ -399,6 +407,7 @@ type PlannedReplacement = {
 };
 
 type SelectionContext = {
+  selectionContext?: ReviewerLoadObservation | null;
   absences: ReviewerAbsenceWindow[];
   load: Record<string, number>;
 };
@@ -463,6 +472,7 @@ export function assertReviewerReplacementFinalizerRecord(
   ) {
     throw new ReviewerReplacementContractError("Pending reviewer replacement has no mapped finalizer");
   }
+  assertSelectionContext(value.selectionContext, value.provider);
   assertReviewerReplacementProvenance(value);
 }
 
@@ -473,6 +483,7 @@ export function assertPersistReviewerReplacementInput(
     throw new ReviewerReplacementContractError("Reviewer replacement persistence is malformed");
   }
   const record = value;
+  assertSelectionContext(record.selectionContext, record.provider);
   assertReviewerReplacementProvenance(value);
   if (
     !isProviderKind(record.provider)
@@ -700,7 +711,7 @@ async function auditUnfinalizedIntents(
       const persisted = await ports.availability.persistMutationIntentRecovery(persistence);
       if (persisted.replacement === null) throw new Error("Mutation intent recovery audit was not persisted");
     } catch (error) {
-      const plan = permanentFailurePlan(reason, intent.id);
+      const plan = permanentFailurePlan(reason, intent.id, intent.selectionContext);
       return {
         status: "finalizer_pending",
         results,
@@ -770,7 +781,7 @@ async function readCandidatePlan(
     const mismatch = mutationIntentMismatch(job, activation, candidate, mutationIntent);
     if (mismatch !== null) {
       return {
-        plan: permanentFailurePlan(mismatch, mutationIntent.id),
+        plan: permanentFailurePlan(mismatch, mutationIntent.id, mutationIntent.selectionContext),
         selection: null,
         mutationIntent,
         revalidateProvider: false,
@@ -805,7 +816,7 @@ async function readCandidatePlan(
   const inspected = await inspectProviderState(job, candidate, ports);
   if (inspected.state === null) {
     return {
-      plan: permanentFailurePlan(inspected.permanentError, mutationIntent?.id ?? null),
+      plan: permanentFailurePlan(inspected.permanentError, mutationIntent?.id ?? null, mutationIntent?.selectionContext),
       selection: null,
       mutationIntent,
       revalidateProvider: false,
@@ -814,7 +825,7 @@ async function readCandidatePlan(
   const initialTerminal = terminalProviderPlan(activation, candidate, inspected.state, candidate.mode === "enforce");
   if (initialTerminal !== null) {
     return {
-      plan: mutationIntent === null ? initialTerminal : { ...initialTerminal, mutationIntentId: mutationIntent.id },
+      plan: withMutationIntent(initialTerminal, mutationIntent),
       selection: null,
       mutationIntent,
       revalidateProvider: true,
@@ -861,6 +872,7 @@ async function applyCandidatePlan(
       activation,
       candidate,
       read.plan.replacementActor,
+      read.plan.selectionContext,
       ports,
     );
     if (prepared.failure !== null) return { plan: prepared.failure, providerEffectsApplied: false };
@@ -870,7 +882,7 @@ async function applyCandidatePlan(
   let inspected = await inspectProviderState(job, candidate, ports);
   if (inspected.state === null) {
     return {
-      plan: permanentFailurePlan(inspected.permanentError, intent?.id ?? null),
+      plan: permanentFailurePlan(inspected.permanentError, intent?.id ?? null, intent?.selectionContext),
       providerEffectsApplied: false,
     };
   }
@@ -895,13 +907,14 @@ async function applyCandidatePlan(
       activation,
       candidate,
       planned.plan.replacementActor,
+      planned.plan.selectionContext,
       ports,
     );
     if (prepared.failure !== null) return { plan: prepared.failure, providerEffectsApplied: false };
     intent = prepared.intent;
     inspected = await inspectProviderState(job, candidate, ports);
     if (inspected.state === null) {
-      return { plan: permanentFailurePlan(inspected.permanentError, intent.id), providerEffectsApplied: false };
+      return { plan: permanentFailurePlan(inspected.permanentError, intent.id, intent.selectionContext), providerEffectsApplied: false };
     }
     planned = await planFromProviderState(
       job,
@@ -940,7 +953,7 @@ async function applyCandidatePlan(
     const classified = ports.provider.classifyError(error);
     if (classified.kind === "obsolete_claim") throw error;
     if (classified.kind === "retryable") throw error;
-    return { plan: permanentFailurePlan(classified.message, intent.id), providerEffectsApplied: true };
+    return { plan: permanentFailurePlan(classified.message, intent.id, intent.selectionContext), providerEffectsApplied: true };
   }
   return { plan: intentPlan, providerEffectsApplied: true };
 }
@@ -1180,9 +1193,11 @@ function mutationIntentInput(
   activation: ReviewerAbsenceActivation,
   candidate: ReviewerReplacementCandidateDecision,
   replacementActorId: ExternalActorId,
+  selectionContext?: ReviewerLoadObservation | null,
 ): PrepareReviewerMutationIntentInput {
   return {
     ...mutationIntentKey(job, candidate),
+    ...(selectionContext === undefined ? {} : { selectionContext }),
     provider: candidate.provider,
     repositoryId: candidate.repository.externalId,
     changeRequestId: candidate.changeRequestId,
@@ -1198,6 +1213,7 @@ function mutationIntentMismatch(
   candidate: ReviewerReplacementCandidateDecision,
   intent: ReviewerMutationIntent,
 ): string | null {
+  assertSelectionContext(intent.selectionContext, intent.provider);
   const expected = mutationIntentInput(job, activation, candidate, intent.replacementActorId);
   const sourceMatches = intent.id.trim().length > 0
     && intent.workspaceId === expected.workspaceId
@@ -1210,10 +1226,13 @@ function mutationIntentMismatch(
     && intent.changeRequestId === expected.changeRequestId
     && intent.expectedHeadRevision === expected.expectedHeadRevision
     && intent.unavailableActorId === expected.unavailableActorId;
+  const contextMatches = intent.selectionContext?.status !== "complete"
+    || (Object.keys(intent.selectionContext.loads).every((actor) => candidate.originalEligibleActors.includes(actor))
+      && Object.hasOwn(intent.selectionContext.loads, intent.replacementActorId));
   const actorIsValid = candidate.originalEligibleActors.includes(intent.replacementActorId)
     && !candidate.selectedActors.includes(intent.replacementActorId)
     && intent.replacementActorId !== activation.externalActorId;
-  return sourceMatches && actorIsValid
+  return sourceMatches && actorIsValid && contextMatches
     ? null
     : "Durable reviewer mutation intent does not match the immutable activation source.";
 }
@@ -1223,18 +1242,19 @@ async function prepareValidatedMutationIntent(
   activation: ReviewerAbsenceActivation,
   candidate: ReviewerReplacementCandidateDecision,
   replacementActorId: ExternalActorId,
+  selectionContext: ReviewerLoadObservation | null | undefined,
   ports: ReviewerAvailabilityPorts,
 ): Promise<
   | { intent: ReviewerMutationIntent; failure: null }
   | { intent: ReviewerMutationIntent; failure: PlannedReplacement }
 > {
   const intent = await ports.availability.prepareMutationIntent(
-    mutationIntentInput(job, activation, candidate, replacementActorId),
+    mutationIntentInput(job, activation, candidate, replacementActorId, selectionContext),
   );
   const mismatch = mutationIntentMismatch(job, activation, candidate, intent);
   return mismatch === null
     ? { intent, failure: null }
-    : { intent, failure: permanentFailurePlan(mismatch, intent.id) };
+    : { intent, failure: permanentFailurePlan(mismatch, intent.id, intent.selectionContext) };
 }
 
 async function durableIntentIneligibilityPlan(
@@ -1249,6 +1269,7 @@ async function durableIntentIneligibilityPlan(
     return permanentFailurePlan(
       `Durable replacement actor ${intent.replacementActorId} is the current change-request author.`,
       intent.id,
+      intent.selectionContext,
     );
   }
   const absences = await ports.availability.findActive({
@@ -1261,6 +1282,7 @@ async function durableIntentIneligibilityPlan(
     return permanentFailurePlan(
       `Durable replacement actor ${intent.replacementActorId} is currently unavailable.`,
       intent.id,
+      intent.selectionContext,
     );
   }
   const currentHeadApprovals = activeApprovedReviewers(
@@ -1270,6 +1292,7 @@ async function durableIntentIneligibilityPlan(
     return permanentFailurePlan(
       `Durable replacement actor ${intent.replacementActorId} already approved the current head.`,
       intent.id,
+      intent.selectionContext,
     );
   }
   return null;
@@ -1288,7 +1311,7 @@ async function planFromProviderState(
   const terminal = terminalProviderPlan(activation, candidate, current, candidate.mode === "enforce");
   if (terminal !== null) {
     return {
-      plan: mutationIntent === null ? terminal : { ...terminal, mutationIntentId: mutationIntent.id },
+      plan: withMutationIntent(terminal, mutationIntent),
       selection: existingSelection,
     };
   }
@@ -1363,6 +1386,7 @@ function replacementPlan(
   const outcome = candidate.mode === "enforce" ? "replaced" : "simulated_replacement";
   return {
     outcome,
+    selectionContext: selection.selectionContext ?? null,
     replacementActor: selected.replacementActor,
     reason: candidate.mode === "enforce"
       ? `Replaced unavailable actor ${activation.externalActorId} with ${selected.replacementActor}.`
@@ -1381,6 +1405,7 @@ function durableIntentPlan(
 ): PlannedReplacement {
   return {
     outcome: "replaced",
+    selectionContext: intent.selectionContext ?? null,
     replacementActor: intent.replacementActorId,
     reason: `Replaced unavailable actor ${activation.externalActorId} with ${intent.replacementActorId}.`,
     replaceCohort: true,
@@ -1406,14 +1431,16 @@ function withMutationIntent(
   plan: PlannedReplacement,
   intent: ReviewerMutationIntent | null,
 ): PlannedReplacement {
-  return intent === null ? plan : { ...plan, mutationIntentId: intent.id };
+  return intent === null ? plan : { ...plan, mutationIntentId: intent.id, selectionContext: intent.selectionContext ?? null };
 }
 
 function permanentFailurePlan(
   reason: string,
   mutationIntentId: ReviewerMutationIntentId | null = null,
+  selectionContext?: ReviewerLoadObservation | null,
 ): PlannedReplacement {
-  return { ...terminalPlan("permanent_failure", reason), mutationIntentId };
+  return { ...terminalPlan("permanent_failure", reason), mutationIntentId,
+    ...(selectionContext === undefined ? {} : { selectionContext }) };
 }
 
 function finalizerFor(
@@ -1450,6 +1477,7 @@ function persistenceInput(
     unavailableActorId: activation.externalActorId,
     replacementActorId: plan.replacementActor,
     mutationIntentId: plan.mutationIntentId,
+    ...(plan.selectionContext === undefined ? {} : { selectionContext: plan.selectionContext }),
     outcome: plan.outcome,
     reason: plan.reason,
     state,
@@ -1496,6 +1524,7 @@ function mutationIntentRecoveryPersistence(
     unavailableActorId: intent.unavailableActorId,
     replacementActorId: null,
     mutationIntentId: intent.id,
+    selectionContext: intent.selectionContext ?? null,
     outcome: "permanent_failure",
     reason,
     state: "permanent_failure",
@@ -1640,4 +1669,10 @@ function isReviewerReplacementNonMutationOutcome(
     || value === "skipped_changed_head"
     || value === "skipped_policy_satisfied"
     || value === "permanent_failure";
+}
+
+function assertSelectionContext(value: unknown, provider: unknown): void {
+  if (value !== undefined && value !== null && (provider !== "github" || !isReviewerLoadObservation(value))) {
+    throw new ReviewerReplacementContractError("Reviewer selection context is malformed");
+  }
 }

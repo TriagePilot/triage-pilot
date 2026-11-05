@@ -399,6 +399,11 @@ describe("runWorkerOnce", () => {
     const claimed = activationJob({ attemptCount: 1, maxAttempts: 5 });
     queue.claimNext.mockResolvedValue(claimed);
     const recovery = serializedRecovery("persist_replacement", true);
+    (recovery.persistence as Record<string, unknown>).selectionContext = {
+      status: "complete", source: "tracked_github_pending",
+      observedAt: "2026-09-01T11:59:00.000Z", trackedSince: "2026-06-03T11:59:00.000Z",
+      loads: { "@user-b71d93": 4 }, reason: null,
+    };
 
     await runWorkerOnce({
       jobClaimer: queue,

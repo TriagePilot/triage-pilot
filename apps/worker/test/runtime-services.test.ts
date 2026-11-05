@@ -50,6 +50,34 @@ const availabilityMessage = {
 };
 
 describe("worker reviewer availability runtime scope", () => {
+  it("preserves durable selection context when mapping loaded replacement records", async () => {
+    const selectionContext = {
+      status: "complete" as const, source: "tracked_github_pending" as const,
+      observedAt: "2026-09-01T09:59:00.000Z", trackedSince: "2026-06-03T09:59:00.000Z",
+      loads: { replacement: 3 }, reason: null,
+    };
+    const row = {
+      id: "replacement-1", workspace_id: availabilityMessage.workspaceId, provider: "github",
+      provider_connection_id: availabilityMessage.providerConnectionId,
+      absence_id: availabilityMessage.absenceId, absence_revision: availabilityMessage.absenceRevision,
+      decision_id: "decision-1", unavailable_actor_id: "absent", replacement_actor_id: "replacement",
+      mutation_intent_id: "intent-1", outcome: "replaced", state: "finalizer_pending",
+      last_error: null, selection_context: selectionContext,
+    };
+    const query = {
+      selectAll: () => query, where: () => query, orderBy: () => query,
+      execute: async () => [row], executeTakeFirst: async () => row,
+    };
+    const services = createWorkerReviewerAvailabilityServiceFactory({
+      db: { selectFrom: () => query } as never,
+      credentialProvider: { getCredential: vi.fn(async () => { throw new Error("unused"); }) },
+    })(availabilityMessage);
+    expect((await services.availability.loadReplacement(row.id))?.selectionContext).toEqual(selectionContext);
+    expect((await services.availability.listPendingFinalizers({
+      absenceId: availabilityMessage.absenceId, absenceRevision: availabilityMessage.absenceRevision,
+    }))[0]?.selectionContext).toEqual(selectionContext);
+  });
+
   it("rejects a wrong workspace before database, adapter, or credential composition", async () => {
     const database = knownRepositoryDatabase();
     const selectFrom = vi.spyOn(database, "selectFrom");

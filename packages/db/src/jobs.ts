@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+import { isReviewerLoadObservation } from "@triagepilot/contracts";
 import { sql, type Kysely, type Transaction } from "kysely";
 import type { ProviderConnectionId, ProviderKind, WorkspaceId } from "@triagepilot/contracts";
 
@@ -408,6 +410,7 @@ async function exhaustReviewerAbsenceActivationTransaction(
           unavailableActorId: intent.unavailable_actor_id,
           replacementActorId: null,
           mutationIntentId: intent.id,
+          selectionContext: intent.selection_context,
           outcome: "permanent_failure",
           reason: error,
           state: "permanent_failure",
@@ -527,7 +530,9 @@ function isValidRecoveryPersistence(
 ): boolean {
   if (!hasExactKeys(persistence, ["provider", "providerConnectionId", "absenceId", "absenceRevision", "decisionId",
     "expectedHeadRevision", "unavailableActorId", "replacementActorId", "mutationIntentId", "outcome", "reason",
-    "state", "lastError", "startedAt", "completedAt", "replaceCohort", "event"])
+    "state", "lastError", "startedAt", "completedAt", "replaceCohort", "event",
+    ...(Object.hasOwn(persistence, "selectionContext") ? ["selectionContext"] : [])])
+    || (persistence.selectionContext != null && !isReviewerLoadObservation(persistence.selectionContext))
     || !isRecord(persistence.event) || !isNonBlank(persistence.decisionId)
     || !isNonBlank(persistence.expectedHeadRevision) || !isNonBlank(persistence.unavailableActorId)
     || !isNonBlank(persistence.reason) || persistence.provider !== job.provider
@@ -605,7 +610,9 @@ async function recoverySourceMatches(
       : raw.replacementActorId === null
         && raw.persistence.replacementActorId === null
         && raw.persistence.event.replacementActor === null;
-    return intent.decision_id === raw.persistence.decisionId
+    return (raw.persistence.selectionContext === undefined
+      || isDeepStrictEqual(raw.persistence.selectionContext, intent.selection_context))
+      && intent.decision_id === raw.persistence.decisionId
       && intent.expected_head_revision === raw.persistence.expectedHeadRevision
       && intent.repository_id === raw.persistence.event.repositoryId
       && intent.change_request_id === raw.persistence.event.changeRequestId

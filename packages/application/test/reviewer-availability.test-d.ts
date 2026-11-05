@@ -1,7 +1,9 @@
+import type { ReviewerLoadObservation } from "@triagepilot/contracts";
 import { expectTypeOf } from "vitest";
 
 import type {
   PersistReviewerReplacementInput,
+  PrepareReviewerMutationIntentInput,
   ReviewerMutationIntentId,
   ReviewerReplacementFinalizerRecord,
   ReviewerReplacementFinalizerRecovery,
@@ -92,3 +94,9 @@ expectTypeOf<{
   persistence: null;
   lastError: string;
 }>().not.toMatchTypeOf<ReviewerReplacementFinalizerRecovery>();
+
+expectTypeOf<ReplacedPersistence["selectionContext"]>()
+  .toEqualTypeOf<ReviewerLoadObservation | null | undefined>();
+expectTypeOf<PrepareReviewerMutationIntentInput["selectionContext"]>()
+  .toEqualTypeOf<ReviewerLoadObservation | null | undefined>();
+expectTypeOf<Omit<ReplacedPersistence, "selectionContext">>().toMatchTypeOf<ReplacedPersistence>();

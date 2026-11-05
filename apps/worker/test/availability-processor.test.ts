@@ -39,6 +39,11 @@ describe("reviewer absence availability processor", () => {
   it("persists provider-effect recovery and runs only its mapped finalizer", async () => {
     const services = buildServices();
     const recovery = replacedRecovery("persist_replacement");
+    recovery.persistence!.selectionContext = {
+      status: "complete", source: "tracked_github_pending",
+      observedAt: "2026-09-01T09:59:00.000Z", trackedSince: "2026-06-03T09:59:00.000Z",
+      loads: { "@user-c91e46": 3 }, reason: null,
+    };
     services.availability.persistReplacement = vi.fn(async () => ({
       inserted: true,
       activationCurrent: true,

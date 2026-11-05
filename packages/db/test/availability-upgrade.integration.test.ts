@@ -21,6 +21,7 @@ const FINAL_MIGRATIONS = [
   "0008_reviewer_mutation_intents.sql",
   "0009_provider_connection_revocations.sql",
   "0010_provider_connection_preemptive_revocations.sql",
+  "0011_reviewer_selection_context.sql",
 ];
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability migration histories", () => {
@@ -126,12 +127,13 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability mi
                  replacements.provider_connection_id, replacements.absence_id,
                  replacements.decision_id, replacements.unavailable_actor_id,
                  replacements.replacement_actor_id, replacements.mutation_intent_id,
-                 replacements.state, replacements.last_error
+                 replacements.state, replacements.last_error, replacements.selection_context
           from reviewer_replacements replacements
           where replacements.id = $1
         `, [replacementId])).resolves.toMatchObject({
           rows: [{
             id: replacementId,
+            selection_context: null,
             absence_id: absenceId,
             decision_id: decisionId,
             unavailable_actor_id: "@user-8d3a10",

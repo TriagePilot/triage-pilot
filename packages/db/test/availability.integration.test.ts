@@ -1,6 +1,6 @@
 import { sql } from "kysely";
 import { describe, expect, it } from "vitest";
-import type { ProviderKind, ReviewerReplacementEventV1 } from "@triagepilot/contracts";
+import type { ProviderKind, ReviewerLoadObservation, ReviewerReplacementEventV1 } from "@triagepilot/contracts";
 
 import {
   applyFixedRetention,
@@ -24,6 +24,87 @@ const alternateReplacementActor = "Actor:Alternate/73";
 const changeRequestId = "change:Request/A17";
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer availability", () => {
+  const observation: ReviewerLoadObservation = {
+    status: "complete", source: "tracked_github_pending",
+    observedAt: "2026-09-01T11:59:00.000Z", trackedSince: "2026-06-03T11:59:00.000Z",
+    loads: { [replacementActor]: 2, [unavailableActor]: 7 }, reason: null,
+  };
+
+  it("preserves original intent context across restart, legacy payload recovery and retries", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "context-restart", observation);
+      const restarted = createWorkspaceReviewerAvailability(db, fixture.scope.workspaceId);
+      const intent = (await restarted.listUnfinalizedMutationIntents({
+        absenceId: fixture.absence.id, absenceRevision: fixture.absence.revision,
+      }))[0]!;
+      expect(intent.selectionContext).toEqual(observation);
+      const conflicting = { ...observation, loads: { [replacementActor]: 99 } };
+      await expect(restarted.prepareMutationIntent({ ...intent, selectionContext: conflicting }))
+        .rejects.toThrow(/Preparation conflicts/);
+      const persisted = await restarted.persistReplacement(replacementInput(fixture));
+      expect(persisted.replacement?.selectionContext).toEqual(observation);
+      await expect(restarted.persistReplacement({ ...replacementInput(fixture), selectionContext: conflicting }))
+        .rejects.toThrow(/context/i);
+      expect((await restarted.loadReplacement(persisted.replacement!.id))?.selectionContext).toEqual(observation);
+      expect((await restarted.loadMutationIntent(intent))?.selectionContext).toEqual(observation);
+    });
+  });
+
+  it.each([true, false])("retains intent context in exhausted serialized recovery (explicit context: %s)", async (explicit) => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, `context-exhausted-${explicit}`, observation);
+      const persistence = serializedPersistence(replacementInput(fixture));
+      if (explicit) persistence.selectionContext = observation;
+      const lease = await claimRecovery(db, fixture, replacementRecovery(fixture, {
+        phase: "persist_replacement", replacementId: null, persistence,
+      }), `context-exhausted-${explicit}`);
+      await createWorkspaceJobQueue(db, fixture.scope.workspaceId)
+        .exhaustReviewerAbsenceActivation(lease, "recovery exhausted", now);
+      expect((await fixture.availability.listReplacementHistory())[0]?.selectionContext).toEqual(observation);
+    });
+  });
+
+  it("stores fallback context on simulated replacements without a mutation intent", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "context-shadow");
+      const input = replacementInput(fixture);
+      const fallback: ReviewerLoadObservation = {
+        ...observation, status: "fallback", loads: {}, observedAt: null, reason: "timeout",
+      };
+      const persisted = await fixture.availability.persistReplacement({
+        ...input, mutationIntentId: null, outcome: "simulated_replacement", state: "completed",
+        selectionContext: fallback, event: { ...input.event, outcome: "simulated_replacement" },
+      });
+      expect(persisted.replacement?.selectionContext).toEqual(fallback);
+      expect(persisted.replacement?.mutationIntentId).toBeNull();
+    });
+  });
+
+  it.each([
+    { loads: { [replacementActor]: -1 } }, { loads: { [replacementActor]: 1.5 } },
+    { loads: { [replacementActor]: Infinity } }, { observedAt: "bad-date" },
+    { trackedSince: "2027-01-01T00:00:00.000Z" }, { status: "partial" },
+    { status: "fallback", reason: "timeout" }, { reason: "timeout" },
+    { loads: { foreignActor: 0 } },
+  ])("rejects malformed or out-of-scope selection context %j", async (invalid) => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "invalid-context");
+      await expect(fixture.availability.persistReplacement({
+        ...replacementInput(fixture), selectionContext: { ...observation, ...invalid } as ReviewerLoadObservation,
+      })).rejects.toThrow();
+    });
+  });
+
+  it("maps absent legacy context to null and rejects non-object SQL context", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, "legacy-context");
+      const replacement = await fixture.availability.persistReplacement(replacementInput(fixture));
+      expect(replacement.replacement?.selectionContext).toBeNull();
+      await expect(sql`update reviewer_replacements set selection_context = '[]'::jsonb
+        where id = ${replacement.replacement!.id}`.execute(db)).rejects.toThrow();
+    });
+  });
+
   it.each(["run_finalizer", "complete_replacement"] as const)(
     "rejects fully shaped persistence on %s recovery without mutating the pending replacement",
     async (phase) => {
@@ -1778,6 +1859,7 @@ async function seedWorkspace(
 async function seedReplacementFixture(
   db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0],
   externalKey: string,
+  selectionContext?: ReviewerLoadObservation,
 ) {
   const scope = await seedWorkspace(db, externalKey, "github", `${externalKey}-connection`);
   const repository = await db.insertInto("repositories").values({
@@ -1831,6 +1913,7 @@ async function seedReplacementFixture(
     expectedHeadRevision: "head-1",
     unavailableActorId: unavailableActor,
     replacementActorId: replacementActor,
+    selectionContext,
   });
   return {
     db,

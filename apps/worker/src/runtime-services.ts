@@ -14,6 +14,7 @@ import {
   type ProviderKind,
   type HumanReviewPolicyJobPayload,
   type RepositoryRef,
+  type ReviewerLoadObservation,
   type ScoreComponent,
 } from "@triagepilot/contracts";
 import {
@@ -1089,6 +1090,7 @@ function assertAvailabilityScope(
 }
 
 function toApplicationMutationIntent(intent: {
+  selectionContext?: ReviewerLoadObservation | null;
   id: string;
   workspaceId: string;
   provider: "github" | "gitlab" | "bitbucket";
@@ -1109,6 +1111,7 @@ function toApplicationMutationIntent(intent: {
 }
 
 function toApplicationFinalizerRecord(record: {
+  selectionContext?: ReviewerLoadObservation | null;
   id: string;
   workspaceId: string;
   provider: ProviderKind;
@@ -1124,6 +1127,7 @@ function toApplicationFinalizerRecord(record: {
 }): ReviewerReplacementFinalizerRecord {
   const value: unknown = {
     id: record.id,
+    selectionContext: record.selectionContext ?? null,
     workspaceId: record.workspaceId,
     provider: record.provider,
     providerConnectionId: record.providerConnectionId,
@@ -1143,6 +1147,7 @@ function toApplicationFinalizerRecord(record: {
 }
 
 function toApplicationRecoveryRecord(record: {
+  selectionContext?: ReviewerLoadObservation | null;
   id: string;
   workspaceId: string;
   provider: ProviderKind;
@@ -1159,6 +1164,7 @@ function toApplicationRecoveryRecord(record: {
 }): ReviewerReplacementRecoveryRecord {
   const value: unknown = {
     id: record.id,
+    selectionContext: record.selectionContext ?? null,
     workspaceId: record.workspaceId,
     provider: record.provider,
     providerConnectionId: record.providerConnectionId,
