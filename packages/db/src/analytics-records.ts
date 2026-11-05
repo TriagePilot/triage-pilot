@@ -30,11 +30,25 @@ export function normalizeAnalyticsDecision(row: AnalyticsDecisionRow): Analytics
   const details = object(row.details);
   const tier = object(details.risk).tier;
   const riskTier = row.action !== "configuration_failure" && (tier === "low" || tier === "medium" || tier === "high") ? tier : null;
-  const quota = object(details.routing).requestedReviewerCount;
-  const requiredReviews = row.action === "configuration_failure" ? null
-    : row.action === "policy_approval" && riskTier === "low" ? 0
-    : (row.action === "request_human_review" || row.action === "no_eligible_reviewer") && riskTier !== null
-      ? quota === 1 || quota === 2 ? quota : riskTier === "medium" && quota === undefined ? 1 : null
-      : null;
-  return { decisionId: row.id, changeRequest: row.changeRequest, createdAt: row.created_at.toISOString(), actionAppliedAt: row.action_applied_at?.toISOString() ?? null, mode: row.mode, action: row.action, actionStatus: row.action_status, riskScore: riskTier !== null && Number.isFinite(row.risk_score) ? row.risk_score : null, riskTier, requiredReviews };
+  const routing = object(details.routing);
+  const quota = routing.requestedReviewerCount;
+  let requiredReviews: AnalyticsDecisionFact["requiredReviews"] = null;
+  if (row.action === "policy_approval" && riskTier === "low") {
+    requiredReviews = 0;
+  } else if (row.action === "request_human_review" || row.action === "no_eligible_reviewer") {
+    // An explicit historical quota remains reliable even when the tier is missing.
+    if (quota === 1 || quota === 2) requiredReviews = quota;
+    else if (riskTier === "medium" && quota === undefined) requiredReviews = 1;
+  }
+  const shortfall = routing.reviewerShortfall;
+  const reviewerShortfall = row.action !== "configuration_failure"
+    && typeof shortfall === "number" && Number.isSafeInteger(shortfall)
+    && shortfall >= 0 && shortfall <= (requiredReviews ?? 2) ? shortfall : null;
+  return {
+    decisionId: row.id, changeRequest: row.changeRequest,
+    createdAt: row.created_at.toISOString(), actionAppliedAt: row.action_applied_at?.toISOString() ?? null,
+    mode: row.mode, action: row.action, actionStatus: row.action_status,
+    riskScore: row.action !== "configuration_failure" && Number.isFinite(row.risk_score) ? row.risk_score : null,
+    riskTier, requiredReviews, reviewerShortfall,
+  };
 }

@@ -1391,6 +1391,7 @@ function replacementPlan(
   if (selected.replacementActor === null) {
     return {
       outcome: "no_replacement_available",
+      selectionContext: selection.selectionContext ?? null,
       replacementActor: null,
       reason: "No available actor remains in the original ownership-eligible pool.",
       replaceCohort: false,

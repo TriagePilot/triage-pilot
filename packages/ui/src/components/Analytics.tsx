@@ -108,6 +108,8 @@ function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: A
           <p>{Math.abs(report.savings.netFewerReviews)} {report.savings.netFewerReviews < 0 ? "additional reviews" : "fewer required human reviews"} · {report.savings.reductionPercent === null ? "Reduction unavailable" : `${Math.abs(report.savings.reductionPercent).toFixed(1)}% ${report.savings.reductionPercent < 0 ? "increase" : "reduction"}`}</p>
           <p>Baseline: 1 reviewer/PR | Average review: {report.query.averageReviewMinutes} minutes per review</p>
           <p>{report.savings.eligiblePrs} eligible PRs in the {report.mode === "shadow" ? "projection" : "successfully applied savings"} cohort; {report.savings.excludedPrs} excluded from effort-saved estimate.</p>
+          <p>Reviewer shortages among assessed PRs: {report.shortages.affectedPrs} PRs; {report.shortages.missingReviewers} missing reviewers; {report.shortages.unknownPrs} PRs with unknown shortage.</p>
+          {report.mode === "shadow" ? <p>Shadow projections have not enacted these savings or assignments.</p> : null}
           <p>Baseline reviews: {report.savings.baselineReviews}; required reviews: {report.savings.requiredReviews}.</p>
           <p>{report.counts.assessed === 0 ? "No assessments" : `${report.counts.assessed} assessed PRs`} · Human review required: {report.counts.humanRequired} · No human review required: {report.counts.noHumanRequired} ({report.noHumanSharePercent === null ? "Unavailable" : `${report.noHumanSharePercent.toFixed(1)}% of assessed PRs with known requirements`})</p>
           <p>Could not assess: {report.counts.couldNotAssess}; unknown review requirements: {report.counts.unknownRequirements}.</p>

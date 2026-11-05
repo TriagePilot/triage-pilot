@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import { analyticsRow, normalizedReport, shadowHighRow } from "../../../test/analytics-fixtures.js";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vitest";
@@ -13,6 +14,7 @@ const report: AnalyticsReport = {
   query: { periodDays: 30, mode: "auto", repositoryIds: [], averageReviewMinutes: 30 }, mode: "enforce",
   start: "2026-10-01T00:00:00.000Z", end: "2026-10-31T00:00:00.000Z", repositories: [repository],
   counts: { assessed: 100, couldNotAssess: 2, humanRequired: 50, noHumanRequired: 50, unknownRequirements: 0, riskLow: 50, riskMedium: 30, riskHigh: 10, riskUnknown: 10 },
+  shortages: { affectedPrs: 0, missingReviewers: 0, unknownPrs: 100 },
   noHumanSharePercent: 50,
   savings: { eligiblePrs: 90, excludedPrs: 12, baselineReviews: 90, requiredReviews: 40, netFewerReviews: 50, estimatedHoursSaved: 25, reductionPercent: 55.6 },
   assignments: [{ actor: "history-only", count: 4, sharePercent: 100, days: [{ day: "2026-10-01", count: 4 }] }],
@@ -133,4 +135,17 @@ it("retains explicit shadow mode across date changes and rejects invalid minutes
   for (const value of ["", "1.5", "481", "-1"]) await change("Average review minutes", value);
   expect(client.readAnalytics).toHaveBeenCalledTimes(before); expect(client.readCurrentWorkload).toHaveBeenCalledTimes(1);
   await change("Average review minutes", "480"); expect(client.readAnalytics).toHaveBeenLastCalledWith(workspace, expect.objectContaining({ averageReviewMinutes: 480 }), expect.any(AbortSignal));
+});
+
+it("shows actual shadow shortages and unknown history beside the eligible projection cohort", async () => {
+  const historical = normalizedReport([
+    shadowHighRow(1, []), shadowHighRow(2, ["@one"]), shadowHighRow(3, ["@one", "@two"]),
+    { ...analyticsRow, mode: "shadow", action_status: "not_applied", details: { routing: { requestedReviewerCount: 2 } } },
+  ]);
+  const client = api(); vi.mocked(client.readAnalytics).mockResolvedValue(historical);
+  await mount(client);
+  const panel = container.querySelector('[aria-label="Review value"]')!.textContent;
+  expect(panel).toContain("4 eligible PRs in the projection cohort; 0 excluded");
+  expect(panel).toContain("Reviewer shortages among assessed PRs: 2 PRs; 3 missing reviewers; 1 PRs with unknown shortage");
+  expect(panel).toContain("Shadow projections have not enacted these savings or assignments");
 });

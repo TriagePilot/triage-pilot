@@ -1539,3 +1539,30 @@ describe("shadow backlog replacement", () => {
     expect(ports.availability.prepareMutationIntent).not.toHaveBeenCalled();
   });
 });
+
+it.each(["complete", "fallback"] as const)("preserves %s no-replacement selection provenance through finalizer recovery", async (status) => {
+  const observation = { status, source: "tracked_github_pending" as const,
+    observedAt: status === "complete" ? activationAt.toISOString() : null,
+    trackedSince: "2026-06-01T00:00:00.000Z", loads: {}, reason: status === "complete" ? null : "provider_unavailable" as const };
+  const ports = buildPorts();
+  ports.availability.loadActivation = vi.fn(async () => ({ ...activation, candidates: [{ ...candidate,
+    originalPreferredActors: [activation.externalActorId], originalEligibleActors: [activation.externalActorId] }] }));
+  ports.resolveTrackedPullRequest = vi.fn(async () => ({ repositoryRecordId: "r", repository: candidate.repository,
+    providerConnectionId: job.providerConnectionId, changeRequestId: candidate.changeRequestId, changeRequestNumber: 7 }));
+  ports.reviewerBacklog = vi.fn(async () => observation);
+  ports.finalizers.run = vi.fn().mockRejectedValueOnce(new Error("finalizer unavailable")).mockResolvedValue(undefined);
+  const result = await activateReviewerAbsence(job, ports);
+  expect(ports.availability.persistReplacement).toHaveBeenCalledWith(expect.objectContaining({
+    outcome: "no_replacement_available", selectionContext: observation }));
+  expect(result).toMatchObject({ status: "finalizer_pending", recovery: { phase: "run_finalizer", outcome: "no_replacement_available" } });
+  if (result.status !== "finalizer_pending") throw new Error("Expected recovery");
+  expect(() => assertReviewerReplacementFinalizerRecovery(result.recovery)).not.toThrow();
+  const persisted = vi.mocked(ports.availability.persistReplacement).mock.calls[0]![0];
+  ports.availability.listPendingFinalizers = vi.fn(async () => [{ ...persisted, workspaceId: job.workspaceId, id: "replacement-1", state: "finalizer_pending" as const }]);
+  ports.availability.loadActivation = vi.fn(async () => null);
+  expect(await activateReviewerAbsence(job, ports)).toMatchObject({ results: [{ outcome: "no_replacement_available", finalized: true }] });
+  expect(persisted.selectionContext).toEqual(observation);
+  expect(ports.availability.persistReplacement).toHaveBeenCalledTimes(1);
+  expect(ports.reviewerBacklog).toHaveBeenCalledTimes(1);
+  expect(ports.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+});

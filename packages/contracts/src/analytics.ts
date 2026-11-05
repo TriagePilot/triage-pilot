@@ -21,6 +21,8 @@ export interface AnalyticsDecisionFact {
   riskScore: number | null;
   riskTier: RiskTier | null;
   requiredReviews: 0 | 1 | 2 | null;
+  /** Persisted missing-reviewer count; absent/null means unknown for legacy hosts/history. */
+  reviewerShortfall?: number | null;
 }
 export interface ReviewerAssignmentFact {
   changeRequest: TrackedPullRequest;
@@ -52,6 +54,8 @@ export interface AnalyticsReport {
     riskHigh: number;
     riskUnknown: number;
   };
+  /** Latest assessed PRs in the selected mode, independent of savings eligibility and assignments. */
+  shortages: { affectedPrs: number; missingReviewers: number; unknownPrs: number };
   noHumanSharePercent: number | null;
   savings: {
     eligiblePrs: number;

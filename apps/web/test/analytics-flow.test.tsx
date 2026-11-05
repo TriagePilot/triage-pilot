@@ -10,6 +10,7 @@ const report: AnalyticsReport = {
   query: { periodDays: 30, mode: "auto", repositoryIds: [], averageReviewMinutes: 30 }, mode: "enforce",
   start: "2026-10-01T00:00:00.000Z", end: "2026-10-31T00:00:00.000Z", repositories: [repository],
   counts: { assessed: 100, couldNotAssess: 2, humanRequired: 50, noHumanRequired: 50, unknownRequirements: 0, riskLow: 50, riskMedium: 30, riskHigh: 10, riskUnknown: 10 },
+  shortages: { affectedPrs: 0, missingReviewers: 0, unknownPrs: 100 },
   noHumanSharePercent: 50,
   savings: { eligiblePrs: 90, excludedPrs: 12, baselineReviews: 90, requiredReviews: 40, netFewerReviews: 50, estimatedHoursSaved: 25, reductionPercent: 55.6 },
   assignments: [{ actor: "history-only", count: 4, sharePercent: 100, days: [{ day: "2026-10-01", count: 4 }] }],

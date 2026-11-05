@@ -22,6 +22,7 @@ export function buildAnalyticsReport(input: {
     : query.mode;
   const counts: AnalyticsReport["counts"] = { assessed: 0, couldNotAssess: 0, humanRequired: 0, noHumanRequired: 0, unknownRequirements: 0, riskLow: 0, riskMedium: 0, riskHigh: 0, riskUnknown: 0 };
   const savings: AnalyticsReport["savings"] = { eligiblePrs: 0, excludedPrs: 0, baselineReviews: 0, requiredReviews: 0, netFewerReviews: 0, estimatedHoursSaved: 0, reductionPercent: null };
+  const shortages: AnalyticsReport["shortages"] = { affectedPrs: 0, missingReviewers: 0, unknownPrs: 0 };
   let knownRequirements = 0;
   for (const fact of facts.latestDecisions) {
     if (fact.mode !== mode) continue;
@@ -29,6 +30,14 @@ export function buildAnalyticsReport(input: {
     if (!valid) counts.couldNotAssess++;
     else {
       counts.assessed++;
+      const shortfall = fact.reviewerShortfall;
+      if (typeof shortfall !== "number" || !Number.isSafeInteger(shortfall)
+        || shortfall < 0 || shortfall > (fact.requiredReviews ?? 2)) {
+        shortages.unknownPrs++;
+      } else if (shortfall > 0) {
+        shortages.affectedPrs++;
+        shortages.missingReviewers += shortfall;
+      }
       if (fact.requiredReviews !== null) knownRequirements++;
       if (fact.requiredReviews === null) {
         counts.unknownRequirements++;
@@ -83,7 +92,7 @@ export function buildAnalyticsReport(input: {
     rows.set(actor, row);
   }
   return {
-    query, mode, start, end, repositories: scope.repositories, counts,
+    query, mode, start, end, repositories: scope.repositories, counts, shortages,
     noHumanSharePercent: knownRequirements ? counts.noHumanRequired / knownRequirements * 100 : null,
     savings,
     assignments: [...rows].sort(([a], [b]) => a.localeCompare(b)).map(([actor, row]) => ({
