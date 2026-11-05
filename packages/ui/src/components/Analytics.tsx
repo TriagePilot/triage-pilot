@@ -109,7 +109,7 @@ function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: A
           <p>Baseline: 1 reviewer/PR | Average review: {report.query.averageReviewMinutes} minutes per review</p>
           <p>{report.savings.eligiblePrs} eligible PRs in the {report.mode === "shadow" ? "projection" : "successfully applied savings"} cohort; {report.savings.excludedPrs} excluded from effort-saved estimate.</p>
           <p>Baseline reviews: {report.savings.baselineReviews}; required reviews: {report.savings.requiredReviews}.</p>
-          <p>{report.counts.assessed === 0 ? "No assessments" : `${report.counts.assessed} assessed PRs`} · Human review required: {report.counts.humanRequired} · No human review required: {report.counts.noHumanRequired} ({report.noHumanSharePercent === null ? "Unavailable" : `${report.noHumanSharePercent.toFixed(1)}% of assessed PRs`})</p>
+          <p>{report.counts.assessed === 0 ? "No assessments" : `${report.counts.assessed} assessed PRs`} · Human review required: {report.counts.humanRequired} · No human review required: {report.counts.noHumanRequired} ({report.noHumanSharePercent === null ? "Unavailable" : `${report.noHumanSharePercent.toFixed(1)}% of assessed PRs with known requirements`})</p>
           <p>Could not assess: {report.counts.couldNotAssess}; unknown review requirements: {report.counts.unknownRequirements}.</p>
         </section>
         <AnalyticsCharts report={report} />

@@ -49,6 +49,7 @@ it("renders estimated value, denominators, risk coverage, UTC bars and merged de
   const client = await mount();
   expect(text()).toContain("25.0 h"); expect(text()).toContain("Estimated review effort saved"); expect(text()).toContain("Baseline: 1 reviewer/PR");
   expect(text()).toContain("30 minutes per review"); expect(text()).toContain("90 eligible PRs"); expect(text()).toContain("100 assessed PRs");
+  expect(text()).toContain("50.0% of assessed PRs with known requirements");
   expect(text()).toContain("Unknown: 10 (10.0%)"); expect(text()).toContain("UTC daily assignments");
   expect(container.querySelector("svg")).not.toBeNull(); expect(text()).toContain("2026-10-01");
   expect(text()).toContain("Current counts are independent of the selected history period and mode.");

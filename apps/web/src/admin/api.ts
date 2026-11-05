@@ -205,7 +205,7 @@ export function createSelfHostedAnalyticsApi(input: {
 } = {}): AnalyticsApiClient {
   async function read<T>(workspace: WorkspaceContext, path: string, query: URLSearchParams, fallback: string, signal?: AbortSignal): Promise<T> {
     return withUnauthorized(input.onUnauthorized, async () => {
-      const response = await fetch(`/api/analytics${path}?${query}`, {
+      const response = await fetch(`/api/operations/analytics${path}?${query}`, {
         credentials: "same-origin", headers: workspaceHeaders(workspace), ...(signal ? { signal } : {}),
       });
       if (response.status === 401) throw new AdminApiError("The administrator session has expired.", 401);

@@ -27,11 +27,11 @@ it("loads the full report via HTTP at direct analytics entry and preserves histo
   window.location.hash = "#analytics";
   let currentRequests = 0;
   const fetcher = vi.fn(async (input: RequestInfo | URL) => {
-    if (String(input).startsWith("/api/analytics/workload?")) {
+    if (String(input).startsWith("/api/operations/analytics/workload?")) {
       currentRequests++;
       return currentRequests === 1 ? Response.json(current) : Response.json({ error: "analytics_unavailable" }, { status: 503 });
     }
-    if (String(input).startsWith("/api/analytics?")) return Response.json(report);
+    if (String(input).startsWith("/api/operations/analytics?")) return Response.json(report);
     throw new Error(`Unexpected request: ${input}`);
   });
   vi.stubGlobal("fetch", fetcher);
@@ -49,7 +49,7 @@ it("loads the full report via HTTP at direct analytics entry and preserves histo
     expect(container.textContent).toContain("Could not load the current reviewer workload.");
     expect(container.textContent).toContain("25.0 h");
     expect(container.textContent).toContain("history-only");
-    expect(fetcher.mock.calls.filter(([url]) => String(url).startsWith("/api/analytics?"))).toHaveLength(1);
+    expect(fetcher.mock.calls.filter(([url]) => String(url).startsWith("/api/operations/analytics?"))).toHaveLength(1);
     await act(async () => { container.querySelector<HTMLAnchorElement>('a[href="#overview"]')!.click(); window.location.hash = "#overview"; window.dispatchEvent(new HashChangeEvent("hashchange")); });
     expect(container.textContent).toContain("Operations ledger");
     expect(container.textContent).toContain("Run missing change request");
@@ -73,7 +73,7 @@ it("signs out the mounted host when an analytics request expires", async () => {
     const path = String(input);
     if (path === "/api/auth/session") return Response.json({ authenticated: true, username: "admin", workspaceId: "one" });
     if (path === "/api/operations/overview") return Response.json({ statuses: [], repositories: [], decisions: [], failures: { jobs: [], actions: [] }, worker: { available: true, workerId: "worker", lastHeartbeatAt: null } });
-    if (path.startsWith("/api/analytics")) return Response.json({ error: "unauthorized" }, { status: 401 });
+    if (path.startsWith("/api/operations/analytics")) return Response.json({ error: "unauthorized" }, { status: 401 });
     if (path.endsWith("/timezone")) return Response.json({ timezone: "UTC", updatedAt: "2026-10-31T00:00:00.000Z" });
     return Response.json([]);
   });

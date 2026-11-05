@@ -101,7 +101,7 @@ describe("release workflow guardrails", () => {
 
   it("uses the current database migration for manifest creation and publication verification", async () => {
     const release = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
-    const migrationArgument = "--database-migration 0010_provider_connection_preemptive_revocations.sql";
+    const migrationArgument = "--database-migration 0011_reviewer_selection_context.sql";
 
     expect(release.split(migrationArgument)).toHaveLength(3);
   });

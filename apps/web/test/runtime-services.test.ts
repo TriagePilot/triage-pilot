@@ -255,7 +255,7 @@ function runtimeInput(
     githubOrganization: "acme",
     github: {
       appId: "123",
-      privateKey: "private-key-secret",
+      privateKey: "-----BEGIN PRIVATE KEY-----\nprivate-key-secret\n-----END PRIVATE KEY-----",
       webhookSecret: "hook-secret",
     },
     verifySignature: async () => {},

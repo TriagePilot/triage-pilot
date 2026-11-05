@@ -251,8 +251,8 @@ it("encodes separate analytics queries, workspace cookies and abort signals", as
   await client.readAnalytics(workspace, { periodDays: 30, mode: "auto", repositoryIds: ["repo &/one", "repo?two"], averageReviewMinutes: 45 }, signal);
   await client.readCurrentWorkload(workspace, { repositoryIds: ["repo &/one"], averageReviewMinutes: 45, forceRefresh: true }, signal);
   expect(fetcher.mock.calls).toEqual([
-    ["/api/analytics?periodDays=30&mode=auto&averageReviewMinutes=45&repositoryId=repo+%26%2Fone&repositoryId=repo%3Ftwo", { credentials: "same-origin", headers: { "x-triagepilot-workspace": workspace.id }, signal }],
-    ["/api/analytics/workload?averageReviewMinutes=45&repositoryId=repo+%26%2Fone&forceRefresh=true", { credentials: "same-origin", headers: { "x-triagepilot-workspace": workspace.id }, signal }],
+    ["/api/operations/analytics?periodDays=30&mode=auto&averageReviewMinutes=45&repositoryId=repo+%26%2Fone&repositoryId=repo%3Ftwo", { credentials: "same-origin", headers: { "x-triagepilot-workspace": workspace.id }, signal }],
+    ["/api/operations/analytics/workload?averageReviewMinutes=45&repositoryId=repo+%26%2Fone&forceRefresh=true", { credentials: "same-origin", headers: { "x-triagepilot-workspace": workspace.id }, signal }],
   ]);
 });
 it("maps analytics server failures and expires the administrator session", async () => {
