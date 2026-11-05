@@ -95,6 +95,30 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("self-hosted web composit
     });
   });
 
+  it("composes independent scoped analytics services with the web requester", async () => {
+    await withPostgresTestDatabaseUrl(async databaseUrl => {
+      await runMigrations(databaseUrl);
+      const request = vi.fn().mockResolvedValue({ data: [] });
+      const createRequester = vi.fn(async () => ({ request }));
+      const composition = await createSelfHostedWebComposition(webEnv(databaseUrl), { createRequester: createRequester as never });
+      try {
+        await composition.localRepositories.replaceProviderConnectionRepositories({
+          provider: "github", externalConnectionId: "99", workspaceLogin: "acme", accountType: "Organization",
+          repositories: [{ provider: "github", externalRepositoryId: "101", owner: "acme", name: "api" }],
+        });
+        expect(await composition.services.readAnalytics({ periodDays: 30, mode: "auto", repositoryIds: [], averageReviewMinutes: 30 }))
+          .toMatchObject({ mode: "shadow", counts: { assessed: 0 } });
+        expect(createRequester).not.toHaveBeenCalled();
+        expect(await composition.services.readCurrentWorkload({ repositoryIds: [], averageReviewMinutes: 30, forceRefresh: false }))
+          .toMatchObject({ status: "complete", totalPending: 0 });
+        expect(createRequester).toHaveBeenCalledWith({ appId: "123", privateKey: webEnv(databaseUrl).github.privateKey, installationId: 99 });
+        expect(request).toHaveBeenCalledWith("GET /repos/{owner}/{repo}/pulls", expect.objectContaining({ owner: "acme", repo: "api", state: "open" }));
+      } finally {
+        await composition.close();
+      }
+    });
+  });
+
   it("resolves the persisted local workspace before exposing web services", async () => {
     await withPostgresTestDatabaseUrl(async (databaseUrl) => {
       await runMigrations(databaseUrl);

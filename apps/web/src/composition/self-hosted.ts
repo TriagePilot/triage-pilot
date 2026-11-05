@@ -100,6 +100,7 @@ export async function createSelfHostedWebComposition(
       ...(dependencies.createRequester === undefined ? {} : { createRequester: dependencies.createRequester }),
     }),
     queueRoutingRecovery: (request) => routingRecovery.queue(request),
+    ...(dependencies.createRequester === undefined ? {} : { createRequester: dependencies.createRequester }),
   });
 
   return {

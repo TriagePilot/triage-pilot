@@ -18,9 +18,11 @@ import {
 import { formatLog } from "@triagepilot/shared";
 import { sql } from "kysely";
 
+import { createAnalyticsRuntime } from "./analytics-runtime.js";
 import type { WebServices } from "./app.js";
 
 interface WebRuntimeServicesInput {
+  createRequester?: typeof import("@triagepilot/provider-github").createInstallationRequester;
   db: ReturnType<typeof createDatabase>;
   workspaceId: WorkspaceId;
   repositories?: WorkspaceRepositories;
@@ -59,6 +61,7 @@ export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebSer
     return connections[0]!;
   }
   return {
+    ...createAnalyticsRuntime(input),
     adminUsername: input.adminUsername,
     adminPassword: input.adminPassword,
     sessionSecret: input.sessionSecret,
