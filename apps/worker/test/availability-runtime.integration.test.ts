@@ -19,6 +19,50 @@ const unavailableActor = "@user-d82a5f";
 const eligibleActors = [unavailableActor, "@user-c91e46", "@user-f37a82"];
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker reviewer availability runtime crash recovery", () => {
+  it.each(["suspended", "revoked"] as const)("stops subsequent inspection requests when connection becomes %s", async (status) => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedActivation(db, `backlog-read-authority-${status}`);
+      const remote = new ReviewerRemote();
+      remote.beforeRequest = async () => {
+        remote.beforeRequest = null;
+        if (status === "revoked") {
+          await createWorkspaceRepositories(db, fixture.message.workspaceId).revokeConfiguredProviderConnection({ provider: "github", externalConnectionId: "99" });
+        } else {
+          await db.updateTable("provider_connections").set({ status }).where("id", "=", fixture.connectionId).execute();
+        }
+      };
+      await expect(processReviewerAbsenceActivationJob(fixture.message, fixture.buildServices(remote))).rejects.toThrow(/not known/);
+      expect(remote.request).toHaveBeenCalledTimes(1);
+      expect(remote.deleteCount).toBe(0);
+      expect(remote.postCount).toBe(0);
+    });
+  });
+
+  it("uses one supplied backlog service with scoped current PR exclusion and invalidates uncertain effects", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedActivation(db, "backlog-replacement");
+      const remote = new ReviewerRemote();
+      const observation = { status: "complete" as const, source: "tracked_github_pending" as const,
+        observedAt: now.toISOString(), trackedSince: "2026-06-01T00:00:00.000Z",
+        loads: Object.fromEntries(eligibleActors.map((actor, i) => [actor, i === 0 ? 9 : 1])), reason: null };
+      const backlog = { readLoad: vi.fn(async () => observation), invalidate: vi.fn() };
+      const services = createWorkerReviewerAvailabilityServiceFactory({ db,
+        github: { appId: "123", privateKey: "test" }, reviewerBacklog: backlog as never,
+        createRequester: async () => ({ request: remote.request }) as never, clock: { now: () => now },
+      })(fixture.message, fixture.lease);
+      const before = await db.selectFrom("routing_decisions").select("details").where("id", "=", fixture.decisionId).executeTakeFirstOrThrow();
+      await processReviewerAbsenceActivationJob(fixture.message, services);
+      expect(backlog.readLoad).toHaveBeenCalledWith(expect.objectContaining({ exclude: expect.objectContaining({
+        repositoryRecordId: fixture.repositoryRecordId, providerConnectionId: fixture.connectionId,
+      }) }));
+      expect(backlog.invalidate).toHaveBeenCalled();
+      const intent = await db.selectFrom("reviewer_mutation_intents").select("selection_context").executeTakeFirstOrThrow();
+      expect(intent.selection_context).toEqual(observation);
+      const after = await db.selectFrom("routing_decisions").select("details").where("id", "=", fixture.decisionId).executeTakeFirstOrThrow();
+      expect(after.details).toEqual(before.details);
+    });
+  });
+
   it("commits revocation promptly while provider authority is blocked on its child-first lock order", async () => {
     await withPostgresTestDatabase(async (db) => {
       const fixture = await seedActivation(db, "disconnect-provider-first");

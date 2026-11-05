@@ -10,6 +10,8 @@ import type {
   ReviewerReplacementEventV1,
   ReviewerReplacementOutcome,
   ReviewerLoadObservation,
+  ReviewerLoadRequest,
+  TrackedPullRequest,
   WorkspaceId,
 } from "@triagepilot/contracts";
 import { isReviewerLoadObservation } from "@triagepilot/contracts";
@@ -350,6 +352,9 @@ export interface ReviewerAvailabilityPorts {
       message: string;
     };
   };
+  resolveTrackedPullRequest?(target: ReviewerReplacementTarget): Promise<TrackedPullRequest>;
+  reviewerBacklog?(input: ReviewerLoadRequest): Promise<ReviewerLoadObservation>;
+  invalidateReviewerBacklog?(input: { workspaceId: WorkspaceId; providerConnectionId: ProviderConnectionId }): void;
   reviewerLoad(input: {
     workspaceId: WorkspaceId;
     actors: ExternalActorId[];
@@ -645,6 +650,7 @@ export async function activateReviewerAbsence(
   });
   for (const record of pending) {
     assertReviewerReplacementFinalizerRecord(record);
+    ports.invalidateReviewerBacklog?.({ workspaceId: job.workspaceId, providerConnectionId: job.providerConnectionId });
     const replay = await replayPendingFinalizer(job, record, ports);
     if (replay.recovery !== null) {
       return { status: "finalizer_pending", results, recovery: replay.recovery };
@@ -954,6 +960,8 @@ async function applyCandidatePlan(
     if (classified.kind === "obsolete_claim") throw error;
     if (classified.kind === "retryable") throw error;
     return { plan: permanentFailurePlan(classified.message, intent.id, intent.selectionContext), providerEffectsApplied: true };
+  } finally {
+    ports.invalidateReviewerBacklog?.({ workspaceId: job.workspaceId, providerConnectionId: job.providerConnectionId });
   }
   return { plan: intentPlan, providerEffectsApplied: true };
 }
@@ -1140,19 +1148,26 @@ async function loadSelectionContext(
   at: Date,
   ports: ReviewerAvailabilityPorts,
 ): Promise<SelectionContext> {
-  const [absences, load] = await Promise.all([
+  const [absences, observation] = await Promise.all([
     ports.availability.findActive({
       workspaceId: job.workspaceId,
       providerConnectionId: job.providerConnectionId,
       actors: candidate.originalEligibleActors,
       at,
     }),
-    ports.reviewerLoad({
-      workspaceId: job.workspaceId,
-      actors: candidate.originalEligibleActors,
-    }),
+    ports.reviewerBacklog
+      ? (async () => {
+          if (!ports.resolveTrackedPullRequest) throw new Error("Tracked pull request identity is required for replacement backlog");
+          return ports.reviewerBacklog!({ workspaceId: job.workspaceId, providerConnectionId: job.providerConnectionId,
+            actors: candidate.originalEligibleActors, exclude: await ports.resolveTrackedPullRequest(target(job, candidate)) });
+        })()
+      : ports.reviewerLoad({ workspaceId: job.workspaceId, actors: candidate.originalEligibleActors }),
   ]);
-  return { absences, load };
+  if (ports.reviewerBacklog) {
+    const selectionContext = observation as ReviewerLoadObservation;
+    return { absences, load: selectionContext.loads, selectionContext };
+  }
+  return { absences, load: observation as Record<string, number> };
 }
 
 async function inspectProviderState(
@@ -1308,6 +1323,9 @@ async function planFromProviderState(
   mutationIntent: ReviewerMutationIntent | null,
   ports: ReviewerAvailabilityPorts,
 ): Promise<{ plan: PlannedReplacement; selection: SelectionContext | null }> {
+  if (mutationIntent !== null) {
+    ports.invalidateReviewerBacklog?.({ workspaceId: job.workspaceId, providerConnectionId: job.providerConnectionId });
+  }
   const terminal = terminalProviderPlan(activation, candidate, current, candidate.mode === "enforce");
   if (terminal !== null) {
     return {

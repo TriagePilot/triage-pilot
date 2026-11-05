@@ -554,7 +554,9 @@ export function createWorkerReviewerAvailabilityServiceFactory(input: WorkerServ
       repository: RepositoryRef;
     }): Promise<Requester> {
       assertTargetScope(target);
-      const key = target.repository.externalId;
+      const current = await findKnownRepository(input.db, { workspaceId: message.workspaceId,
+        providerConnectionId: message.providerConnectionId, changeRequest: { repository: target.repository } });
+      const key = `${target.repository.externalId}:${current.externalConnectionId}`;
       let requester = requesterPromises.get(key);
       if (requester === undefined) {
         requester = (async () => {
@@ -575,7 +577,15 @@ export function createWorkerReviewerAvailabilityServiceFactory(input: WorkerServ
         })();
         requesterPromises.set(key, requester);
       }
-      return await requester;
+      const raw = await requester;
+      return { async request(route, parameters) {
+        const live = await findKnownRepository(input.db, { workspaceId: message.workspaceId,
+          providerConnectionId: message.providerConnectionId, changeRequest: { repository: target.repository } });
+        if (live.externalConnectionId !== current.externalConnectionId) {
+          throw new ProviderConnectionUnavailableError("Cached installation identity changed");
+        }
+        return raw.request(route, parameters);
+      } };
     }
 
     async function adapterFor(target: {
@@ -730,6 +740,31 @@ export function createWorkerReviewerAvailabilityServiceFactory(input: WorkerServ
           return classifyAdapter.classifyReviewerReplacementError(error);
         },
       },
+      ...(input.reviewerBacklog ? {
+        async resolveTrackedPullRequest(target: Parameters<NonNullable<ReviewerAvailabilityPorts["resolveTrackedPullRequest"]>>[0]) {
+          assertTargetScope(target);
+          const known = await findKnownRepository(input.db, { workspaceId: message.workspaceId,
+            providerConnectionId: message.providerConnectionId, changeRequest: { repository: target.repository } });
+          return { repositoryRecordId: known.repositoryId, repository: target.repository,
+            providerConnectionId: message.providerConnectionId, changeRequestId: target.changeRequestId,
+            changeRequestNumber: target.changeRequestNumber };
+        },
+        async reviewerBacklog(loadInput: Parameters<ReviewerBacklogService["readLoad"]>[0]) {
+          assertAvailabilityScope(message, loadInput.workspaceId, loadInput.providerConnectionId);
+          assertTargetScope({ ...loadInput, repository: loadInput.exclude.repository });
+          const known = await findKnownRepository(input.db, { workspaceId: message.workspaceId,
+            providerConnectionId: message.providerConnectionId, changeRequest: { repository: loadInput.exclude.repository } });
+          if (loadInput.exclude.providerConnectionId !== message.providerConnectionId
+            || loadInput.exclude.repositoryRecordId !== known.repositoryId) {
+            throw new PermanentJobError("Replacement backlog identity does not match authorized repository");
+          }
+          return input.reviewerBacklog!.readLoad(loadInput);
+        },
+        invalidateReviewerBacklog(scope: { workspaceId: string; providerConnectionId: string }) {
+          assertAvailabilityScope(message, scope.workspaceId, scope.providerConnectionId);
+          input.reviewerBacklog!.invalidate(scope);
+        },
+      } : {}),
       async reviewerLoad(loadInput) {
         assertAvailabilityScope(message, loadInput.workspaceId, message.providerConnectionId);
         return Object.fromEntries(loadInput.actors.map((actor) => [actor, 0]));

@@ -38,6 +38,8 @@ describe("reviewer absence availability processor", () => {
 
   it("persists provider-effect recovery and runs only its mapped finalizer", async () => {
     const services = buildServices();
+    services.invalidateReviewerBacklog = vi.fn();
+    services.reviewerBacklog = vi.fn(async () => { throw new Error("Recovery must not read backlog"); });
     const recovery = replacedRecovery("persist_replacement");
     recovery.persistence!.selectionContext = {
       status: "complete", source: "tracked_github_pending",
@@ -52,6 +54,8 @@ describe("reviewer absence availability processor", () => {
 
     await expect(recoverReviewerReplacementFinalizer(recovery, services)).resolves.toBeNull();
 
+    expect(services.invalidateReviewerBacklog).toHaveBeenCalledWith({ workspaceId: job.workspaceId, providerConnectionId: job.providerConnectionId });
+    expect(services.reviewerBacklog).not.toHaveBeenCalled();
     expect(services.availability.persistReplacement).toHaveBeenCalledWith(recovery.persistence);
     expect(services.finalizers.run).toHaveBeenCalledWith({
       workspaceId: "workspace-1",

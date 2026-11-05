@@ -29,6 +29,7 @@ export async function recoverReviewerReplacementFinalizer(
 ): Promise<ReviewerReplacementFinalizerRecovery | null> {
   assertReviewerReplacementFinalizerRecovery(input);
   let recovery = input;
+  services.invalidateReviewerBacklog?.({ workspaceId: input.job.workspaceId, providerConnectionId: input.job.providerConnectionId });
 
   if (recovery.phase !== "persist_replacement") {
     try {

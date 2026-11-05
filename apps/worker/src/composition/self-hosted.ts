@@ -112,6 +112,7 @@ export async function createSelfHostedWorkerComposition(
   });
   const buildReviewerAvailabilityServices = createWorkerReviewerAvailabilityServiceFactory({
     db,
+    reviewerBacklog,
     credentialProvider,
     createRequester,
     createAdapter: (requester) => new GitHubAdapter(requester),
