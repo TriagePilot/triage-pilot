@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import type { ReviewerLoadObservation } from "@triagepilot/contracts";
+import { createWorkspaceReviewerAvailability } from "../src/availability";
+import { persistDecision } from "../src/decisions";
 
 import { createJobClaimer, createWorkspaceJobQueue, recoverStaleJobs } from "../src/jobs";
 import { readWorkerHeartbeat, updateWorkerHeartbeat } from "../src/heartbeat";
@@ -24,6 +27,94 @@ const payload = {
 };
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL job operations", () => {
+  it.each(["malformed", "conflicting"] as const)(
+    "rejects %s serialized selection context at recovery exhaustion without auditing the intent",
+    async (variant) => {
+      await withPostgresTestDatabase(async (db) => {
+        const { workspaceId, providerConnectionId, queue, claimer } = await createJobTestContext(db);
+        const now = new Date("2026-09-01T12:00:00.000Z");
+        const observation: ReviewerLoadObservation = {
+          status: "complete", source: "tracked_github_pending",
+          observedAt: "2026-09-01T11:59:00.000Z", trackedSince: "2026-06-03T11:59:00.000Z",
+          loads: { replacement: 2, unavailable: 7 }, reason: null,
+        };
+        const repository = await db.insertInto("repositories").values({
+          workspace_id: workspaceId, provider: "github", provider_connection_id: providerConnectionId,
+          external_repository_id: "repository-context", owner: "acme", name: "api",
+          default_branch: "main", config_state: "valid",
+        }).returning("id").executeTakeFirstOrThrow();
+        const { decisionId } = await persistDecision(db, workspaceId, {
+          repositoryId: repository.id, deliveryId: "context-delivery", routingKey: "context-routing",
+          changeRequestId: "change-7", pullNumber: 7, headSha: "head-1", mode: "enforce",
+          action: "request_human_review", actionStatus: "pending", riskScore: 50,
+          selectedReviewers: ["unavailable"], details: {
+            ownership: { preferredReviewers: ["replacement"], eligibleReviewers: ["unavailable", "replacement"] },
+            routing: { requestedReviewerCount: 1 },
+          },
+        });
+        const availability = createWorkspaceReviewerAvailability(db, workspaceId);
+        const absence = await availability.scheduleAbsence({
+          provider: "github", providerConnectionId, externalActorId: "unavailable",
+          startAt: new Date("2026-09-01T10:00:00.000Z"), endAt: new Date("2026-09-01T17:00:00.000Z"), now,
+        });
+        const intent = await availability.prepareMutationIntent({
+          workspaceId, provider: "github", providerConnectionId, absenceId: absence.id,
+          absenceRevision: absence.revision, decisionId, repositoryId: "repository-context",
+          changeRequestId: "change-7", expectedHeadRevision: "head-1",
+          unavailableActorId: "unavailable", replacementActorId: "replacement", selectionContext: observation,
+        });
+        const activation = {
+          kind: "activate_reviewer_absence", workspaceId, providerConnectionId,
+          absenceId: absence.id, absenceRevision: absence.revision,
+        };
+        const suppliedContext = variant === "malformed"
+          ? { ...observation, loads: { replacement: -1 } }
+          : { ...observation, loads: { replacement: 99, unavailable: 7 } };
+        const recovery = {
+          kind: "reviewer_replacement_finalizer", phase: "persist_replacement", provider: "github",
+          job: activation, unavailableActorId: "unavailable", replacementActorId: "replacement",
+          mutationIntentId: intent.id, replacementId: null, outcome: "replaced", providerEffectsApplied: true,
+          finalizer: { action: "reevaluate_policy", decisionId, summary: null },
+          retryable: true, lastError: "database unavailable",
+          persistence: {
+            provider: "github", providerConnectionId, absenceId: absence.id, absenceRevision: absence.revision,
+            decisionId, expectedHeadRevision: "head-1", unavailableActorId: "unavailable",
+            replacementActorId: "replacement", mutationIntentId: intent.id, outcome: "replaced",
+            reason: "scheduled absence", state: "finalizer_pending", lastError: null,
+            startedAt: now.toISOString(), completedAt: now.toISOString(), replaceCohort: true,
+            selectionContext: suppliedContext,
+            event: {
+              schemaVersion: 1, eventType: "reviewer_replacement", eventId: `replacement:${absence.id}`,
+              occurredAt: now.toISOString(), workspaceId, provider: "github", providerConnectionId,
+              absenceId: absence.id, absenceRevision: absence.revision, decisionId,
+              repositoryId: "repository-context", changeRequestId: "change-7",
+              unavailableActor: "unavailable", replacementActor: "replacement", outcome: "replaced",
+            },
+          },
+        };
+        const serializedPayload = JSON.parse(JSON.stringify({
+          ...activation, reviewerReplacementFinalizerRecovery: recovery,
+        }));
+        await db.updateTable("jobs").set({ payload: serializedPayload })
+          .where("workspace_id", "=", workspaceId).where("kind", "=", "activate_reviewer_absence").execute();
+        const lease = toLease(await claimer.claimNext("worker-context-recovery", now));
+
+        await expect(queue.exhaustReviewerAbsenceActivation(lease, "recovery exhausted", now))
+          .resolves.toEqual({ updated: true });
+        await expect(db.selectFrom("jobs").select(["status", "last_error"])
+          .where("id", "=", lease.jobId).executeTakeFirstOrThrow()).resolves.toEqual({
+          status: "failed", last_error: "recovery exhausted: reviewer activation recovery source is invalid",
+        });
+        expect(await availability.loadMutationIntent(intent)).toEqual(intent);
+        expect(await availability.listReplacementHistory()).toEqual([]);
+        await expect(db.selectFrom("routing_decisions").select("selected_reviewers")
+          .where("id", "=", decisionId).executeTakeFirstOrThrow())
+          .resolves.toEqual({ selected_reviewers: ["unavailable"] });
+        expect(await db.selectFrom("decision_outbox").select("id").execute()).toEqual([]);
+      });
+    },
+  );
+
   it("requeues transient failures with backoff and fails exhausted attempts", async () => {
     await withPostgresTestDatabase(async (db) => {
       const { workspaceId, providerConnectionId, queue, claimer } = await createJobTestContext(db);
