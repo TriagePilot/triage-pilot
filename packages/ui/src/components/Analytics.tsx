@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { AnalyticsPeriodDays, AnalyticsReport, CurrentWorkloadReport, RepositoryMode } from "@triagepilot/contracts";
 import type { AuthorizationCapabilities, WorkspaceContext } from "../api.js";
 import type { AnalyticsApiClient } from "../analytics-api.js";
-import { AnalyticsCharts } from "./AnalyticsCharts.js";
+import { AnalyticsCharts, AnalyticsRisk } from "./AnalyticsCharts.js";
 
 export interface AnalyticsProps {
   api: AnalyticsApiClient;
@@ -15,6 +15,7 @@ export function Analytics(props: AnalyticsProps): JSX.Element {
   return <AnalyticsWorkspace key={props.workspace.id} {...props} />;
 }
 function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: AnalyticsProps): JSX.Element {
+  const [tab, setTab] = useState<"assignments" | "workload">("assignments");
   const [period, setPeriod] = useState<AnalyticsPeriodDays>(30);
   const [repositoryId, setRepositoryId] = useState("");
   const [minutesInput, setMinutesInput] = useState("30");
@@ -84,8 +85,8 @@ function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: A
   const actors = [...new Set([...(report?.assignments.map((row) => row.actor) ?? []), ...(workload?.rows.map((row) => row.actor) ?? [])])].sort();
   const currentLoading = !live || (!live.data && !live.error);
   return <section className="analytics-grid" aria-label="Analytics">
-    <header className="operations-heading"><div><p className="eyebrow">{workspace.displayName}</p><h2>Analytics</h2></div></header>
-    <div className="analytics-filters">
+    <header className="operations-heading"><div><p className="eyebrow">Workspace insights · {workspace.displayName}</p><h2>Analytics</h2><p className="lede">Understand review demand, routing impact, and team capacity.</p></div></header>
+    <div className="analytics-filter-bar"><div className="analytics-filters">
       <label>Repository scope<select aria-label="Repository scope" value={repositoryId} onChange={(event) => setRepositoryId(event.target.value)}><option value="">All repositories</option>{repositories.map((item) => <option key={item.recordId} value={item.recordId}>{item.repository.owner}/{item.repository.name}</option>)}</select></label>
       <label>History period<select aria-label="History period" value={period} onChange={(event) => setPeriod(Number(event.target.value) as AnalyticsPeriodDays)}>{([7, 30, 90] as const).map((days) => <option key={days} value={days}>Last {days} days</option>)}</select></label>
       <label>Average review minutes<input aria-label="Average review minutes" type="number" min={1} max={480} step={1} value={minutesInput} aria-invalid={!validMinutes} onChange={(event) => {
@@ -98,10 +99,22 @@ function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: A
       <button type="button" aria-pressed={chosenMode === "enforce"} onClick={() => setMode("enforce")}>Enforced outcomes</button>
       <button type="button" aria-pressed={chosenMode === "shadow"} onClick={() => setMode("shadow")}>Shadow projections</button>
     </div>
-    <p className="cell-detail">Tracked PRs only. Historical filters apply to summaries and assignments. The review estimate assumption does not change routing or historical records.</p>
+    </div>
+    <p className="cell-detail analytics-context">Tracked PRs only. Historical filters apply to summaries and assignments. The review estimate assumption does not change routing or historical records.</p>
     <div aria-live="polite" aria-busy={!historical || (!historical.data && !historical.error)}>
       {historical?.error ? <p role="alert">History unavailable: {historical.error}</p> : !report ? <p>Loading history…</p> : <>
-        <p>Exact history period (UTC): <time dateTime={report.start}>{report.start}</time> inclusive to <time dateTime={report.end}>{report.end}</time> exclusive.</p>
+        <p className="cell-detail analytics-context">Exact history period (UTC): <time dateTime={report.start}>{report.start}</time> inclusive to <time dateTime={report.end}>{report.end}</time> exclusive.</p>
+        <div className="analytics-metrics">
+          <div className="analytics-metric"><span>Assessed pull requests</span><strong>{report.counts.assessed}</strong><small>{report.counts.humanRequired} require human review</small></div>
+          <div className="analytics-metric"><span>{report.savings.estimatedHoursSaved < 0 ? "Additional review effort" : "Estimated review effort saved"}</span><strong className={report.savings.estimatedHoursSaved < 0 ? "analytics-metric--caution" : ""}>{Math.abs(report.savings.estimatedHoursSaved).toFixed(1)} h</strong><small>{Math.abs(report.savings.netFewerReviews)} {report.savings.netFewerReviews < 0 ? "additional reviews" : "fewer reviews"} · {report.savings.reductionPercent === null ? "Unavailable" : `${Math.abs(report.savings.reductionPercent).toFixed(1)}% ${report.savings.reductionPercent < 0 ? "increase" : "reduction"}`}</small></div>
+          <div className="analytics-metric"><span>No human review needed</span><strong className="analytics-metric--teal">{report.noHumanSharePercent === null ? "Unavailable" : `${report.noHumanSharePercent.toFixed(1)}%`}</strong><small>{report.counts.noHumanRequired} of {report.counts.assessed} assessed PRs</small></div>
+          <div className="analytics-metric"><span>Pending reviews now</span><strong>{currentLoading ? "…" : display(workload?.totalPending)}</strong><small>{hours(workload?.totalEstimatedHours)} estimated effort · live snapshot</small></div>
+        </div>
+        <div className="analytics-summary">
+          <AnalyticsRisk report={report} />
+          <section className="data-section analytics-panel analytics-coverage"><h3>{report.savings.netFewerReviews < 0 ? "More review coverage, not less effort" : "Review coverage and effort"}</h3><strong>{report.savings.baselineReviews} baseline reviews → {report.savings.requiredReviews} required reviews</strong><p>Baseline: 1 reviewer per PR · Estimate: {report.query.averageReviewMinutes} min per review</p><p>{report.shortages.affectedPrs} PRs with reviewer shortages · {report.shortages.unknownPrs} with unknown shortage · {report.counts.couldNotAssess} could not be assessed</p></section>
+        </div>
+        <details className="analytics-details"><summary>Review calculation details</summary>
         <section className="data-section analytics-panel" aria-label="Review value">
           <h3>{report.mode === "shadow" ? "Projected review effort saved" : "Estimated review effort saved"}</h3>
           <strong className="analytics-value">{report.savings.estimatedHoursSaved < 0 ? `${Math.abs(report.savings.estimatedHoursSaved).toFixed(1)} h additional effort` : `${report.savings.estimatedHoursSaved.toFixed(1)} h`}</strong>
@@ -114,9 +127,15 @@ function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: A
           <p>{report.counts.assessed === 0 ? "No assessments" : `${report.counts.assessed} assessed PRs`} · Human review required: {report.counts.humanRequired} · No human review required: {report.counts.noHumanRequired} ({report.noHumanSharePercent === null ? "Unavailable" : `${report.noHumanSharePercent.toFixed(1)}% of assessed PRs with known requirements`})</p>
           <p>Could not assess: {report.counts.couldNotAssess}; unknown review requirements: {report.counts.unknownRequirements}.</p>
         </section>
-        <AnalyticsCharts report={report} />
+        </details>
       </>}
     </div>
+    <div className="analytics-tabs" role="tablist" aria-label="Analytics views" onKeyDown={(event) => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); const next = tab === "assignments" ? "workload" : "assignments"; setTab(next); document.getElementById(`analytics-${next}-tab`)?.focus(); } }}>
+      <button type="button" role="tab" tabIndex={tab === "assignments" ? 0 : -1} aria-selected={tab === "assignments"} aria-controls="analytics-assignments" id="analytics-assignments-tab" onClick={() => setTab("assignments")}>Proposed assignments</button>
+      <button type="button" role="tab" tabIndex={tab === "workload" ? 0 : -1} aria-selected={tab === "workload"} aria-controls="analytics-workload" id="analytics-workload-tab" onClick={() => setTab("workload")}>Reviewer workload</button>
+    </div>
+    <div id="analytics-assignments" role="tabpanel" aria-labelledby="analytics-assignments-tab" hidden={tab !== "assignments"}>{report ? <AnalyticsCharts report={report} /> : null}</div>
+    <div id="analytics-workload" role="tabpanel" aria-labelledby="analytics-workload-tab" hidden={tab !== "workload"}>
     <section className="data-section analytics-panel" aria-label="Reviewer workload" aria-busy={currentLoading}>
       <h3>Reviewer workload</h3>
       <p>Current snapshot: {workload?.observedAt ? <time dateTime={workload.observedAt}>{workload.observedAt} (UTC)</time> : "Unavailable"}</p>
@@ -139,6 +158,7 @@ function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: A
       </div>
       <button type="button" onClick={() => setRefresh((value) => value + 1)}>Refresh current workload</button>
     </section>
+    </div>
   </section>;
 }
 function display(value: number | null | undefined): string { return value === null || value === undefined ? "Unavailable" : String(value); }

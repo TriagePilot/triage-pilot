@@ -2,8 +2,6 @@ import type { AnalyticsReport } from "@triagepilot/contracts";
 
 /** Pure presentation: the table provides the same daily values as the stacked bars. */
 export function AnalyticsCharts({ report }: { report: AnalyticsReport }) {
-  const counts = report.counts;
-  const risks = [["Low", counts.riskLow], ["Medium", counts.riskMedium], ["High", counts.riskHigh], ["Unknown", counts.riskUnknown]] as const;
   const days = new Map<string, Map<string, number>>();
   // Include all UTC buckets in the exact half-open report interval, including zero days.
   for (let day = Date.parse(`${report.start.slice(0, 10)}T00:00:00Z`); day < Date.parse(report.end); day += 86_400_000) {
@@ -19,12 +17,6 @@ export function AnalyticsCharts({ report }: { report: AnalyticsReport }) {
   const buckets = [...days].sort(([a], [b]) => a.localeCompare(b));
   const maximum = Math.max(1, ...buckets.map(([, actors]) => [...actors.values()].reduce((sum, count) => sum + count, 0)));
   return <>
-    <section className="data-section analytics-panel" aria-label="Risk distribution">
-      <h3>Risk distribution</h3>
-      <p>{counts.assessed} assessed PRs; unknown risk remains in the denominator.</p>
-      <ul className="analytics-risk">{risks.map(([label, count]) => <li key={label}>{label}: {count} ({counts.assessed === 0 ? "Unavailable" : `${(count / counts.assessed * 100).toFixed(1)}%`})</li>)}</ul>
-      <p className="cell-detail">Unidentified decisions: {report.coverage.unidentifiedDecisions}. Unknown original assignments: {report.coverage.unknownOriginalAssignments}.</p>
-    </section>
     <section className="data-section analytics-panel" aria-label="Daily assignments">
       <h3>{report.mode === "shadow" ? "Proposed assignments" : "Reviewer assignments over time"}</h3>
       <p>UTC daily assignments</p>
@@ -47,4 +39,10 @@ export function AnalyticsCharts({ report }: { report: AnalyticsReport }) {
       </div>
     </section>
   </>;
+}
+
+export function AnalyticsRisk({ report }: { report: AnalyticsReport }) {
+  const counts = report.counts;
+  const risks = [["Low", counts.riskLow], ["Medium", counts.riskMedium], ["High", counts.riskHigh], ["Unknown", counts.riskUnknown]] as const;
+  return <section className="data-section analytics-panel" aria-label="Risk distribution"><h3>Risk distribution</h3><div className="analytics-risk-bar" aria-hidden="true">{risks.map(([label, count]) => <span key={label} className={`analytics-risk-bar--${label.toLowerCase()}`} style={{ flex: count }} />)}</div><ul className="analytics-risk">{risks.map(([label, count]) => <li key={label}>{label}: {count} ({counts.assessed === 0 ? "Unavailable" : `${(count / counts.assessed * 100).toFixed(1)}%`})</li>)}</ul><p className="cell-detail">{counts.assessed} assessed PRs · {counts.riskUnknown} unknown risk. Unidentified decisions: {report.coverage.unidentifiedDecisions}. Unknown original assignments: {report.coverage.unknownOriginalAssignments}.</p></section>;
 }

@@ -47,6 +47,20 @@ async function change(label: string, value: string) {
 async function click(label: string) { await act(async () => { Array.from(container.querySelectorAll("button")).find((node) => node.textContent === label)!.click(); }); }
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (error: unknown) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 
+it("switches analytics views with click and keyboard", async () => {
+  await mount();
+  const assignments = container.querySelector<HTMLElement>("#analytics-assignments")!;
+  const workload = container.querySelector<HTMLElement>("#analytics-workload")!;
+  expect(assignments.hidden).toBe(false); expect(workload.hidden).toBe(true);
+  await click("Reviewer workload");
+  expect(assignments.hidden).toBe(true); expect(workload.hidden).toBe(false);
+  const tab = container.querySelector<HTMLButtonElement>("#analytics-workload-tab")!;
+  expect(tab.getAttribute("aria-selected")).toBe("true");
+  await act(async () => tab.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true })));
+  expect(assignments.hidden).toBe(false); expect(workload.hidden).toBe(true);
+  expect(document.activeElement?.id).toBe("analytics-assignments-tab");
+});
+
 it("renders estimated value, denominators, risk coverage, UTC bars and merged developer rows with provider-neutral scope", async () => {
   const client = await mount();
   expect(text()).toContain("25.0 h"); expect(text()).toContain("Estimated review effort saved"); expect(text()).toContain("Baseline: 1 reviewer/PR");
