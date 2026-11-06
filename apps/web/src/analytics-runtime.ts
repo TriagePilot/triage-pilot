@@ -71,7 +71,7 @@ export function createAnalyticsRuntime(input: {
       const scope = await resolveScope(query.repositoryIds);
       const snapshot = await backlog.readCurrent({ workspaceId: input.workspaceId, providerConnectionId: scope.providerConnectionId, repositoryIds: query.repositoryIds, forceRefresh: query.forceRefresh });
       const complete = snapshot.status === "complete";
-      const counts = new Map(snapshot.knownActors.map(actor => [actor, 0]));
+      const counts = new Map(snapshot.knownActors.map(actor => [actor.trim().toLowerCase(), 0]));
       for (const pair of snapshot.pairs) counts.set(pair.actor, (counts.get(pair.actor) ?? 0) + 1);
       const totalPending = complete ? snapshot.pairs.length : null;
       const report: CurrentWorkloadReport = {

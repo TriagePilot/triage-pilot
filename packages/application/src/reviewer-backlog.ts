@@ -17,7 +17,9 @@ export interface ReviewerBacklogService {
 class DeadlineError extends Error {}
 class AuthorityError extends Error {}
 const DAY = 86_400_000;
-const repositoryIdentity = (repository: RepositoryRef) => JSON.stringify(repository);
+const repositoryIdentity = (repository: RepositoryRef) => JSON.stringify([
+  repository.provider, repository.externalId, repository.owner, repository.name,
+]);
 export function createReviewerBacklogService(ports: ReviewerBacklogPorts): ReviewerBacklogService {
   const cache = new Map<string, { at: number; requests: OpenReviewRequest[] }>();
   const generations = new Map<string, number>();

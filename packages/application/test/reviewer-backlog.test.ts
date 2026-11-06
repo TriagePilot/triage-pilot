@@ -14,6 +14,29 @@ function fixture(count = 1) {
 beforeEach(()=>{vi.useFakeTimers();vi.setSystemTime(new Date("2026-11-05T12:00:00Z"));});
 afterEach(()=>vi.useRealTimers());
 describe("reviewer backlog",()=>{
+ it("accepts reordered repository fields from persisted jobs and excludes the current PR", async () => {
+  const f = fixture();
+  const exclude = f.pr();
+  const { name, owner, provider, externalId } = exclude.repository;
+  exclude.repository = { name, owner, provider, externalId };
+  expect(await f.service.readLoad({ ...request, actors: ["@alex"], exclude })).toMatchObject({
+    status: "complete", loads: { "@alex": 0 },
+  });
+ });
+ it("matches tracked repository identities regardless of field order", async () => {
+  const f = fixture();
+  const tracked = f.pr();
+  const { name, owner, provider, externalId } = tracked.repository;
+  tracked.repository = { name, owner, provider, externalId };
+  f.tracked.mockResolvedValue({ pullRequests: [tracked], knownActors: [] });
+  expect((await f.service.readCurrent(request)).pairs).toEqual([{ changeRequest: tracked, actor: "@alex" }]);
+ });
+ it.each(["provider", "externalId", "owner", "name"] as const)("rejects a changed repository %s", async field => {
+  const f = fixture();
+  const exclude = f.pr();
+  exclude.repository = { ...exclude.repository, [field]: "different" };
+  await expect(f.service.readLoad({ ...request, actors: [], exclude })).rejects.toThrow("Backlog exclusion mismatch");
+ });
  it("intersects tracked PRs, deduplicates pairs and returns candidate zeroes only on complete data",async()=>{
   const f=fixture(); f.provider.mockResolvedValue([{changeRequestId:"1",changeRequestNumber:1,requestedActors:["@alex","@alex"]},{changeRequestId:"2",changeRequestNumber:2,requestedActors:["@alex"]}]);
   expect((await f.service.readCurrent(request)).pairs).toHaveLength(1);

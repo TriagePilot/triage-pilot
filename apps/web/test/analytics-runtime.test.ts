@@ -68,6 +68,21 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("analytics runtime", () =
       expect(await services.readCurrentWorkload({ repositoryIds: [other.id], averageReviewMinutes: 30, forceRefresh: true })).toMatchObject({ status: "unavailable", totalPending: null });
     });
   });
+  it("merges mixed-case stored candidates with normalized pending reviewers", async () => {
+    await withPostgresTestDatabase(async db => {
+      const request = vi.fn(async (_route: unknown, params: unknown) => ({ data: (params as { repo: string }).repo === "api" ? [pull] : [] }));
+      const { services, api } = await fixture(db, request);
+      await db.updateTable("routing_decisions").set({
+        details: { ownership: { eligibleReviewers: ["@Manual", "@manual", "@Idle", "@idle"] } },
+      }).where("repository_id", "=", api.id).execute();
+      const report = await services.readCurrentWorkload({ repositoryIds: [], averageReviewMinutes: 30, forceRefresh: false });
+      expect(report).toMatchObject({ status: "complete", totalPending: 1, totalEstimatedHours: .5 });
+      expect(report.rows).toEqual([
+        { actor: "@idle", pendingCount: 0, estimatedHours: 0 },
+        { actor: "@manual", pendingCount: 1, estimatedHours: .5 },
+      ]);
+    });
+  });
   it.each([401, 403, 404])("propagates provider authority %s instead of partial data", async status => {
     await withPostgresTestDatabase(async db => {
       const { services } = await fixture(db, vi.fn(async () => { throw { status, message: "private" }; }));
