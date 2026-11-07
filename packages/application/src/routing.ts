@@ -11,6 +11,9 @@ import {
   type RepositoryRef,
   type RoutingAction,
   type RoutingJobPayload,
+  type ReviewerLoadRequest,
+  type ReviewerLoadObservation,
+  type TrackedPullRequest,
   type WorkspaceId,
 } from "@triagepilot/contracts";
 import {
@@ -88,6 +91,8 @@ export interface RoutingApplicationPorts {
       noHumanReason?: string;
     }): Promise<void>;
   };
+  resolveTrackedPullRequest?(job: RoutingJobPayload): Promise<TrackedPullRequest>;
+  reviewerBacklog?(input: ReviewerLoadRequest): Promise<ReviewerLoadObservation>;
   reviewerLoad(input: { workspaceId: WorkspaceId; actors: ExternalActorId[] }): Promise<Record<string, number>>;
   availability: {
     findActive(input: {
@@ -98,6 +103,7 @@ export interface RoutingApplicationPorts {
     }): Promise<ReviewerAbsenceWindow[]>;
   };
   decisions: {
+    findCompleted?(job: RoutingJobPayload): Promise<{ decisionId: string; mode: RepositoryMode; actionStatus: "succeeded" } | null>;
     persistWithEvent(input: DecisionInput, event: DecisionEventFactory): Promise<PersistedDecision>;
     markActionSucceeded(decisionId: string, at: Date): Promise<void>;
     markActionFailed(decisionId: string, error: string, at: Date): Promise<void>;
@@ -115,6 +121,8 @@ export async function processChangeRequest(
   job: RoutingJobPayload,
   ports: RoutingApplicationPorts,
 ): Promise<RoutingOutcome> {
+  const completed = await ports.decisions.findCompleted?.(job);
+  if (completed) return { status: "decided", ...completed };
   const configuration = await ports.resolveConfiguration(job);
   if (!configuration.ok) {
     const persisted = await ports.decisions.persistWithEvent(
@@ -195,10 +203,6 @@ export async function processChangeRequest(
   });
   const availableEligibleSet = new Set(availableEligibleReviewers);
   const excludedReviewers = canonicalEligibleReviewers.filter((actor) => !availableEligibleSet.has(actor));
-  const load = await ports.reviewerLoad({
-    workspaceId: job.workspaceId,
-    actors: availableEligibleReviewers,
-  });
   const risk = scorePullRequestRisk({
     files: changedFiles,
     author: metadata.author,
@@ -209,6 +213,20 @@ export async function processChangeRequest(
   const existingApprovedReviewers = risk.tier === "low"
     ? []
     : await ports.provider.fetchCurrentRevisionApprovals(job);
+  let loadObservation: ReviewerLoadObservation | undefined;
+  let load: Record<string, number> = {};
+  if (ports.reviewerBacklog && risk.tier !== "low") {
+    if (!ports.resolveTrackedPullRequest) throw new Error("Tracked pull request identity port is required for backlog routing");
+    loadObservation = await ports.reviewerBacklog({
+      workspaceId: job.workspaceId,
+      providerConnectionId: job.providerConnectionId,
+      actors: availableEligibleReviewers,
+      exclude: await ports.resolveTrackedPullRequest(job),
+    });
+    load = loadObservation.status === "complete" ? loadObservation.loads : {};
+  } else if (!ports.reviewerBacklog) {
+    load = await ports.reviewerLoad({ workspaceId: job.workspaceId, actors: availableEligibleReviewers });
+  }
   const routing = decideRouting({
     risk,
     author: metadata.author,
@@ -236,7 +254,7 @@ export async function processChangeRequest(
         evaluatedAt: availabilityEvaluatedAt.toISOString(),
         excludedReviewers,
       },
-      routing,
+      routing: { ...routing, ...(loadObservation === undefined ? {} : { loadObservation }) },
     },
     ...persistenceProvenance(provenance, []),
   };

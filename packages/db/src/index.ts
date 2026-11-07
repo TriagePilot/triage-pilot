@@ -18,6 +18,7 @@ export {
 } from "./jobs.js";
 export { createDatabase } from "./database.js";
 export {
+  findSucceededRoutingDecision,
   findReviewerReplacementCandidates,
   markActionFailed,
   markActionSucceeded,
@@ -119,3 +120,11 @@ export {
   LOCAL_WORKSPACE_EXTERNAL_KEY,
   type WorkspaceRepositories,
 } from "./workspaces.js";
+export {
+  AnalyticsScopeUnavailableError,
+  assertAnalyticsScopeActive,
+  readTrackedPullRequests,
+  resolveAnalyticsScope,
+} from "./reviewer-backlog.js";
+export { readAnalyticsFacts } from "./analytics.js";
+export { normalizeAnalyticsDecision, readOriginalReviewerActors, type AnalyticsDecisionRow } from "./analytics-records.js";

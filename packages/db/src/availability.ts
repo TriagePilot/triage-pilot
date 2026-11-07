@@ -2,6 +2,8 @@ import { isDeepStrictEqual } from "node:util";
 import { sql, type Kysely, type Selectable, type Transaction } from "kysely";
 import {
   buildReviewerAbsenceActivationKey,
+  isReviewerLoadObservation,
+  type ReviewerLoadObservation,
   type ProviderConnectionId,
   type ProviderKind,
   type ReviewerAbsenceActivationJobPayload,
@@ -57,6 +59,7 @@ export interface ReviewerAbsenceWindow {
 }
 
 export interface ReviewerReplacement {
+  selectionContext: ReviewerLoadObservation | null;
   id: string;
   workspaceId: WorkspaceId;
   provider: ProviderKind;
@@ -84,6 +87,7 @@ export interface ReviewerMutationIntentKey {
 }
 
 export interface PrepareReviewerMutationIntentInput extends ReviewerMutationIntentKey {
+  selectionContext?: ReviewerLoadObservation | null;
   provider: ProviderKind;
   repositoryId: string;
   changeRequestId: string;
@@ -93,6 +97,7 @@ export interface PrepareReviewerMutationIntentInput extends ReviewerMutationInte
 }
 
 export interface ReviewerMutationIntent extends PrepareReviewerMutationIntentInput {
+  selectionContext: ReviewerLoadObservation | null;
   id: string;
 }
 
@@ -130,6 +135,7 @@ export interface CancelAbsenceInput {
 }
 
 export interface PersistReviewerReplacementInput {
+  selectionContext?: ReviewerLoadObservation | null;
   provider: ProviderKind;
   providerConnectionId: ProviderConnectionId;
   absenceId: string;
@@ -542,7 +548,8 @@ export function createWorkspaceReviewerAvailability(
           || decision.change_request_id !== input.event.changeRequestId
         ) return staleReplacementResult();
 
-        await assertReplacementMutationIntent(trx, workspaceId, input);
+        const selectionContext = await assertReplacementMutationIntent(trx, workspaceId, input);
+        validateSelectionCandidates(selectionContext, original.eligibleActors, input.replacementActorId);
 
         if (replacesCohort(input.outcome)) {
           if (
@@ -589,6 +596,7 @@ export function createWorkspaceReviewerAvailability(
             unavailable_actor_id: input.unavailableActorId,
             replacement_actor_id: input.replacementActorId,
             mutation_intent_id: input.mutationIntentId,
+            selection_context: serializeSelectionContext(selectionContext),
             outcome: input.outcome,
             reason: input.reason,
             state: input.state,
@@ -747,7 +755,7 @@ export async function persistMutationIntentRecoveryTransaction(
     return { inserted: false, activationCurrent: true, replacement: toReplacement(existing) };
   }
 
-  await assertReplacementMutationIntent(trx, workspaceId, input);
+  const selectionContext = await assertReplacementMutationIntent(trx, workspaceId, input);
   const inserted = await trx.insertInto("reviewer_replacements").values({
     workspace_id: workspaceId,
     provider: input.provider,
@@ -758,6 +766,7 @@ export async function persistMutationIntentRecoveryTransaction(
     unavailable_actor_id: input.unavailableActorId,
     replacement_actor_id: null,
     mutation_intent_id: input.mutationIntentId,
+    selection_context: serializeSelectionContext(selectionContext),
     outcome: "permanent_failure",
     reason: input.reason,
     state: "permanent_failure",
@@ -942,6 +951,7 @@ function validateAbsenceMutation<T extends {
 }
 
 function validateReplacementInput(input: PersistReviewerReplacementInput, workspaceId: WorkspaceId): void {
+  validateSelectionContext(input.selectionContext, input.provider);
   validateDate(input.startedAt, "startedAt");
   validateDate(input.completedAt, "completedAt");
   validateExpectedRevision(input.absenceRevision);
@@ -1046,14 +1056,15 @@ function assertReplacementRetryMatches(
   input: PersistReviewerReplacementInput,
 ): void {
   if (
-    existing.unavailable_actor_id !== input.unavailableActorId
+    (input.selectionContext !== undefined && !isDeepStrictEqual(existing.selection_context, input.selectionContext))
+    || existing.unavailable_actor_id !== input.unavailableActorId
     || existing.replacement_actor_id !== input.replacementActorId
     || existing.mutation_intent_id !== input.mutationIntentId
     || existing.outcome !== input.outcome
     || existing.reason !== input.reason
     || existing.started_at.getTime() !== input.startedAt.getTime()
     || existing.completed_at.getTime() !== input.completedAt.getTime()
-  ) throw new Error("reviewer replacement retry conflicts with persisted history");
+  ) throw new Error("reviewer replacement retry conflicts with persisted history or selection context");
 }
 
 async function assertReplacementEventRetryMatches(
@@ -1115,8 +1126,10 @@ function toAbsence(row: Selectable<ReviewerAbsencesTable>): ReviewerAbsence {
 
 function toReplacement(row: Selectable<ReviewerReplacementsTable>): ReviewerReplacement {
   validateReplacementState(row.state);
+  validateSelectionContext(row.selection_context, row.provider);
   return {
     id: row.id,
+    selectionContext: row.selection_context,
     workspaceId: row.workspace_id,
     provider: row.provider,
     providerConnectionId: row.provider_connection_id,
@@ -1176,6 +1189,7 @@ export async function prepareMutationIntentTransaction(
     || input.replacementActorId === input.unavailableActorId) {
     throw new ReviewerAvailabilityValidationError("Reviewer mutation intent source is not current");
   }
+  validateSelectionCandidates(input.selectionContext, original.eligibleActors, input.replacementActorId);
   const terminalHistory = await trx.selectFrom("reviewer_replacements")
     .select(["id", "mutation_intent_id"])
     .where("workspace_id", "=", workspaceId).where("provider", "=", input.provider)
@@ -1198,6 +1212,7 @@ export async function prepareMutationIntentTransaction(
     repository_record_id: source.repositoryRecordId, repository_id: input.repositoryId,
     change_request_id: input.changeRequestId, expected_head_revision: input.expectedHeadRevision,
     unavailable_actor_id: input.unavailableActorId, replacement_actor_id: input.replacementActorId,
+    selection_context: serializeSelectionContext(input.selectionContext),
   }).onConflict((conflict) => conflict.columns([
     "workspace_id", "provider_connection_id", "absence_id", "absence_revision", "decision_id",
   ]).doNothing()).returningAll().executeTakeFirst();
@@ -1218,6 +1233,7 @@ function validateMutationIntentKey(input: ReviewerMutationIntentKey, workspaceId
 
 function validateMutationIntentInput(input: PrepareReviewerMutationIntentInput, workspaceId: WorkspaceId): void {
   validateMutationIntentKey(input, workspaceId);
+  validateSelectionContext(input.selectionContext, input.provider);
   if (
     !isNonBlank(input.repositoryId)
     || !isNonBlank(input.changeRequestId)
@@ -1246,7 +1262,8 @@ function assertMutationIntentMatches(
   input: PrepareReviewerMutationIntentInput,
 ): void {
   if (
-    row.workspace_id !== input.workspaceId
+    (input.selectionContext !== undefined && !isDeepStrictEqual(row.selection_context, input.selectionContext))
+    || row.workspace_id !== input.workspaceId
     || row.provider !== input.provider
     || row.provider_connection_id !== input.providerConnectionId
     || row.absence_id !== input.absenceId
@@ -1264,8 +1281,8 @@ async function assertReplacementMutationIntent(
   trx: Transaction<Database>,
   workspaceId: WorkspaceId,
   input: PersistReviewerReplacementInput,
-): Promise<void> {
-  if (input.mutationIntentId === null) return;
+): Promise<ReviewerLoadObservation | null> {
+  if (input.mutationIntentId === null) return input.selectionContext ?? null;
   const row = await mutationIntentQuery(trx, workspaceId, { ...input, workspaceId })
     .where("id", "=", input.mutationIntentId)
     .executeTakeFirst();
@@ -1273,6 +1290,7 @@ async function assertReplacementMutationIntent(
     throw new ReviewerAvailabilityValidationError("Replacement mutation intent linkage is unavailable");
   }
   assertMutationIntentMatches(row, {
+    ...(input.selectionContext === undefined ? {} : { selectionContext: input.selectionContext }),
     workspaceId,
     provider: input.provider,
     providerConnectionId: input.providerConnectionId,
@@ -1287,14 +1305,17 @@ async function assertReplacementMutationIntent(
       ? input.replacementActorId!
       : row.replacement_actor_id,
   });
+  return row.selection_context;
 }
 
 function toMutationIntent(row: Selectable<ReviewerMutationIntentsTable>): ReviewerMutationIntent {
+  validateSelectionContext(row.selection_context, row.provider);
   if (!isNonBlank(row.id)) {
     throw new ReviewerAvailabilityValidationError("Persisted reviewer mutation intent ID is malformed");
   }
   return {
     id: row.id,
+    selectionContext: row.selection_context,
     workspaceId: row.workspace_id,
     provider: row.provider,
     providerConnectionId: row.provider_connection_id,
@@ -1311,4 +1332,23 @@ function toMutationIntent(row: Selectable<ReviewerMutationIntentsTable>): Review
 
 function isNonBlank(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function validateSelectionContext(value: unknown, provider: ProviderKind): void {
+  if (value !== undefined && value !== null && (provider !== "github" || !isReviewerLoadObservation(value))) {
+    throw new ReviewerAvailabilityValidationError("Reviewer selection context is malformed");
+  }
+}
+
+function validateSelectionCandidates(
+  value: ReviewerLoadObservation | null | undefined, actors: string[], selected: string | null,
+): void {
+  if (value?.status === "complete" && (Object.keys(value.loads).some((actor) => !actors.includes(actor))
+    || (selected !== null && !Object.hasOwn(value.loads, selected)))) {
+    throw new ReviewerAvailabilityValidationError("Reviewer selection context does not match candidate scope");
+  }
+}
+
+function serializeSelectionContext(value: ReviewerLoadObservation | null | undefined): string | null {
+  return value == null ? null : JSON.stringify(value);
 }

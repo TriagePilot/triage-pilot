@@ -255,13 +255,14 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
           return args.result;
         },
       });
+      const routingRequest = vi.fn(policyCheckRequester);
       const services = createWorkerRoutingServiceFactory({
         db: scopedDb,
         github: {
           appId: "123",
           privateKey: "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----",
         },
-        createRequester: async () => ({ request: policyCheckRequester }) as never,
+        createRequester: async () => ({ request: routingRequest }) as never,
       })(scopedMessage);
 
       await services.updateRepositoryConfigState({ configState: "valid", mode: "enforce" });
@@ -379,6 +380,12 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
         policy_check_run_id: "71",
         policy_check_state: "success",
       });
+      routingRequest.mockClear();
+      await db.updateTable("provider_connections").set({ status: "suspended" }).where("id", "=", connection.id).execute();
+      await expect(services.applyDecisionActions({
+        action: "request_human_review", decisionId: decision.decisionId, expectedHeadSha: "abc123", riskTier: "medium", selectedReviewers: ["@user-d82a5f"], reviewersToRequest: ["@user-d82a5f"],
+      })).rejects.toThrow("not known");
+      expect(routingRequest).not.toHaveBeenCalled();
     });
   });
 });

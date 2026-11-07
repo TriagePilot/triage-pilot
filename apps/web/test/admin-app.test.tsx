@@ -47,6 +47,7 @@ describe("admin application", () => {
     expect(html).toContain('href="#overview"');
     expect(html).toContain('href="#repositories"');
     expect(html).toContain('href="#decisions"');
+    expect(html).toContain('href="#analytics"');
     expect(html).toContain('href="#reviewer-availability"');
     expect(html).toContain('href="#system-health"');
     expect(html).toContain('id="repositories"');

@@ -66,7 +66,7 @@ describe("mounted admin application", () => {
       window.location.hash = "#repositories";
       await act(async () => {
         root = createRoot(container);
-        root.render(<Dashboard username="admin" overview={emptyOverview} onLogout={async () => {}} />);
+        root.render(<Dashboard username="admin" overview={emptyOverview} analyticsApi={{ readAnalytics: async () => { throw new Error("History unavailable"); }, readCurrentWorkload: async () => { throw new Error("Current unavailable"); } }} onLogout={async () => {}} />);
       });
 
       const link = container.querySelector<HTMLAnchorElement>('a[href="#repositories"]');
@@ -74,12 +74,13 @@ describe("mounted admin application", () => {
       expect(container.querySelector(".app-topbar strong")?.textContent).toBe("Repositories");
 
       await act(async () => {
-        window.location.hash = "#reviewer-availability";
+        container.querySelector<HTMLAnchorElement>('a[href="#analytics"]')?.click();
+        window.location.hash = "#analytics";
         window.dispatchEvent(new HashChangeEvent("hashchange"));
       });
-      expect(container.querySelector<HTMLAnchorElement>('a[href="#reviewer-availability"]')?.getAttribute("aria-current")).toBe("location");
+      expect(container.querySelector<HTMLAnchorElement>('a[href="#analytics"]')?.getAttribute("aria-current")).toBe("location");
       expect(link?.hasAttribute("aria-current")).toBe(false);
-      expect(container.querySelector(".app-topbar strong")?.textContent).toBe("Reviewer availability");
+      expect(container.querySelector(".app-topbar strong")?.textContent).toBe("Analytics");
     } finally {
       window.location.hash = previousHash;
     }

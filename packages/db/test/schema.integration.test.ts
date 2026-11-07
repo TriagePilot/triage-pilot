@@ -115,6 +115,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         "state",
         "last_error",
         "mutation_intent_id",
+        "selection_context",
       ]);
       const mutationIntents = await sql<{ column_name: string }>`
         select column_name from information_schema.columns
@@ -136,6 +137,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         "unavailable_actor_id",
         "replacement_actor_id",
         "created_at",
+        "selection_context",
       ]);
       const migrations = await sql<{ name: string }>`select name from schema_migrations order by name`.execute(db);
       expect(migrations.rows).toEqual([
@@ -150,6 +152,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         { name: "0008_reviewer_mutation_intents.sql" },
         { name: "0009_provider_connection_revocations.sql" },
         { name: "0010_provider_connection_preemptive_revocations.sql" },
+        { name: "0011_reviewer_selection_context.sql" },
       ]);
     });
   });

@@ -1,3 +1,4 @@
+import { listOpenReviewRequests, type GitHubBacklogInput } from "./backlog.js";
 import { App } from "@octokit/app";
 import type {
   ConfigurationDocument,
@@ -116,6 +117,10 @@ export async function createInstallationRequester(input: {
 
 export class GitHubAdapter {
   constructor(private readonly octokit: Requester) {}
+
+  async listOpenReviewRequests(input: GitHubBacklogInput) {
+    return listOpenReviewRequests(this.octokit, input);
+  }
 
   async fetchDefaultBranchRevision(repository: ContractRepositoryRef): Promise<string> {
     const repositoryResponse = await this.octokit.request("GET /repos/{owner}/{repo}", {

@@ -47,12 +47,16 @@ Routing decisions, action outcomes, and reviewer replacement history are the pro
 
 Provider-specific deployment adapters and private operational material are intentionally outside this repository.
 
+## Analytics and backlog
+
+Authenticated history reads existing routing and replacement records; current workload reads actual GitHub pending requests on the tracked 90-day population. Shared contracts and UI keep historical cohorts separate from current workload. Initial and replacement routing use ownership-first backlog comparisons with bounded live acquisition and stable fallback provenance; durable intents retain the chosen selection context for replay. There is no separate analytics fact store or retention extension. See [analytics and reviewer backlog](operations/analytics.md) for formulas, coverage, freshness, and API scope.
+
 ## Phase 0 Release Evidence Contract
 
 A release is one annotated `vX.Y.Z` tag and the exact commit that tag targets. Its public contract is seven registry packages (`contracts`, `config`, `core`, `application`, `db`, `provider-github`, and `ui`) plus the OCI image; consumers use those artifacts rather than an OSS source checkout. The protected tag workflow resolves the tag target commit, derives one artifact-publication timestamp and its second-anniversary Apache 2.0 effective timestamp, and builds every package and image from those inputs.
 
 The tag workflow's `artifacts/release-manifest.json` and `artifacts/checksums.txt` are authoritative. They record the synchronized version, tag-target commit, highest public migration, `FSL-1.1-Apache-2.0` identifier, timestamps, every package SHA-256 digest, and the OCI digest with matching annotations. Public Git history remains the source-availability record; artifact timestamps record artifact provenance.
 
-For this candidate, the highest public migration is `0010_provider_connection_preemptive_revocations.sql`. The immutable migration history includes both `0005_reviewer_availability.sql` and `0005_workspace_scope.sql`; the shared numeric prefix is valid because migration identity is the complete filename. Release-manifest generation refuses evidence that omits either historical lineage.
+For this candidate, the highest public migration is `0011_reviewer_selection_context.sql`. The immutable migration history includes both `0005_reviewer_availability.sql` and `0005_workspace_scope.sql`; the shared numeric prefix is valid because migration identity is the complete filename. Release-manifest generation refuses evidence that omits either historical lineage.
 
 Pre-tag dry runs prove the release gate and artifact contract but do not attest future published bytes: their timestamps and digests are ephemeral and remain release-review evidence rather than public release values. The canonical parallel `pnpm test` gate verifies artifact packaging in a disposable source workspace, so it cannot remove shared `packages/*/dist` entrypoints. Review and explicit release approval are still required before a tag is created.

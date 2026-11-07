@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildRoutingKey } from "@triagepilot/contracts";
-import { createWorkspaceReviewerAvailability, runMigrations } from "@triagepilot/db";
+import { createWorkspaceReviewerAvailability, persistDecision, runMigrations } from "@triagepilot/db";
 
 import { createSelfHostedWorkerComposition } from "../src/composition/self-hosted";
 import { processRoutingJob } from "../src/processor";
@@ -123,6 +123,79 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("self-hosted worker compo
       expect(requester.mock.calls.map(([route]) => route).filter((route) => route.startsWith("POST "))).toEqual([]);
 
       await composition.close();
+    });
+  });
+
+  it.each([1, 2] as const)("selects %s reviewers through the composed worker using actual tracked backlog", async count => {
+    await withPostgresTestDatabaseUrl(async databaseUrl => {
+      await runMigrations(databaseUrl);
+      const base = decisionRequester();
+      const requester = vi.fn(async (route: string, parameters: Record<string, unknown>) => {
+        if (route === "GET /repos/{owner}/{repo}/contents/{path}") return { data: { content: Buffer.from(`version: 1
+mode: shadow
+routing:
+  high_risk_reviewers: ${count}
+risk:
+  paths:
+    - pattern: "**"
+      weight: 90
+      tag: code
+ownership:
+  fallback_reviewers: ["@fallback"]
+  rules:
+    - paths: ["**"]
+      reviewers: ["@busy", "@idle", "@user-a2f4c9"]
+`).toString("base64") } };
+        if (route === "GET /repos/{owner}/{repo}/pulls") return { data: [
+          { id: 700, number: 7, state: "open", base: { repo: { id: 101, name: "api", owner: { login: "acme" } } }, requested_reviewers: [{ login: "idle", type: "User" }], requested_teams: [] },
+          { id: 800, number: 8, state: "open", base: { repo: { id: 101, name: "api", owner: { login: "acme" } } }, requested_reviewers: [{ login: "busy", type: "User" }], requested_teams: [] },
+          { id: 900, number: 9, state: "open", base: { repo: { id: 101, name: "api", owner: { login: "acme" } } }, requested_reviewers: [{ login: "idle", type: "User" }], requested_teams: [] },
+        ] };
+        if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") return { data: [] };
+        return base(route);
+      });
+      const composition = await createSelfHostedWorkerComposition(workerEnv(databaseUrl), { createRequester: async () => ({ request: requester }) });
+      try {
+        const { providerConnectionId } = await insertKnownRepository(composition);
+        const repository = await composition.db.selectFrom("repositories").select("id").executeTakeFirstOrThrow();
+        // Track the current PR and one other PR. The current PR is excluded from load;
+        // PR 9 has never been assessed and must not contribute to selection.
+        for (const number of [7, 8]) await persistDecision(composition.db, composition.workspaceId, {
+          repositoryId: repository.id, deliveryId: `seed-${number}`, changeRequestId: String(number), pullNumber: number,
+          headSha: "previous-head", mode: "shadow", action: "request_human_review", actionStatus: "not_applied", riskScore: 90,
+          details: { ownership: { eligibleReviewers: ["@busy", "@idle"] } },
+        });
+        const job = routingJob(composition.workspaceId, providerConnectionId);
+        await processRoutingJob(job, composition.buildRoutingServices(job));
+        const decision = await composition.db.selectFrom("routing_decisions").selectAll().where("routing_key", "=", job.routingKey).executeTakeFirstOrThrow();
+        expect(decision).toMatchObject({ mode: "shadow", action: "request_human_review", action_status: "not_applied" });
+        expect(decision.selected_reviewers).toEqual(count === 1 ? ["@idle"] : ["@idle", "@busy"]);
+        expect(decision.details).toMatchObject({ routing: { loadObservation: { status: "complete", loads: { "@busy": 1, "@idle": 0 } } } });
+        expect(requester.mock.calls.some(([route]) => route === "GET /repos/{owner}/{repo}/pulls")).toBe(true);
+        expect(requester.mock.calls.filter(([route]) => /^(POST|PUT|PATCH|DELETE) /.test(route))).toEqual([]);
+      } finally { await composition.close(); }
+    });
+  });
+
+  it("replays a succeeded decision through fresh scoped DB authority with no provider I/O", async () => {
+    await withPostgresTestDatabaseUrl(async databaseUrl => {
+      await runMigrations(databaseUrl);
+      const requester = decisionRequester();
+      const composition = await createSelfHostedWorkerComposition(workerEnv(databaseUrl), { createRequester: async () => ({ request: requester }) });
+      try {
+        const { providerConnectionId } = await insertKnownRepository(composition);
+        const job = routingJob(composition.workspaceId, providerConnectionId);
+        await processRoutingJob(job, composition.buildRoutingServices(job));
+        await composition.db.updateTable("routing_decisions").set({ mode: "enforce", action_status: "succeeded" }).where("routing_key", "=", job.routingKey).execute();
+        const before = await composition.db.selectFrom("routing_decisions").selectAll().executeTakeFirstOrThrow();
+        requester.mockClear();
+        await processRoutingJob(job, composition.buildRoutingServices(job));
+        expect(requester).not.toHaveBeenCalled();
+        expect(await composition.db.selectFrom("routing_decisions").selectAll().executeTakeFirstOrThrow()).toEqual(before);
+        await composition.db.updateTable("provider_connections").set({ status: "suspended" }).where("id", "=", providerConnectionId).execute();
+        await expect(processRoutingJob(job, composition.buildRoutingServices(job))).rejects.toThrow("not known");
+        expect(requester).not.toHaveBeenCalled();
+      } finally { await composition.close(); }
     });
   });
 

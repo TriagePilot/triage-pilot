@@ -49,6 +49,8 @@ ownership:
   fallback_reviewers: ["@sasha"]
 ```
 
+[Backlog-aware routing](../operations/analytics.md) compares pending review requests within the eligible ownership pool and preserves owner preference, exclusions, quotas, and default shadow mode. It adds no repository-YAML switch or GitHub permission. The analytics review-minute estimate is page/request state and does not affect this configuration.
+
 ## Inheritance and merge rules
 
 Objects merge recursively. Repository scalar values replace organization values. Arrays place repository entries first, followed by organization entries whose normalized keys do not collide:

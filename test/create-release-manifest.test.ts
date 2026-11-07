@@ -21,7 +21,7 @@ const publishedPackages = [
 const licenseId = "FSL-1.1-Apache-2.0";
 const publishedAt = "2026-08-28T10:20:30.000Z";
 const futureLicenseEffectiveAt = "2028-08-28T10:20:30.000Z";
-const currentDatabaseMigration = "0010_provider_connection_preemptive_revocations.sql";
+const currentDatabaseMigration = "0011_reviewer_selection_context.sql";
 const migrationFiles = [
   "0001_initial.sql",
   "0002_selected_reviewers.sql",
@@ -33,6 +33,7 @@ const migrationFiles = [
   "0007_workspace_reviewer_availability.sql",
   "0008_reviewer_mutation_intents.sql",
   "0009_provider_connection_revocations.sql",
+  "0010_provider_connection_preemptive_revocations.sql",
   currentDatabaseMigration,
 ] as const;
 

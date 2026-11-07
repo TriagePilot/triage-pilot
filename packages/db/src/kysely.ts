@@ -5,6 +5,7 @@ import type {
   ProviderKind,
   RepositoryMode,
   ReviewerReplacementOutcome,
+  ReviewerLoadObservation,
 } from "@triagepilot/contracts";
 
 type Timestamp = ColumnType<Date, Date | string | undefined, Date | string>;
@@ -145,6 +146,7 @@ export interface ReviewerAbsencesTable {
 }
 
 export interface ReviewerReplacementsTable {
+  selection_context: ColumnType<ReviewerLoadObservation | null, string | null | undefined, never>;
   id: Generated<string>;
   workspace_id: string;
   provider: ProviderKind;
@@ -164,6 +166,7 @@ export interface ReviewerReplacementsTable {
 }
 
 export interface ReviewerMutationIntentsTable {
+  selection_context: ColumnType<ReviewerLoadObservation | null, string | null | undefined, never>;
   id: Generated<string>;
   workspace_id: string;
   provider: ProviderKind;

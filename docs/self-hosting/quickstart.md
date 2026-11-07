@@ -83,3 +83,7 @@ For a build-from-source deployment, run the same command without the two `-f` ar
 Install the configured GitHub App in `GITHUB_ORGANIZATION` on only the repositories this deployment should process.
 
 Add `.github/triagepilot.yml` to each selected repository. Missing configuration and `mode: shadow` perform reads and record decisions without GitHub writes. The repository file at the pull request's base commit is the only mode control; an unmerged head change cannot enable writes for its own pull request. Follow the [shadow-to-enforce guide](../operations/shadow-to-enforce.md) before changing it to `mode: enforce`.
+
+## Inspect analytics
+
+After administrator login, open **Analytics** for historical enforced outcomes or shadow projections and current tracked reviewer workload. [Analytics and reviewer backlog](../operations/analytics.md) explains the one-reviewer baseline, editable effort estimate, 90-day coverage, and live freshness. This requires no additional GitHub permission or repository configuration switch.

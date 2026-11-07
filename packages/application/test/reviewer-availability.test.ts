@@ -124,6 +124,7 @@ function buildPorts(overrides: Partial<ReviewerAvailabilityPorts> = {}): Reviewe
     })),
   };
   return {
+    ...overrides,
     clock: overrides.clock ?? { now: vi.fn(() => clockValues.shift() ?? completionAt) },
     availability: { ...availability, ...overrides.availability },
     provider: { ...provider, ...overrides.provider },
@@ -705,6 +706,7 @@ describe("activateReviewerAbsence", () => {
       unavailableActorId: activation.externalActorId,
       replacementActorId: "@user-c91e46",
       mutationIntentId: preparedIntent.id,
+      selectionContext: null,
       outcome: "replaced",
       reason: `Replaced unavailable actor ${activation.externalActorId} with @user-c91e46.`,
       state: "finalizer_pending",
@@ -1073,6 +1075,12 @@ describe("activateReviewerAbsence", () => {
   });
 
   it("uses durable intent after prepare, DELETE, POST, and process death without selecting a second actor", async () => {
+    const originalObservation = {
+      status: "complete" as const, source: "tracked_github_pending" as const,
+      observedAt: "2026-09-01T09:59:00.000Z", trackedSince: "2026-06-03T09:59:00.000Z",
+      loads: { "@user-c91e46": 0, "@user-f37a82": 9 }, reason: null,
+    };
+
     const crashCandidate = {
       ...candidate,
       selectedActors: [activation.externalActorId, "@user-7c1f9b"],
@@ -1092,7 +1100,7 @@ describe("activateReviewerAbsence", () => {
     const loadMutationIntent = vi.fn(async () => durableIntent);
     const prepareMutationIntent = vi.fn(async (input: Omit<typeof preparedIntent, "id">) => {
       ordering.push("prepare");
-      durableIntent ??= { id: preparedIntent.id, ...input };
+      durableIntent ??= { id: preparedIntent.id, ...input, selectionContext: originalObservation };
       return durableIntent;
     });
     const provider = {
@@ -1158,6 +1166,7 @@ describe("activateReviewerAbsence", () => {
       } as never,
       provider,
       reviewerLoad: retryLoad,
+      reviewerBacklog: vi.fn(async () => { throw new Error("Durable selection must not fetch backlog"); }),
     });
 
     await expect(activateReviewerAbsence(job, retryPorts)).resolves.toMatchObject({
@@ -1174,6 +1183,7 @@ describe("activateReviewerAbsence", () => {
       replacementActor: "@user-c91e46",
     }));
     expect(prepareMutationIntent).toHaveBeenCalledOnce();
+    expect(retryPorts.reviewerBacklog).not.toHaveBeenCalled();
     expect(retryFindActive).toHaveBeenCalledWith({
       workspaceId: job.workspaceId,
       providerConnectionId: job.providerConnectionId,
@@ -1184,6 +1194,7 @@ describe("activateReviewerAbsence", () => {
     expect(retryPorts.availability.persistReplacement).toHaveBeenCalledWith(expect.objectContaining({
       replacementActorId: "@user-c91e46",
       mutationIntentId: preparedIntent.id,
+      selectionContext: originalObservation,
       outcome: "replaced",
       replaceCohort: true,
     }));
@@ -1315,6 +1326,7 @@ describe("activateReviewerAbsence", () => {
     async (failurePoint) => {
       const transient = Object.assign(new Error(`${failurePoint} unavailable`), { status: 503 });
       const ports = buildPorts({
+        invalidateReviewerBacklog: vi.fn(),
         provider: {
           inspectChangeRequest: failurePoint === "inspection"
             ? vi.fn(async () => { throw transient; })
@@ -1329,6 +1341,8 @@ describe("activateReviewerAbsence", () => {
       await expect(activateReviewerAbsence(job, ports)).rejects.toThrow(`${failurePoint} unavailable`);
 
       expect(ports.availability.persistReplacement).not.toHaveBeenCalled();
+      if (failurePoint === "mutation") expect(ports.invalidateReviewerBacklog).toHaveBeenCalled();
+      else expect(ports.invalidateReviewerBacklog).not.toHaveBeenCalled();
     },
   );
 
@@ -1371,6 +1385,7 @@ describe("activateReviewerAbsence", () => {
 
   it("returns exact mapped recovery when final locked persistence rejects after provider effects", async () => {
     const ports = buildPorts({
+      invalidateReviewerBacklog: vi.fn(),
       availability: {
         persistReplacement: vi.fn(async () => ({
           inserted: false,
@@ -1406,12 +1421,14 @@ describe("activateReviewerAbsence", () => {
     });
 
     expect(ports.provider.reconcileReviewRequest).toHaveBeenCalledOnce();
+    expect(ports.invalidateReviewerBacklog).toHaveBeenCalledWith({ workspaceId: job.workspaceId, providerConnectionId: job.providerConnectionId });
     expect(ports.finalizers.run).not.toHaveBeenCalled();
     expect(ports.availability.updateReplacementState).not.toHaveBeenCalled();
   });
 
   it("maps a thrown final persistence failure without repeating provider effects", async () => {
     const ports = buildPorts({
+      invalidateReviewerBacklog: vi.fn(),
       availability: {
         persistReplacement: vi.fn(async () => {
           throw new Error("database unavailable");
@@ -1429,11 +1446,14 @@ describe("activateReviewerAbsence", () => {
     });
 
     expect(ports.provider.reconcileReviewRequest).toHaveBeenCalledOnce();
+    expect(ports.invalidateReviewerBacklog).toHaveBeenCalledWith({ workspaceId: job.workspaceId, providerConnectionId: job.providerConnectionId });
     expect(ports.finalizers.run).not.toHaveBeenCalled();
   });
 
   it("replays a durable pending finalizer without reading or mutating reviewer requests", async () => {
     const ports = buildPorts({
+      reviewerBacklog: vi.fn(async () => { throw new Error("Replay cannot read backlog"); }),
+      invalidateReviewerBacklog: vi.fn(),
       availability: {
         listPendingFinalizers: vi.fn(async () => [{
           id: "replacement-pending",
@@ -1476,4 +1496,73 @@ describe("activateReviewerAbsence", () => {
     expect(ports.provider.inspectChangeRequest).not.toHaveBeenCalled();
     expect(ports.provider.reconcileReviewRequest).not.toHaveBeenCalled();
   });
+});
+
+
+describe("replacement backlog observation", () => {
+  it("balances eligible preferred owners and persists the measured selection", async () => {
+    const observation = { status: "complete" as const, source: "tracked_github_pending" as const,
+      observedAt: activationAt.toISOString(), trackedSince: "2026-06-01T00:00:00.000Z",
+      loads: { "@user-c91e46": 8, "@user-f37a82": 1 }, reason: null };
+    const ports = buildPorts();
+    ports.availability.loadActivation = vi.fn(async () => ({ ...activation, candidates: [{ ...candidate,
+      originalPreferredActors: ["@user-c91e46", "@user-f37a82"] }] }));
+    ports.resolveTrackedPullRequest = vi.fn(async () => ({ repositoryRecordId: "repository-record-1",
+      repository: candidate.repository, providerConnectionId: job.providerConnectionId,
+      changeRequestId: candidate.changeRequestId, changeRequestNumber: candidate.changeRequestNumber }));
+    ports.reviewerBacklog = vi.fn(async () => observation);
+    await activateReviewerAbsence(job, ports);
+    expect(ports.reviewerLoad).not.toHaveBeenCalled();
+    expect(ports.reviewerBacklog).toHaveBeenCalledWith(expect.objectContaining({
+      exclude: expect.objectContaining({ repositoryRecordId: "repository-record-1", changeRequestNumber: 7 }) }));
+    expect(ports.availability.prepareMutationIntent).toHaveBeenCalledWith(expect.objectContaining({
+      replacementActorId: "@user-f37a82", selectionContext: observation }));
+    expect(ports.availability.persistReplacement).toHaveBeenCalledWith(expect.objectContaining({ selectionContext: observation }));
+  });
+});
+
+
+describe("shadow backlog replacement", () => {
+  it("keeps a busy preferred owner ahead of a less busy fallback and stores simulation provenance", async () => {
+    const ports = buildPorts();
+    const observation = { status: "complete" as const, source: "tracked_github_pending" as const,
+      observedAt: activationAt.toISOString(), trackedSince: "2026-06-01T00:00:00.000Z",
+      loads: { "@user-c91e46": 99, "@user-f37a82": 0 }, reason: null };
+    ports.availability.loadActivation = vi.fn(async () => ({ ...activation, candidates: [{ ...candidate, mode: "shadow" as const }] }));
+    ports.resolveTrackedPullRequest = vi.fn(async () => ({ repositoryRecordId: "repository-record-1", repository: candidate.repository,
+      providerConnectionId: job.providerConnectionId, changeRequestId: candidate.changeRequestId, changeRequestNumber: 7 }));
+    ports.reviewerBacklog = vi.fn(async () => observation);
+    await activateReviewerAbsence(job, ports);
+    expect(ports.availability.persistReplacement).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "simulated_replacement", replacementActorId: "@user-c91e46", selectionContext: observation }));
+    expect(ports.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+    expect(ports.availability.prepareMutationIntent).not.toHaveBeenCalled();
+  });
+});
+
+it.each(["complete", "fallback"] as const)("preserves %s no-replacement selection provenance through finalizer recovery", async (status) => {
+  const observation = { status, source: "tracked_github_pending" as const,
+    observedAt: status === "complete" ? activationAt.toISOString() : null,
+    trackedSince: "2026-06-01T00:00:00.000Z", loads: {}, reason: status === "complete" ? null : "provider_unavailable" as const };
+  const ports = buildPorts();
+  ports.availability.loadActivation = vi.fn(async () => ({ ...activation, candidates: [{ ...candidate,
+    originalPreferredActors: [activation.externalActorId], originalEligibleActors: [activation.externalActorId] }] }));
+  ports.resolveTrackedPullRequest = vi.fn(async () => ({ repositoryRecordId: "r", repository: candidate.repository,
+    providerConnectionId: job.providerConnectionId, changeRequestId: candidate.changeRequestId, changeRequestNumber: 7 }));
+  ports.reviewerBacklog = vi.fn(async () => observation);
+  ports.finalizers.run = vi.fn().mockRejectedValueOnce(new Error("finalizer unavailable")).mockResolvedValue(undefined);
+  const result = await activateReviewerAbsence(job, ports);
+  expect(ports.availability.persistReplacement).toHaveBeenCalledWith(expect.objectContaining({
+    outcome: "no_replacement_available", selectionContext: observation }));
+  expect(result).toMatchObject({ status: "finalizer_pending", recovery: { phase: "run_finalizer", outcome: "no_replacement_available" } });
+  if (result.status !== "finalizer_pending") throw new Error("Expected recovery");
+  expect(() => assertReviewerReplacementFinalizerRecovery(result.recovery)).not.toThrow();
+  const persisted = vi.mocked(ports.availability.persistReplacement).mock.calls[0]![0];
+  ports.availability.listPendingFinalizers = vi.fn(async () => [{ ...persisted, workspaceId: job.workspaceId, id: "replacement-1", state: "finalizer_pending" as const }]);
+  ports.availability.loadActivation = vi.fn(async () => null);
+  expect(await activateReviewerAbsence(job, ports)).toMatchObject({ results: [{ outcome: "no_replacement_available", finalized: true }] });
+  expect(persisted.selectionContext).toEqual(observation);
+  expect(ports.availability.persistReplacement).toHaveBeenCalledTimes(1);
+  expect(ports.reviewerBacklog).toHaveBeenCalledTimes(1);
+  expect(ports.provider.reconcileReviewRequest).not.toHaveBeenCalled();
 });

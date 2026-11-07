@@ -364,8 +364,8 @@ compose up -d web-current
 wait_for_health web-current
 
 latest_migration="$(query_single_value "select name from schema_migrations order by name desc limit 1")"
-[[ "$latest_migration" == "0010_provider_connection_preemptive_revocations.sql" ]] || {
-  echo "Expected highest migration 0010_provider_connection_preemptive_revocations.sql, found $latest_migration" >&2
+[[ "$latest_migration" == "0011_reviewer_selection_context.sql" ]] || {
+  echo "Expected highest migration 0011_reviewer_selection_context.sql, found $latest_migration" >&2
   exit 1
 }
 

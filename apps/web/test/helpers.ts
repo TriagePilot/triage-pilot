@@ -1,9 +1,12 @@
+import { buildAnalyticsReport } from "@triagepilot/application";
 import { normalizeGitHubWebhook } from "@triagepilot/provider-github";
 
 import type { WebServices } from "../src/app";
 
 export function buildServices(overrides: Partial<WebServices> = {}): WebServices {
   return {
+    readAnalytics: async query => buildAnalyticsReport({ query, start: "2026-07-19T10:00:00.000Z", end: "2026-08-18T10:00:00.000Z", scope: { workspaceId: "00000000-0000-4000-8000-000000000001", providerConnectionId: "connection", externalConnectionId: "99", repositories: [] }, facts: { latestDecisions: [], assignments: [], knownActors: [], coverage: { unidentifiedDecisions: 0, unknownOriginalAssignments: 0 } } }),
+    readCurrentWorkload: async query => ({ status: "complete", observedAt: "2026-08-18T10:00:00.000Z", trackedSince: "2026-05-20T10:00:00.000Z", scope: { workspaceId: "00000000-0000-4000-8000-000000000001", providerConnectionId: "connection", externalConnectionId: "99", repositories: [] }, coveredRepositoryIds: [], unavailableRepositoryIds: [], averageReviewMinutes: query.averageReviewMinutes, totalPending: 0, totalEstimatedHours: 0, rows: [] }),
     adminUsername: "admin",
     adminPassword: "correct-password",
     sessionSecret: "s".repeat(32),

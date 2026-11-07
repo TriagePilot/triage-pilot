@@ -14,7 +14,7 @@ describe("static administration UI", () => {
       },
     });
 
-    const response = await app.request("/");
+    const response = await app.request("/#analytics");
 
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/html");

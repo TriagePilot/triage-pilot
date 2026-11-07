@@ -141,3 +141,5 @@ h3 { margin-bottom: 8px; font-size: .94rem; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
 }
+
+.operations-pages[hidden] { display: none; }
