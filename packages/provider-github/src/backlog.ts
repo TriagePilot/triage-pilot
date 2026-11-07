@@ -10,7 +10,7 @@ export interface GitHubBacklogInput {
   assertAuthorized: () => Promise<void>;
 }
 export type GitHubBacklogFailureReason =
-  | "forbidden" | "not_found" | "rate_limited" | "provider_unavailable" | "invalid_response";
+  | "unauthorized" | "forbidden" | "not_found" | "rate_limited" | "provider_unavailable" | "invalid_response";
 
 export class GitHubBacklogError extends Error {
   constructor(readonly reason: GitHubBacklogFailureReason) {
@@ -104,7 +104,8 @@ function classify(error: unknown): GitHubBacklogError {
   if (error.status === 429 || ((error.status === 403 || error.status === 422)
     && (String(header("x-ratelimit-remaining")) === "0" || header("retry-after") !== undefined
       || /rate limit|secondary limit|abuse|spam/.test(message)))) return new GitHubBacklogError("rate_limited");
-  if (error.status === 401 || error.status === 403) return new GitHubBacklogError("forbidden");
+  if (error.status === 401) return new GitHubBacklogError("unauthorized");
+  if (error.status === 403) return new GitHubBacklogError("forbidden");
   if (error.status === 404) return new GitHubBacklogError("not_found");
   return new GitHubBacklogError("provider_unavailable");
 }

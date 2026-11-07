@@ -13,6 +13,7 @@ export function createWorkerReviewerBacklogService(input: {
   createRequester: RequesterFactory;
   clock: Clock;
 }): ReviewerBacklogService {
+  const requesters = new WeakMap<object, Promise<Awaited<ReturnType<RequesterFactory>>>>();
   return createReviewerBacklogService({
     now: () => input.clock.now(),
     async loadScope(request) {
@@ -25,17 +26,42 @@ export function createWorkerReviewerBacklogService(input: {
     readTracked: (scope, window) => readTrackedPullRequests(input.db, scope, window),
     async listOpenReviewRequests(request) {
       await request.assertAuthorized();
-      const credential = await input.credentialProvider.getCredential({ workspaceId: request.scope.workspaceId, providerConnectionId: request.scope.providerConnectionId });
-      const installationId = Number(request.scope.externalConnectionId);
-      if (!Number.isSafeInteger(installationId) || installationId <= 0 || String(installationId) !== request.scope.externalConnectionId) throw new AnalyticsScopeUnavailableError("Invalid installation identity");
-      await request.assertAuthorized();
-      const requester = await input.createRequester({ ...credential, installationId });
-      return new GitHubAdapter(requester).listOpenReviewRequests(request);
+      let requesterPromise = requesters.get(request.acquisition);
+      if (!requesterPromise) {
+        requesterPromise = (async () => {
+          const credential = await input.credentialProvider.getCredential({ workspaceId: request.scope.workspaceId, providerConnectionId: request.scope.providerConnectionId });
+          const installationId = Number(request.scope.externalConnectionId);
+          if (!Number.isSafeInteger(installationId) || installationId <= 0 || String(installationId) !== request.scope.externalConnectionId) throw new AnalyticsScopeUnavailableError("Invalid installation identity");
+          await request.assertAuthorized();
+          return input.createRequester({ ...credential, installationId });
+        })();
+        requesters.set(request.acquisition, requesterPromise);
+      }
+      const requester = await requesterPromise;
+      try {
+        return await new GitHubAdapter(requester).listOpenReviewRequests(request);
+      } catch (error) {
+        if (!(error instanceof GitHubBacklogError) || (error.reason !== "forbidden" && error.reason !== "not_found")) throw error;
+        // A repository denial alone cannot establish that the installation remains active.
+        // Verify the installation token with a fresh provider read before allowing fallback.
+        await request.assertAuthorized();
+        request.signal.throwIfAborted();
+        let data: unknown;
+        try {
+          ({ data } = await requester.request("GET /installation/repositories", { per_page: 1, request: { signal: request.signal } }));
+        } catch {
+          throw error;
+        }
+        request.signal.throwIfAborted();
+        await request.assertAuthorized();
+        if (typeof data !== "object" || data === null || !("total_count" in data) || !Number.isSafeInteger(data.total_count) || Number(data.total_count) < 0 || !("repositories" in data) || !Array.isArray(data.repositories)) throw error;
+        throw new GitHubBacklogError("provider_unavailable");
+      }
     },
     classifyError(error) {
       if (error instanceof AnalyticsScopeUnavailableError || error instanceof ProviderConnectionUnavailableError) return "authority";
       if (error instanceof GitHubBacklogError) {
-        if (error.reason === "forbidden" || error.reason === "not_found") return "authority";
+        if (error.reason === "unauthorized" || error.reason === "forbidden" || error.reason === "not_found") return "authority";
         return error.reason;
       }
       // Credential/token acquisition can fail before the GitHub adapter boundary.

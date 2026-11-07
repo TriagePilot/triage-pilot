@@ -6,7 +6,7 @@ export interface ReviewerBacklogPorts {
   loadScope(input: ReviewerBacklogScopeRequest): Promise<AnalyticsRepositoryScope>;
   assertActive(scope: AnalyticsRepositoryScope): Promise<void>;
   readTracked(scope: AnalyticsRepositoryScope, window: { since: Date; end: Date }): Promise<{ pullRequests: TrackedPullRequest[]; knownActors: ExternalActorId[] }>;
-  listOpenReviewRequests(input: { scope: AnalyticsRepositoryScope; repository: RepositoryRef; signal: AbortSignal; assertAuthorized: () => Promise<void> }): Promise<OpenReviewRequest[]>;
+  listOpenReviewRequests(input: { scope: AnalyticsRepositoryScope; repository: RepositoryRef; acquisition: object; signal: AbortSignal; assertAuthorized: () => Promise<void> }): Promise<OpenReviewRequest[]>;
   classifyError(error: unknown): "authority" | Failure;
 }
 export interface ReviewerBacklogService {
@@ -29,6 +29,7 @@ export function createReviewerBacklogService(ports: ReviewerBacklogPorts): Revie
     const end = ports.now();
     const since = new Date(end.getTime() - 90 * DAY);
     const controller = new AbortController();
+    const acquisition = {};
     let expired = false;
     let timer: ReturnType<typeof setTimeout>;
     const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => { expired = true; controller.abort(); reject(new DeadlineError("Backlog acquisition timed out")); }, 10_000); });
@@ -65,7 +66,7 @@ export function createReviewerBacklogService(ports: ReviewerBacklogPorts): Revie
             const key = JSON.stringify([group,scope.externalConnectionId,repository.recordId,repositoryIdentity(repository.repository)]);
             let snapshot = cache.get(key);
             if (input.forceRefresh || !snapshot || ports.now().getTime()-snapshot.at >= 60_000) {
-              const requests = await bounded(ports.listOpenReviewRequests({scope, repository:repository.repository,signal:controller.signal,assertAuthorized:authorize}));
+              const requests = await bounded(ports.listOpenReviewRequests({scope, repository:repository.repository,acquisition,signal:controller.signal,assertAuthorized:authorize}));
               await authorize();
               snapshot = {at:ports.now().getTime(),requests};
               if (!controller.signal.aborted && generation === (generations.get(group) ?? 0)) cache.set(key,snapshot);

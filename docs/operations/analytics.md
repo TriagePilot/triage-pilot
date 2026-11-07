@@ -35,7 +35,7 @@ Complete snapshots may be cached in process for at most 60 seconds. **Refresh cu
 
 Initial routing and absence replacement compare current pending load within the eligible ownership pool. Matching owners remain preferred; a less-busy fallback never displaces an available preferred owner. Routing excludes the PR being routed or replaced from load comparisons. Use **All repositories** to inspect the load scope used by routing.
 
-Author exclusion, existing approvals, reviewer availability, policy quotas, revision checks, and default shadow mode still apply. A transient load-read failure uses stable selection with explicit fallback provenance; it does not claim zero measured load. Authorization failures retain closed/retryable/terminal handling and cannot authorize writes. Recovery replays an already chosen result without fetching a new load or reselecting.
+Author exclusion, existing approvals, reviewer availability, policy quotas, revision checks, and default shadow mode still apply. A transient load-read failure uses stable selection with explicit fallback provenance; it does not claim zero measured load. When a repository denies a backlog read, routing permits this fallback only after a fresh installation-token check succeeds; an unauthorized token or failed check remains an authorization failure. Authorization failures retain closed/retryable/terminal handling and cannot authorize writes. Recovery replays an already chosen result without fetching a new load or reselecting.
 
 No additional GitHub permission or repository-YAML switch is required. Only trusted repository configuration can permit GitHub writes; changing an estimate or reading analytics never authorizes them.
 
@@ -45,6 +45,6 @@ The operations host exposes `GET /api/operations/analytics` for history and `GET
 
 History accepts `periodDays=7|30|90` (default 30), `mode=auto|shadow|enforce` (default auto), repeated `repositoryId` values (internal scoped record IDs; omitted means all authorized repositories), and `averageReviewMinutes` (default 30). Current workload accepts the same repository and estimate fields plus `forceRefresh=true|false`; it does not accept historical period or mode.
 
-History returns `query`, resolved `mode`, `start`, `end`, repository options, `counts`, `noHumanSharePercent`, `savings`, `assignments`, and `coverage`. Workload returns `status`, `observedAt`, `trackedSince`, `scope`, repository coverage IDs, `averageReviewMinutes`, `totalPending`, `totalEstimatedHours`, and reviewer `rows`. Unknown workload totals are null. Invalid queries return 400; inactive or inaccessible scope returns 404; other acquisition failures may return 503.
+History returns `query`, resolved `mode`, `start`, `end`, repository options, `counts`, `shortages`, `noHumanSharePercent`, `savings`, `assignments`, and `coverage`. Workload returns `status`, `observedAt`, `trackedSince`, `scope`, repository coverage IDs, `averageReviewMinutes`, `totalPending`, `totalEstimatedHours`, and reviewer `rows`. Unknown workload totals are null. Invalid queries return 400; inactive or inaccessible scope returns 404; other acquisition failures may return 503.
 
 See [repository configuration](../github-app/repository-configuration.md), [reviewer availability](reviewer-availability.md), and [retention](retention.md).

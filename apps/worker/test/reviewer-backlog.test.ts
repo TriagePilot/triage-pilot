@@ -33,6 +33,70 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker backlog host", ()
       expect(request).toHaveBeenCalledTimes(callsBeforeSuspension);
     });
   });
+  it("shares one requester across concurrent repository reads and refreshes it for a new acquisition", async () => {
+    await withTokenFailureInput(async input => {
+      await input.factory.db.insertInto("repositories").values({ workspace_id: input.factory.workspaceId, provider: "github", provider_connection_id: input.load.providerConnectionId, external_repository_id: "102", owner: "acme", name: "other", default_branch: "main", config_state: "unknown" }).execute();
+      const request = vi.fn(async () => ({ data: [] }));
+      const createRequester = vi.fn(async () => ({ request }));
+      const service = createWorkerReviewerBacklogService({ ...input.factory, createRequester });
+      expect((await service.readLoad(input.load)).status).toBe("complete");
+      expect(createRequester).toHaveBeenCalledTimes(1);
+      expect(request).toHaveBeenCalledTimes(2);
+      service.invalidate(input.load);
+      expect((await service.readLoad(input.load)).status).toBe("complete");
+      expect(createRequester).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it.each([403, 404])("falls back for a repository HTTP %s denial only after fresh installation verification", async status => {
+    await withTokenFailureInput(async input => {
+      const request = vi.fn(async (route: string) => {
+        if (route === "GET /installation/repositories") return { data: { total_count: 0, repositories: [] } };
+        throw Object.assign(new Error("denied"), { status });
+      });
+      const service = createWorkerReviewerBacklogService({ ...input.factory, createRequester: async () => ({ request }) });
+      expect(await service.readLoad(input.load)).toMatchObject({ status: "fallback", reason: "provider_unavailable" });
+      expect(request).toHaveBeenCalledWith("GET /installation/repositories", expect.objectContaining({ per_page: 1 }));
+    });
+  });
+
+  it("rejects malformed installation verification and does not probe a 401", async () => {
+    await withTokenFailureInput(async input => {
+      const malformed = vi.fn(async (route: string) => {
+        if (route === "GET /installation/repositories") return { data: {} };
+        throw Object.assign(new Error("denied"), { status: 404 });
+      });
+      const service = createWorkerReviewerBacklogService({ ...input.factory, createRequester: async () => ({ request: malformed }) });
+      await expect(service.readLoad(input.load)).rejects.toThrow();
+      const unauthorized = vi.fn(async () => { throw Object.assign(new Error("unauthorized"), { status: 401 }); });
+      const revoked = createWorkerReviewerBacklogService({ ...input.factory, createRequester: async () => ({ request: unauthorized }) });
+      await expect(revoked.readLoad(input.load)).rejects.toThrow();
+      expect(unauthorized).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("rechecks local authority after installation verification", async () => {
+    await withTokenFailureInput(async input => {
+      const request = vi.fn(async (route: string) => {
+        if (route === "GET /installation/repositories") {
+          await input.factory.db.updateTable("provider_connections").set({ status: "suspended" }).where("id", "=", input.load.providerConnectionId).execute();
+          return { data: { total_count: 0, repositories: [] } };
+        }
+        throw Object.assign(new Error("denied"), { status: 404 });
+      });
+      const service = createWorkerReviewerBacklogService({ ...input.factory, createRequester: async () => ({ request }) });
+      await expect(service.readLoad(input.load)).rejects.toThrow("unavailable");
+    });
+  });
+
+  it.each([401, 403, 404])("fails closed when installation verification fails with HTTP %s", async status => {
+    await withTokenFailureInput(async input => {
+      const request = vi.fn(async () => { throw Object.assign(new Error("denied"), { status }); });
+      const service = createWorkerReviewerBacklogService({ ...input.factory, createRequester: async () => ({ request }) });
+      await expect(service.readLoad(input.load)).rejects.toThrow();
+    });
+  });
+
   it.each([401, 403, 404])("preserves raw installation-token authority failures (HTTP %s)", async status => {
     await withTokenFailureInput(async input => {
       const error = Object.assign(new Error("token authorization failed"), { status });

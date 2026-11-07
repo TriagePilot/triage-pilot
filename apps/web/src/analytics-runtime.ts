@@ -53,7 +53,7 @@ export function createAnalyticsRuntime(input: {
     classifyError(error) {
       if (error instanceof AnalyticsScopeUnavailableError || error instanceof ProviderConnectionUnavailableError) return "authority";
       if (error instanceof GitHubBacklogError) {
-        if (error.reason === "forbidden" || error.reason === "not_found") return "authority";
+        if (error.reason === "unauthorized" || error.reason === "forbidden" || error.reason === "not_found") return "authority";
         return error.reason;
       }
       return "provider_unavailable";

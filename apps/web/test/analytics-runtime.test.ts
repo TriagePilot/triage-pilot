@@ -83,10 +83,10 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("analytics runtime", () =
       ]);
     });
   });
-  it.each([401, 403, 404])("propagates provider authority %s instead of partial data", async status => {
+  it.each([[401, "unauthorized"], [403, "forbidden"], [404, "not_found"]] as const)("propagates provider authority %s instead of partial data", async (status, reason) => {
     await withPostgresTestDatabase(async db => {
       const { services } = await fixture(db, vi.fn(async () => { throw { status, message: "private" }; }));
-      await expect(services.readCurrentWorkload({ repositoryIds: [], averageReviewMinutes: 30, forceRefresh: true })).rejects.toMatchObject({ reason: expect.stringMatching(/forbidden|not_found/) });
+      await expect(services.readCurrentWorkload({ repositoryIds: [], averageReviewMinutes: 30, forceRefresh: true })).rejects.toMatchObject({ reason });
     });
   });
   it("treats installation-token authorization failures as authority failures", async () => {

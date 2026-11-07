@@ -60,7 +60,7 @@ describe("GitHub pending review backlog", () => {
     const request = async (route: string) => ({ data: route.endsWith("requested_reviewers") ? { users: [] } : [pr] });
     await expect(new GitHubAdapter({ request }).listOpenReviewRequests(input())).rejects.toMatchObject({ reason: "invalid_response" });
   });
-  it.each([[403, {}, "forbidden"], [404, {}, "not_found"], [429, {}, "rate_limited"],
+  it.each([[401, {}, "unauthorized"], [403, {}, "forbidden"], [404, {}, "not_found"], [429, {}, "rate_limited"],
     [403, { "x-ratelimit-remaining": "0" }, "rate_limited"], [503, {}, "provider_unavailable"],
   ])("classifies %s without exposing provider content", async (status, headers, reason) => {
     const request = async () => { throw { status, response: { headers }, message: "secret raw response" }; };

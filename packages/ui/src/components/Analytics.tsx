@@ -28,7 +28,7 @@ function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: A
   const [current, setCurrent] = useState<Resource<CurrentWorkloadReport> | null>(null);
   const [repositories, setRepositories] = useState<AnalyticsReport["repositories"]>([]);
   const callback = useRef(onUnauthorized);
-  callback.current = onUnauthorized;
+  useEffect(() => { callback.current = onUnauthorized; }, [onUnauthorized]);
   const allowed = authorization.canViewOperations;
   const historyKey = JSON.stringify([period, repositoryId, minutes, mode]);
   const currentKey = JSON.stringify([repositoryId, minutes, refresh]);
