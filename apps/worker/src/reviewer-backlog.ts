@@ -1,7 +1,7 @@
 import { createReviewerBacklogService, type ReviewerBacklogService } from "@triagepilot/application";
 import type { Clock, CredentialProvider, WorkspaceId } from "@triagepilot/contracts";
 import { AnalyticsScopeUnavailableError, ProviderConnectionUnavailableError, assertAnalyticsScopeActive, resolveAnalyticsScope, readTrackedPullRequests, type createDatabase } from "@triagepilot/db";
-import { createInstallationRequester, GitHubBacklogError, GitHubAdapter, type GitHubAppCredentials } from "@triagepilot/provider-github";
+import { createInstallationRequester, GitHubBacklogError, listOpenReviewRequestsWithInstallationProbe, type GitHubAppCredentials } from "@triagepilot/provider-github";
 
 type DatabaseClient = ReturnType<typeof createDatabase>;
 type RequesterFactory = typeof createInstallationRequester;
@@ -38,25 +38,7 @@ export function createWorkerReviewerBacklogService(input: {
         requesters.set(request.acquisition, requesterPromise);
       }
       const requester = await requesterPromise;
-      try {
-        return await new GitHubAdapter(requester).listOpenReviewRequests(request);
-      } catch (error) {
-        if (!(error instanceof GitHubBacklogError) || (error.reason !== "forbidden" && error.reason !== "not_found")) throw error;
-        // A repository denial alone cannot establish that the installation remains active.
-        // Verify the installation token with a fresh provider read before allowing fallback.
-        await request.assertAuthorized();
-        request.signal.throwIfAborted();
-        let data: unknown;
-        try {
-          ({ data } = await requester.request("GET /installation/repositories", { per_page: 1, request: { signal: request.signal } }));
-        } catch {
-          throw error;
-        }
-        request.signal.throwIfAborted();
-        await request.assertAuthorized();
-        if (typeof data !== "object" || data === null || !("total_count" in data) || !Number.isSafeInteger(data.total_count) || Number(data.total_count) < 0 || !("repositories" in data) || !Array.isArray(data.repositories)) throw error;
-        throw new GitHubBacklogError("provider_unavailable");
-      }
+      return listOpenReviewRequestsWithInstallationProbe(requester, request);
     },
     classifyError(error) {
       if (error instanceof AnalyticsScopeUnavailableError || error instanceof ProviderConnectionUnavailableError) return "authority";

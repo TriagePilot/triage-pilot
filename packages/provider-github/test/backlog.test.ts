@@ -74,3 +74,28 @@ describe("GitHub pending review backlog", () => {
     expect(request).not.toHaveBeenCalled();
   });
 });
+
+it.each([[503, {}, "provider_unavailable"], [429, {}, "rate_limited"], [403, { "retry-after": "1" }, "rate_limited"]] as const)("classifies installation probe %s as %s", async (status, headers, reason) => {
+  const { listOpenReviewRequestsWithInstallationProbe } = await import("../src/backlog");
+  const request = vi.fn(async (route: string) => {
+    if (route === "GET /installation/repositories") throw { status, response: { headers } };
+    throw { status: 404 };
+  });
+  await expect(listOpenReviewRequestsWithInstallationProbe({ request }, input())).rejects.toMatchObject({ reason });
+});
+
+it("preserves the repository denial if the installation probe is unauthorized", async () => {
+  const { listOpenReviewRequestsWithInstallationProbe } = await import("../src/backlog");
+  const request = vi.fn(async (route: string) => { throw { status: route === "GET /installation/repositories" ? 401 : 404 }; });
+  await expect(listOpenReviewRequestsWithInstallationProbe({ request }, input())).rejects.toMatchObject({ reason: "not_found" });
+});
+
+it("preserves cancellation during an installation probe", async () => {
+  const { listOpenReviewRequestsWithInstallationProbe } = await import("../src/backlog");
+  const controller = new AbortController();
+  const request = vi.fn(async (route: string) => {
+    if (route === "GET /installation/repositories") { controller.abort(new Error("cancelled")); throw { status: 503 }; }
+    throw { status: 404 };
+  });
+  await expect(listOpenReviewRequestsWithInstallationProbe({ request }, { ...input(), signal: controller.signal })).rejects.toThrow("cancelled");
+});

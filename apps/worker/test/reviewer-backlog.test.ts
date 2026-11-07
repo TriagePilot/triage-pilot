@@ -67,11 +67,19 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker backlog host", ()
         throw Object.assign(new Error("denied"), { status: 404 });
       });
       const service = createWorkerReviewerBacklogService({ ...input.factory, createRequester: async () => ({ request: malformed }) });
-      await expect(service.readLoad(input.load)).rejects.toThrow();
+      await expect(service.readLoad(input.load)).rejects.toMatchObject({ reason: "not_found" });
       const unauthorized = vi.fn(async () => { throw Object.assign(new Error("unauthorized"), { status: 401 }); });
       const revoked = createWorkerReviewerBacklogService({ ...input.factory, createRequester: async () => ({ request: unauthorized }) });
-      await expect(revoked.readLoad(input.load)).rejects.toThrow();
+      await expect(revoked.readLoad(input.load)).rejects.toMatchObject({ reason: "unauthorized" });
       expect(unauthorized).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("falls back when the installation probe is transiently unavailable", async () => {
+    await withTokenFailureInput(async input => {
+      const request = vi.fn(async (route: string) => { throw { status: route === "GET /installation/repositories" ? 503 : 404 }; });
+      const service = createWorkerReviewerBacklogService({ ...input.factory, createRequester: async () => ({ request }) });
+      expect(await service.readLoad(input.load)).toMatchObject({ status: "fallback", reason: "provider_unavailable" });
     });
   });
 
@@ -93,7 +101,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker backlog host", ()
     await withTokenFailureInput(async input => {
       const request = vi.fn(async () => { throw Object.assign(new Error("denied"), { status }); });
       const service = createWorkerReviewerBacklogService({ ...input.factory, createRequester: async () => ({ request }) });
-      await expect(service.readLoad(input.load)).rejects.toThrow();
+      await expect(service.readLoad(input.load)).rejects.toMatchObject({ reason: status === 401 ? "unauthorized" : status === 403 ? "forbidden" : "not_found" });
     });
   });
 

@@ -89,6 +89,17 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("analytics runtime", () =
       await expect(services.readCurrentWorkload({ repositoryIds: [], averageReviewMinutes: 30, forceRefresh: true })).rejects.toMatchObject({ reason });
     });
   });
+  it("reports a denied repository as unavailable after verifying the installation", async () => {
+    await withPostgresTestDatabase(async db => {
+      const request = vi.fn(async (route: unknown, params: unknown) => {
+        if (route === "GET /installation/repositories") return { data: { total_count: 1, repositories: [] } };
+        if ((params as { repo: string }).repo === "other") throw { status: 404 };
+        return { data: [pull] };
+      });
+      const { services, other } = await fixture(db, request);
+      expect(await services.readCurrentWorkload({ repositoryIds: [], averageReviewMinutes: 30, forceRefresh: true })).toMatchObject({ status: "partial", unavailableRepositoryIds: [other.id], totalPending: null });
+    });
+  });
   it("treats installation-token authorization failures as authority failures", async () => {
     await withPostgresTestDatabase(async db => {
       const { api } = await fixture(db);

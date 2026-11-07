@@ -1,7 +1,7 @@
 import { buildAnalyticsReport, createReviewerBacklogService } from "@triagepilot/application";
 import type { CurrentWorkloadReport, WorkspaceId } from "@triagepilot/contracts";
 import { AnalyticsScopeUnavailableError, ProviderConnectionUnavailableError, assertAnalyticsScopeActive, resolveAnalyticsScope, readTrackedPullRequests, readAnalyticsFacts, type createDatabase } from "@triagepilot/db";
-import { createInstallationRequester, GitHubBacklogError, GitHubAdapter, GitHubCredentialProvider, type GitHubAppCredentialShape } from "@triagepilot/provider-github";
+import { createInstallationRequester, GitHubBacklogError, listOpenReviewRequestsWithInstallationProbe, GitHubCredentialProvider, type GitHubAppCredentialShape } from "@triagepilot/provider-github";
 import type { AnalyticsServices } from "./routes/analytics.js";
 
 export function createAnalyticsRuntime(input: {
@@ -48,7 +48,7 @@ export function createAnalyticsRuntime(input: {
         }
         throw error;
       });
-      return new GitHubAdapter(requester).listOpenReviewRequests(request);
+      return listOpenReviewRequestsWithInstallationProbe(requester, request);
     },
     classifyError(error) {
       if (error instanceof AnalyticsScopeUnavailableError || error instanceof ProviderConnectionUnavailableError) return "authority";

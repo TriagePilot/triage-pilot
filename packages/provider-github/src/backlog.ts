@@ -79,6 +79,29 @@ export async function listOpenReviewRequests(
   }
 }
 
+export async function listOpenReviewRequestsWithInstallationProbe(requester: Requester, input: GitHubBacklogInput): Promise<OpenReviewRequest[]> {
+  try {
+    return await listOpenReviewRequests(requester, input);
+  } catch (error) {
+    if (!(error instanceof GitHubBacklogError) || (error.reason !== "forbidden" && error.reason !== "not_found")) throw error;
+    await input.assertAuthorized();
+    input.signal.throwIfAborted();
+    let data: unknown;
+    try {
+      ({ data } = await requester.request("GET /installation/repositories", { per_page: 1, request: { signal: input.signal } }));
+    } catch (probeError) {
+      input.signal.throwIfAborted();
+      const failure = classify(probeError);
+      if (["unauthorized", "forbidden", "not_found"].includes(failure.reason)) throw error;
+      throw failure;
+    }
+    input.signal.throwIfAborted();
+    await input.assertAuthorized();
+    if (!record(data) || !Number.isSafeInteger(data.total_count) || Number(data.total_count) < 0 || !Array.isArray(data.repositories)) throw error;
+    throw new GitHubBacklogError("provider_unavailable");
+  }
+}
+
 function readActors(users: unknown, teams: unknown): string[] {
   if (!Array.isArray(users) || !Array.isArray(teams)) invalid();
   for (const team of teams) {

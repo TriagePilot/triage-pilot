@@ -29,4 +29,4 @@ export {
 } from "./normalization.js";
 export { verifyGitHubSignature } from "./webhook.js";
 
-export { GitHubBacklogError, type GitHubBacklogFailureReason, type GitHubBacklogInput } from "./backlog.js";
+export { listOpenReviewRequestsWithInstallationProbe, GitHubBacklogError, type GitHubBacklogFailureReason, type GitHubBacklogInput } from "./backlog.js";
