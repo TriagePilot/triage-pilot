@@ -2,6 +2,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { AnalyticsPeriodDays, AnalyticsReport, CurrentWorkloadReport, RepositoryMode } from "@triagepilot/contracts";
 import type { AuthorizationCapabilities, WorkspaceContext } from "../api.js";
 import type { AnalyticsApiClient } from "../analytics-api.js";
+import { Pagination } from "./PagePrimitives.js";
 import { AnalyticsCharts, AnalyticsRisk } from "./AnalyticsCharts.js";
 
 export interface AnalyticsProps {
@@ -9,12 +10,13 @@ export interface AnalyticsProps {
   workspace: WorkspaceContext;
   authorization: AuthorizationCapabilities;
   onUnauthorized?(message: string): void;
+  onRefresh?(): Promise<void>;
 }
 interface Resource<T> { key: string; data?: T; error?: string }
 export function Analytics(props: AnalyticsProps): JSX.Element {
   return <AnalyticsWorkspace key={props.workspace.id} {...props} />;
 }
-function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: AnalyticsProps): JSX.Element {
+function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized, onRefresh }: AnalyticsProps): JSX.Element {
   const instanceId = useId();
   const [tab, setTab] = useState<"assignments" | "workload">("assignments");
   const [period, setPeriod] = useState<AnalyticsPeriodDays>(30);
@@ -24,6 +26,8 @@ function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: A
   const [mode, setMode] = useState<RepositoryMode | null>(null);
   const resolvedMode = useRef<RepositoryMode | null>(null);
   const [refresh, setRefresh] = useState(0);
+  const [historyRefresh, setHistoryRefresh] = useState(0);
+  const [workloadPage, setWorkloadPage] = useState(1);
   const lastRefresh = useRef(0);
   const [history, setHistory] = useState<Resource<AnalyticsReport> | null>(null);
   const [current, setCurrent] = useState<Resource<CurrentWorkloadReport> | null>(null);
@@ -31,7 +35,7 @@ function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: A
   const callback = useRef(onUnauthorized);
   useLayoutEffect(() => { callback.current = onUnauthorized; }, [onUnauthorized]);
   const allowed = authorization.canViewOperations;
-  const historyKey = JSON.stringify([period, repositoryId, minutes, mode]);
+  const historyKey = JSON.stringify([period, repositoryId, minutes, mode, historyRefresh]);
   const currentKey = JSON.stringify([repositoryId, minutes, refresh]);
   const validMinutes = /^\d+$/.test(minutesInput) && Number(minutesInput) >= 1 && Number(minutesInput) <= 480;
 
@@ -76,6 +80,8 @@ function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: A
     return () => { active = false; controller.abort(); };
   }, [api, workspace.id, workspace.displayName, allowed, currentKey, repositoryId, minutes, refresh]);
 
+  useEffect(() => setWorkloadPage(1), [repositoryId, period, mode, minutes]);
+
   if (!allowed) return <section><p>You are not authorized to view analytics.</p></section>;
   // Never render results belonging to a previous filter, including before effects run.
   const historical = history?.key === historyKey ? history : null;
@@ -84,9 +90,11 @@ function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: A
   const workload = live?.data;
   const chosenMode = mode ?? resolvedMode.current;
   const actors = [...new Set([...(report?.assignments.map((row) => row.actor) ?? []), ...(workload?.rows.map((row) => row.actor) ?? [])])].sort();
+  const workloadPages = Math.max(1, Math.ceil(actors.length / 5));
+  const currentWorkloadPage = Math.min(workloadPage, workloadPages);
   const currentLoading = !live || (!live.data && !live.error);
   return <section className="analytics-grid" aria-label="Analytics">
-    <header className="operations-heading"><div><p className="eyebrow">Workspace insights · {workspace.displayName}</p><h2>Analytics</h2><p className="lede">Understand review demand, routing impact, and team capacity.</p></div></header>
+    <header className="operations-heading"><div><p className="eyebrow">Workspace insights · {workspace.displayName}</p><h1>Analytics</h1><p className="lede">Understand review demand, routing impact, and team capacity.</p></div><button type="button" disabled={currentLoading || !historical || (!historical.data && !historical.error)} onClick={() => { setRefresh(value => value + 1); setHistoryRefresh(value => value + 1); void onRefresh?.(); }}>Refresh analytics</button></header>
     <div className="analytics-filter-bar"><div className="analytics-filters">
       <label>Repository scope<select aria-label="Repository scope" value={repositoryId} onChange={(event) => setRepositoryId(event.target.value)}><option value="">All repositories</option>{repositories.map((item) => <option key={item.recordId} value={item.recordId}>{item.repository.owner}/{item.repository.name}</option>)}</select></label>
       <label>History period<select aria-label="History period" value={period} onChange={(event) => setPeriod(Number(event.target.value) as AnalyticsPeriodDays)}>{([7, 30, 90] as const).map((days) => <option key={days} value={days}>Last {days} days</option>)}</select></label>
@@ -103,7 +111,7 @@ function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: A
     </div>
     <p className="cell-detail analytics-context">Tracked PRs only. Historical filters apply to summaries and assignments. The review estimate assumption does not change routing or historical records.</p>
     <div aria-live="polite" aria-busy={!historical || (!historical.data && !historical.error)}>
-      {historical?.error ? <p role="alert">History unavailable: {historical.error}</p> : !report ? <p>Loading history…</p> : <>
+      {historical?.error ? <div role="alert">History unavailable: {historical.error}<button type="button" className="button--quiet" onClick={() => setHistoryRefresh(value => value + 1)}>Retry history</button></div> : !report ? <p>Loading history…</p> : <>
         <p className="cell-detail analytics-context">Exact history period (UTC): <time dateTime={report.start}>{report.start}</time> inclusive to <time dateTime={report.end}>{report.end}</time> exclusive.</p>
         <div className="analytics-metrics">
           <div className="analytics-metric"><span>Assessed pull requests</span><strong>{report.counts.assessed}</strong><small>{report.counts.humanRequired} require human review</small></div>
@@ -149,7 +157,7 @@ function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: A
       </>}
       <div className="table-scroll" role="region" tabIndex={0} aria-label="Developer assignment and workload counts">
         <table><caption>Developer assignments in the selected history period and current tracked workload</caption><thead><tr><th scope="col">Developer</th><th scope="col">{chosenMode === "shadow" ? "Proposed assignments" : "Assigned in period"}</th><th scope="col">Share</th><th scope="col">Pending now</th><th scope="col">Est. review effort</th></tr></thead><tbody>
-          {actors.length === 0 ? <tr><td colSpan={5}>No developer data available.</td></tr> : actors.map((actor) => {
+          {actors.length === 0 ? <tr><td colSpan={5}>No developer data available.</td></tr> : actors.slice((currentWorkloadPage - 1) * 5, currentWorkloadPage * 5).map((actor) => {
             const assignment = report?.assignments.find((row) => row.actor === actor);
             const pending = workload?.rows.find((row) => row.actor === actor);
             const complete = workload?.status === "complete";
@@ -157,7 +165,8 @@ function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: A
           })}
         </tbody></table>
       </div>
-      <button type="button" onClick={() => setRefresh((value) => value + 1)}>Refresh current workload</button>
+      <Pagination page={currentWorkloadPage} total={actors.length} size={5} onChange={setWorkloadPage} />
+      <button type="button" onClick={() => { setRefresh((value) => value + 1); void onRefresh?.(); }}>Refresh current workload</button>
     </section>
     </div>
   </section>;

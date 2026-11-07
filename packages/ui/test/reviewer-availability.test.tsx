@@ -231,6 +231,32 @@ describe("reusable reviewer availability", () => {
     expect(input(container, "absence-actor")?.value).toBe("");
   });
 
+  it("preserves an edit's timezone until it is discarded before refreshing", async () => {
+    const client = api({
+      readAvailabilitySettings: vi.fn(async () => ({ ...settings, timezone: "UTC" })),
+    });
+    const container = await mount(<ReviewerAvailability
+      api={client}
+      workspace={workspace}
+      authorization={authorization}
+      initialSettings={settings}
+      initialAbsences={[absence]}
+      initialReplacementHistory={[]}
+    />);
+    await act(async () => button(container, "Edit")!.click());
+    await act(async () => button(container, "Refresh availability")!.click());
+
+    expect(input(container, "availability-timezone")?.value).toBe("Europe/Bratislava");
+    expect(input(container, "absence-start")?.value).toBe("2026-09-01T08:00");
+    expect(input(container, "absence-start-offset")?.value).toBe("+02:00");
+    expect(button(container, "Refresh availability")?.disabled).toBe(true);
+
+    await act(async () => button(container, "Discard edit")!.click());
+    expect(button(container, "Refresh availability")?.disabled).toBe(false);
+    await act(async () => button(container, "Refresh availability")!.click());
+    expect(input(container, "availability-timezone")?.value).toBe("UTC");
+  });
+
   it("blocks timezone changes during an edit and serializes its original UTC offsets", async () => {
     const client = api();
     const container = await mount(<ReviewerAvailability
@@ -347,3 +373,30 @@ function formFor(container: HTMLElement, id: string): HTMLFormElement | null {
 function button(container: HTMLElement, label: string): HTMLButtonElement | null {
   return Array.from(container.querySelectorAll("button")).find((item) => item.textContent?.trim() === label) ?? null;
 }
+
+it("shows replacement history behind each absence control and retries failed initial loads", async () => {
+  const client = api({
+    readAvailabilitySettings: vi
+      .fn()
+      .mockRejectedValueOnce(new Error("timezone unavailable"))
+      .mockResolvedValue(settings),
+  });
+  const container = await mount(
+    <ReviewerAvailability
+      api={client}
+      workspace={workspace}
+      authorization={authorization}
+    />,
+  );
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+    "timezone unavailable",
+  );
+  await act(async () => button(container, "Retry availability")!.click());
+  const history = container.querySelector<HTMLDetailsElement>(
+    ".replacement-history",
+  );
+  expect(history?.open).toBe(false);
+  expect(history?.querySelector("summary")?.textContent).toContain(
+    "View history (1)",
+  );
+});
