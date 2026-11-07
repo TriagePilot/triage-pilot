@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { AnalyticsPeriodDays, AnalyticsReport, CurrentWorkloadReport, RepositoryMode } from "@triagepilot/contracts";
 import type { AuthorizationCapabilities, WorkspaceContext } from "../api.js";
 import type { AnalyticsApiClient } from "../analytics-api.js";
@@ -15,6 +15,7 @@ export function Analytics(props: AnalyticsProps): JSX.Element {
   return <AnalyticsWorkspace key={props.workspace.id} {...props} />;
 }
 function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: AnalyticsProps): JSX.Element {
+  const instanceId = useId();
   const [tab, setTab] = useState<"assignments" | "workload">("assignments");
   const [period, setPeriod] = useState<AnalyticsPeriodDays>(30);
   const [repositoryId, setRepositoryId] = useState("");
@@ -28,7 +29,7 @@ function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: A
   const [current, setCurrent] = useState<Resource<CurrentWorkloadReport> | null>(null);
   const [repositories, setRepositories] = useState<AnalyticsReport["repositories"]>([]);
   const callback = useRef(onUnauthorized);
-  useEffect(() => { callback.current = onUnauthorized; }, [onUnauthorized]);
+  useLayoutEffect(() => { callback.current = onUnauthorized; }, [onUnauthorized]);
   const allowed = authorization.canViewOperations;
   const historyKey = JSON.stringify([period, repositoryId, minutes, mode]);
   const currentKey = JSON.stringify([repositoryId, minutes, refresh]);
@@ -106,7 +107,7 @@ function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: A
         <p className="cell-detail analytics-context">Exact history period (UTC): <time dateTime={report.start}>{report.start}</time> inclusive to <time dateTime={report.end}>{report.end}</time> exclusive.</p>
         <div className="analytics-metrics">
           <div className="analytics-metric"><span>Assessed pull requests</span><strong>{report.counts.assessed}</strong><small>{report.counts.humanRequired} require human review</small></div>
-          <div className="analytics-metric"><span>{report.savings.estimatedHoursSaved < 0 ? "Additional review effort" : "Estimated review effort saved"}</span><strong className={report.savings.estimatedHoursSaved < 0 ? "analytics-metric--caution" : ""}>{Math.abs(report.savings.estimatedHoursSaved).toFixed(1)} h</strong><small>{Math.abs(report.savings.netFewerReviews)} {report.savings.netFewerReviews < 0 ? "additional reviews" : "fewer reviews"} · {report.savings.reductionPercent === null ? "Unavailable" : `${Math.abs(report.savings.reductionPercent).toFixed(1)}% ${report.savings.reductionPercent < 0 ? "increase" : "reduction"}`}</small></div>
+          <div className="analytics-metric"><span>{report.mode === "shadow" ? (report.savings.estimatedHoursSaved < 0 ? "Projected additional review effort" : "Projected review effort saved") : (report.savings.estimatedHoursSaved < 0 ? "Additional review effort" : "Estimated review effort saved")}</span><strong className={report.savings.estimatedHoursSaved < 0 ? "analytics-metric--caution" : ""}>{Math.abs(report.savings.estimatedHoursSaved).toFixed(1)} h</strong><small>{Math.abs(report.savings.netFewerReviews)} {report.savings.netFewerReviews < 0 ? "additional reviews" : "fewer reviews"} · {report.savings.reductionPercent === null ? "Unavailable" : `${Math.abs(report.savings.reductionPercent).toFixed(1)}% ${report.savings.reductionPercent < 0 ? "increase" : "reduction"}`}</small></div>
           <div className="analytics-metric"><span>No human review needed</span><strong className="analytics-metric--teal">{report.noHumanSharePercent === null ? "Unavailable" : `${report.noHumanSharePercent.toFixed(1)}%`}</strong><small>{report.counts.noHumanRequired} of {report.counts.assessed} assessed PRs</small></div>
           <div className="analytics-metric"><span>Pending reviews now</span><strong>{currentLoading ? "…" : display(workload?.totalPending)}</strong><small>{hours(workload?.totalEstimatedHours)} estimated effort · live snapshot</small></div>
         </div>
@@ -130,12 +131,12 @@ function AnalyticsWorkspace({ api, workspace, authorization, onUnauthorized }: A
         </details>
       </>}
     </div>
-    <div className="analytics-tabs" role="tablist" aria-label="Analytics views" onKeyDown={(event) => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); const next = tab === "assignments" ? "workload" : "assignments"; setTab(next); document.getElementById(`analytics-${next}-tab`)?.focus(); } }}>
-      <button type="button" role="tab" tabIndex={tab === "assignments" ? 0 : -1} aria-selected={tab === "assignments"} aria-controls="analytics-assignments" id="analytics-assignments-tab" onClick={() => setTab("assignments")}>Proposed assignments</button>
-      <button type="button" role="tab" tabIndex={tab === "workload" ? 0 : -1} aria-selected={tab === "workload"} aria-controls="analytics-workload" id="analytics-workload-tab" onClick={() => setTab("workload")}>Reviewer workload</button>
+    <div className="analytics-tabs" role="tablist" aria-label="Analytics views" onKeyDown={(event) => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); const next = tab === "assignments" ? "workload" : "assignments"; setTab(next); document.getElementById(`${instanceId}-${next}-tab`)?.focus(); } }}>
+      <button type="button" role="tab" tabIndex={tab === "assignments" ? 0 : -1} aria-selected={tab === "assignments"} aria-controls={`${instanceId}-assignments`} id={`${instanceId}-assignments-tab`} onClick={() => setTab("assignments")}>{report ? (report.mode === "shadow" ? "Proposed assignments" : "Reviewer assignments") : "Assignments"}</button>
+      <button type="button" role="tab" tabIndex={tab === "workload" ? 0 : -1} aria-selected={tab === "workload"} aria-controls={`${instanceId}-workload`} id={`${instanceId}-workload-tab`} onClick={() => setTab("workload")}>Reviewer workload</button>
     </div>
-    <div id="analytics-assignments" role="tabpanel" aria-labelledby="analytics-assignments-tab" hidden={tab !== "assignments"}>{report ? <AnalyticsCharts report={report} /> : null}</div>
-    <div id="analytics-workload" role="tabpanel" aria-labelledby="analytics-workload-tab" hidden={tab !== "workload"}>
+    <div id={`${instanceId}-assignments`} role="tabpanel" aria-labelledby={`${instanceId}-assignments-tab`} hidden={tab !== "assignments"}>{report ? <AnalyticsCharts report={report} /> : null}</div>
+    <div id={`${instanceId}-workload`} role="tabpanel" aria-labelledby={`${instanceId}-workload-tab`} hidden={tab !== "workload"}>
     <section className="data-section analytics-panel" aria-label="Reviewer workload" aria-busy={currentLoading}>
       <h3>Reviewer workload</h3>
       <p>Current snapshot: {workload?.observedAt ? <time dateTime={workload.observedAt}>{workload.observedAt} (UTC)</time> : "Unavailable"}</p>

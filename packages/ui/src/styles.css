@@ -200,4 +200,4 @@ a { color: var(--teal-dark); text-underline-offset: 2px; }
 .analytics-grid caption { padding: 12px 0; color: var(--muted); text-align: left; }
 .analytics-grid .table-scroll { margin: 16px -18px; }
 @media (max-width: 900px) { .analytics-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 600px) { .analytics-summary, .analytics-metrics { grid-template-columns: 1fr; } .analytics-filters, .analytics-filters label { width: 100%; } .analytics-modes { width: 100%; } .analytics-modes button { flex: 1; } }
+@media (max-width: 600px) { .analytics-grid .table-scroll { margin: 16px -12px; } .analytics-summary, .analytics-metrics { grid-template-columns: 1fr; } .analytics-filters, .analytics-filters label { width: 100%; } .analytics-modes { width: 100%; } .analytics-modes button { flex: 1; } }

@@ -49,16 +49,16 @@ function deferred<T>() { let resolve!: (value: T) => void; let reject!: (error: 
 
 it("switches analytics views with click and keyboard", async () => {
   await mount();
-  const assignments = container.querySelector<HTMLElement>("#analytics-assignments")!;
-  const workload = container.querySelector<HTMLElement>("#analytics-workload")!;
+  const assignments = container.querySelectorAll<HTMLElement>('[role="tabpanel"]')[0]!;
+  const workload = container.querySelectorAll<HTMLElement>('[role="tabpanel"]')[1]!;
   expect(assignments.hidden).toBe(false); expect(workload.hidden).toBe(true);
   await click("Reviewer workload");
   expect(assignments.hidden).toBe(true); expect(workload.hidden).toBe(false);
-  const tab = container.querySelector<HTMLButtonElement>("#analytics-workload-tab")!;
+  const tab = container.querySelectorAll<HTMLButtonElement>('[role="tab"]')[1]!;
   expect(tab.getAttribute("aria-selected")).toBe("true");
   await act(async () => tab.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true })));
   expect(assignments.hidden).toBe(false); expect(workload.hidden).toBe(true);
-  expect(document.activeElement?.id).toBe("analytics-assignments-tab");
+  expect(document.activeElement).toBe(container.querySelectorAll('[role="tab"]')[0]);
 });
 
 it("renders estimated value, denominators, risk coverage, UTC bars and merged developer rows with provider-neutral scope", async () => {
@@ -162,4 +162,37 @@ it("shows actual shadow shortages and unknown history beside the eligible projec
   expect(panel).toContain("4 eligible PRs in the projection cohort; 0 excluded");
   expect(panel).toContain("Reviewer shortages among assessed PRs: 2 PRs; 3 missing reviewers; 1 PRs with unknown shortage");
   expect(panel).toContain("Shadow projections have not enacted these savings or assignments");
+});
+
+
+it("keeps keyboard focus within each analytics instance", async () => {
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<><Analytics api={api()} workspace={workspace} authorization={authorization} /><Analytics api={api()} workspace={workspace} authorization={authorization} /></>));
+  const lists = container.querySelectorAll('[role="tablist"]');
+  const second = lists[1]!.querySelectorAll<HTMLButtonElement>('[role="tab"]');
+  await act(async () => { second[0]!.focus(); second[0]!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })); });
+  expect(document.activeElement).toBe(second[1]);
+  const ids = [...container.querySelectorAll('[role="tab"], [role="tabpanel"]')].map(element => element.id);
+  expect(new Set(ids).size).toBe(ids.length);
+});
+
+it("labels shadow effort and assignment tabs according to the loaded mode", async () => {
+  const client = api(); vi.mocked(client.readAnalytics).mockResolvedValue({ ...report, mode: "shadow", savings: { ...report.savings, estimatedHoursSaved: -1 } });
+  await mount(client);
+  expect(container.querySelectorAll(".analytics-metric span")[1]?.textContent).toBe("Projected additional review effort");
+  expect(container.querySelector('[role="tab"]')?.textContent).toBe("Proposed assignments");
+  vi.mocked(client.readAnalytics).mockResolvedValue(report);
+  await change("History period", "7");
+  expect(container.querySelector('[role="tab"]')?.textContent).toBe("Reviewer assignments");
+});
+
+it("uses the latest unauthorized callback for a pending request", async () => {
+  const pending = deferred<AnalyticsReport>(); const client = api();
+  vi.mocked(client.readAnalytics).mockReturnValueOnce(pending.promise);
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  const previous = vi.fn(), latest = vi.fn();
+  await act(async () => root.render(<Analytics api={client} workspace={workspace} authorization={authorization} onUnauthorized={previous} />));
+  await act(async () => root.render(<Analytics api={client} workspace={workspace} authorization={authorization} onUnauthorized={latest} />));
+  await act(async () => pending.reject(Object.assign(new Error("Session expired"), { status: 401 })));
+  expect(previous).not.toHaveBeenCalled(); expect(latest).toHaveBeenCalledExactlyOnceWith("Session expired");
 });
