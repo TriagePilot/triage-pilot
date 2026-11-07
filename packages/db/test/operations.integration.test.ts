@@ -191,7 +191,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
     });
   });
 
-  it("returns null pull numbers for missing, malformed, fractional, and out-of-range legacy JSON", async () => {
+  it("prefers stored pull numbers and safely falls back to legacy JSON", async () => {
     await withPostgresTestDatabase(async (db) => {
       const workspaceId = await ensureLocalWorkspace(db);
       const providerConnection = await db
@@ -217,6 +217,24 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
         "valid",
       );
       const fixtures = [
+        {
+          pullNumber: 42,
+          details: { changeRequestNumber: 42 },
+          expected: 42,
+          quota: { requestedReviewerCount: null, reviewerShortfall: null },
+        },
+        {
+          pullNumber: 43,
+          details: { pullNumber: 7 },
+          expected: 43,
+          quota: { requestedReviewerCount: null, reviewerShortfall: null },
+        },
+        {
+          pullNumber: 44,
+          details: { pullNumber: "malformed" },
+          expected: 44,
+          quota: { requestedReviewerCount: null, reviewerShortfall: null },
+        },
         {
           details: { pullNumber: 7, routing: { requestedReviewerCount: 1, reviewerShortfall: 1 } },
           expected: 7,
@@ -252,6 +270,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
             repository_id: repositoryId,
             delivery_id: `legacy-${index}`,
             routing_key: `legacy:legacy-${index}`,
+            pull_number: fixture.pullNumber ?? null,
             mode: "shadow",
             action: index === 0 ? "configuration_failure" : "policy_approval",
             action_status: "not_applied",
@@ -286,7 +305,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("operations overview", ()
       }))).toEqual(fixtures.map((fixture) => fixture.quota).reverse());
       expect(overview.decisions.at(-1)).toMatchObject({
         action: "configuration_failure",
-        pullNumber: 7,
+        pullNumber: 42,
       });
     });
   });

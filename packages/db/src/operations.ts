@@ -179,7 +179,7 @@ export async function readOperationsOverview(
           "routing_decisions.selected_reviewers",
           "routing_decisions.details",
           "routing_decisions.created_at",
-          sql<number | null>`case
+          sql<number | null>`coalesce(routing_decisions.pull_number, case
             when jsonb_typeof(routing_decisions.details -> 'pullNumber') = 'number'
               and routing_decisions.details ->> 'pullNumber' ~ '^[1-9][0-9]{0,9}$'
             then case
@@ -188,7 +188,7 @@ export async function readOperationsOverview(
               else null
             end
             else null
-          end`.as("pull_number"),
+          end)`.as("pull_number"),
         ])
         .where("routing_decisions.workspace_id", "=", workspaceId)
         .whereRef("repositories.workspace_id", "=", "routing_decisions.workspace_id")
