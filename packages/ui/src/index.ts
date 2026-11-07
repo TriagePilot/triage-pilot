@@ -35,3 +35,4 @@ export type {
 export { Analytics, type AnalyticsProps } from "./components/Analytics.js";
 export { AnalyticsCharts } from "./components/AnalyticsCharts.js";
 export type { AnalyticsApiClient } from "./analytics-api.js";
+export { OverviewPage, RepositoriesPage, RoutingDecisionsPage, SystemHealthPage, type OperationsPageProps, type OperationsPageNavigation, type RoutingDecisionsPageProps } from "./components/OperationsPages.js";

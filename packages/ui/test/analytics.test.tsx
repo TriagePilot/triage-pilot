@@ -196,3 +196,38 @@ it("uses the latest unauthorized callback for a pending request", async () => {
   await act(async () => pending.reject(Object.assign(new Error("Session expired"), { status: 401 })));
   expect(previous).not.toHaveBeenCalled(); expect(latest).toHaveBeenCalledExactlyOnceWith("Session expired");
 });
+
+it("paginates current workload five rows at a time and resets for scope filters", async () => {
+  const client = api();
+  vi.mocked(client.readCurrentWorkload).mockResolvedValue({
+    ...current,
+    rows: Array.from({ length: 12 }, (_, i) => ({
+      actor: `developer-${String(i).padStart(2, "0")}`,
+      pendingCount: i,
+      estimatedHours: i / 2,
+    })),
+  });
+  await mount(client);
+  await click("Reviewer workload");
+  const body = () =>
+    container.querySelector('[role="tabpanel"]:not([hidden]) tbody')!;
+  expect(body().querySelectorAll("tr")).toHaveLength(5);
+  await click("Next");
+  expect(body().textContent).toContain("developer-05");
+  expect(body().textContent).not.toContain("developer-00");
+  await change("Repository scope", "repo");
+  expect(body().textContent).toContain("developer-00");
+});
+it("refreshes analytics history and current workload together and retries failed history", async () => {
+  const client = api();
+  await mount(client);
+  vi.mocked(client.readAnalytics).mockRejectedValueOnce(
+    new Error("temporary history outage"),
+  );
+  await click("Refresh analytics");
+  expect(text()).toContain("temporary history outage");
+  expect(client.readCurrentWorkload).toHaveBeenCalledTimes(2);
+  await click("Retry history");
+  expect(text()).not.toContain("temporary history outage");
+  expect(text()).toContain("25.0 h");
+});

@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
+import { OperationsDashboard } from "@triagepilot/ui";
 import { App, Dashboard, LoginScreen } from "../src/admin/App";
 import type { OperationsOverview } from "../src/admin/api";
 
@@ -28,8 +29,8 @@ describe("admin application", () => {
     expect(html).toContain('role="alert"');
     expect(html).toContain("Sign in to TriagePilot");
     expect(html).toContain("Credentials are verified on your infrastructure");
-    expect(html).toContain('src="/assets/triage-pilot-logo.png"');
-    expect(html).toContain('alt="TriagePilot"');
+    expect(html).toContain('src="/assets/routing-mark.svg"');
+    expect(html).toContain('aria-label="TriagePilot"');
     expect(html).not.toContain('class="routing-mark"');
     expect(html).not.toContain("GitHub private key");
     expect(html).not.toContain("Webhook secret");
@@ -39,7 +40,11 @@ describe("admin application", () => {
 
   it("wraps API-backed operations in the application navigation shell", () => {
     const html = renderToStaticMarkup(
-      <Dashboard username="admin" overview={overview} onLogout={async () => {}} />,
+      <Dashboard
+        username="admin"
+        overview={overview}
+        onLogout={async () => {}}
+      />,
     );
 
     expect(html).toContain('class="app-sidebar"');
@@ -50,9 +55,9 @@ describe("admin application", () => {
     expect(html).toContain('href="#analytics"');
     expect(html).toContain('href="#reviewer-availability"');
     expect(html).toContain('href="#system-health"');
-    expect(html).toContain('id="repositories"');
-    expect(html).toContain('id="decisions"');
-    expect(html).toContain('src="/assets/triage-pilot-logo.png"');
+    expect(html).toContain('href="#effective-configuration"');
+    expect(html).toContain("Latest routing decisions");
+    expect(html).toContain('src="/assets/routing-mark-inverse.svg"');
     expect(html).toContain('role="img" aria-label="TriagePilot"');
     expect(html).toContain("Signed in as admin");
     expect(html).not.toContain("Global search");
@@ -63,11 +68,11 @@ describe("admin application", () => {
 
   it("keeps heartbeat copy in English when the browser default locale is Slovak", () => {
     const RealDateTimeFormat = Intl.DateTimeFormat;
-    const formatter = vi.spyOn(Intl, "DateTimeFormat").mockImplementation(
-      function DateTimeFormat(locales, options) {
+    const formatter = vi
+      .spyOn(Intl, "DateTimeFormat")
+      .mockImplementation(function DateTimeFormat(locales, options) {
         return new RealDateTimeFormat(locales ?? "sk", options);
-      },
-    );
+      });
     try {
       const html = renderToStaticMarkup(
         <Dashboard
@@ -91,7 +96,11 @@ describe("admin application", () => {
 
   it("renders the operational chain, recovery controls, and semantic data tables", () => {
     const html = renderToStaticMarkup(
-      <Dashboard username="admin" overview={overview} onLogout={async () => {}} />,
+      <LegacyOperations
+        username="admin"
+        overview={overview}
+        onLogout={async () => {}}
+      />,
     );
 
     expect(html).toContain("Operations ledger");
@@ -121,7 +130,7 @@ describe("admin application", () => {
     expect(html).toContain('aria-labelledby="decisions-heading"');
     expect(html).toContain('aria-labelledby="job-failures-heading"');
     expect(html).toContain('aria-labelledby="action-failures-heading"');
-    expect(html.match(/<button/g)).toHaveLength(3);
+    expect(html.match(/<button/g)).toHaveLength(2);
     expect(html).toContain("Run missing change request");
     expect(html).toContain("Re-run routing");
     expect(html).toContain('id="routing-recovery-url"');
@@ -130,7 +139,7 @@ describe("admin application", () => {
 
   it("explains empty operational sections without suggesting dashboard mutations", () => {
     const html = renderToStaticMarkup(
-      <Dashboard
+      <LegacyOperations
         username="admin"
         overview={{
           ...overview,
@@ -142,7 +151,9 @@ describe("admin application", () => {
       />,
     );
 
-    expect(html).toContain("No repositories are connected to this provider connection.");
+    expect(html).toContain(
+      "No repositories are connected to this provider connection.",
+    );
     expect(html).toContain("No routing decisions have been recorded yet.");
     expect(html).toContain("No permanent job failures.");
     expect(html).toContain("No action failures.");
@@ -150,7 +161,7 @@ describe("admin application", () => {
 
   it("keeps an operational error visible without replacing readable data", () => {
     const html = renderToStaticMarkup(
-      <Dashboard
+      <LegacyOperations
         username="admin"
         overview={overview}
         error="Could not sign out."
@@ -165,7 +176,7 @@ describe("admin application", () => {
 
   it("renders an explicit em dash for an unavailable legacy pull number", () => {
     const html = renderToStaticMarkup(
-      <Dashboard
+      <LegacyOperations
         username="admin"
         overview={{
           ...overview,
@@ -182,24 +193,27 @@ describe("admin application", () => {
   it.each([
     ["success", "Approved"],
     ["failure", "Failed"],
-  ] as const)("renders %s human-review state as %s", (policyCheckState, label) => {
-    const html = renderToStaticMarkup(
-      <Dashboard
-        username="admin"
-        overview={{
-          ...overview,
-          decisions: [{ ...overview.decisions[0]!, policyCheckState }],
-        }}
-        onLogout={async () => {}}
-      />,
-    );
+  ] as const)(
+    "renders %s human-review state as %s",
+    (policyCheckState, label) => {
+      const html = renderToStaticMarkup(
+        <LegacyOperations
+          username="admin"
+          overview={{
+            ...overview,
+            decisions: [{ ...overview.decisions[0]!, policyCheckState }],
+          }}
+          onLogout={async () => {}}
+        />,
+      );
 
-    expect(html).toContain(label);
-  });
+      expect(html).toContain(label);
+    },
+  );
 
   it("explains the rules that contributed to a routing decision's risk score", () => {
     const html = renderToStaticMarkup(
-      <Dashboard
+      <LegacyOperations
         username="admin"
         overview={
           {
@@ -268,7 +282,10 @@ const overview: OperationsOverview = {
     {
       id: "decision-1",
       repository: { label: "acme/api", href: "https://github.com/acme/api" },
-      changeRequest: { label: "#7", href: "https://github.com/acme/api/pull/7" },
+      changeRequest: {
+        label: "#7",
+        href: "https://github.com/acme/api/pull/7",
+      },
       mode: "shadow",
       action: "request_human_review",
       actionStatus: "not_applied",
@@ -285,7 +302,11 @@ const overview: OperationsOverview = {
   ],
   failures: {
     jobs: [
-      { id: "job-1", error: "GitHub permission denied", failedAt: "2026-08-18T10:01:00.000Z" },
+      {
+        id: "job-1",
+        error: "GitHub permission denied",
+        failedAt: "2026-08-18T10:01:00.000Z",
+      },
     ],
     actions: [
       {
@@ -296,5 +317,37 @@ const overview: OperationsOverview = {
       },
     ],
   },
-  worker: { available: true, workerId: "worker-1", lastHeartbeatAt: "2026-08-18T10:02:00.000Z" },
+  worker: {
+    available: true,
+    workerId: "worker-1",
+    lastHeartbeatAt: "2026-08-18T10:02:00.000Z",
+  },
 };
+
+function LegacyOperations({
+  overview: data,
+  error,
+}: {
+  username: string;
+  overview: OperationsOverview;
+  error?: string;
+  onLogout(): Promise<void>;
+}) {
+  return (
+    <>
+      {error ? <p role="alert">{error}</p> : null}
+      <OperationsDashboard
+        api={{} as never}
+        workspace={{ id: "ws", displayName: "Self-hosted" }}
+        initialOverview={data}
+        authorization={{
+          canViewOperations: true,
+          canManageConfiguration: false,
+          canManageReviewerAvailability: true,
+          canRunRoutingRecovery: true,
+        }}
+        navigation={{ hrefFor: () => "#effective-configuration" }}
+      />
+    </>
+  );
+}
