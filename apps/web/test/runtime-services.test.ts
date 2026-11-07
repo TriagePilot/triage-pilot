@@ -2,9 +2,99 @@ import { describe, expect, it, vi } from "vitest";
 import { ensureLocalWorkspace } from "@triagepilot/db";
 
 import { createWebRuntimeServices } from "../src/runtime-services";
+import { createSelfHostedRoutingRecovery } from "../src/composition/self-hosted";
+import { createWorkerRoutingServiceFactory } from "../../worker/src/runtime-services";
+import { processRoutingJob, type RoutingJobMessage } from "../../worker/src/processor";
 import { withPostgresTestDatabase } from "../../../packages/db/test/postgres";
 
 describe("web runtime services", () => {
+  it.runIf(Boolean(process.env.TEST_DATABASE_URL))(
+    "links a worker-persisted decision and queues recovery without legacy JSON",
+    async () => {
+      await withPostgresTestDatabase(async (db) => {
+        const workspaceId = await ensureLocalWorkspace(db);
+        const connection = await db.insertInto("provider_connections").values({
+          workspace_id: workspaceId,
+          provider: "github",
+          external_connection_id: "99",
+          workspace_login: "acme",
+          account_type: "Organization",
+          status: "active",
+          permissions: {},
+        }).returning("id").executeTakeFirstOrThrow();
+        await db.insertInto("repositories").values({
+          workspace_id: workspaceId,
+          provider: "github",
+          provider_connection_id: connection.id,
+          external_repository_id: "101",
+          owner: "acme",
+          name: "api",
+          default_branch: "main",
+          config_state: "unknown",
+        }).execute();
+        const input = runtimeInput(db, () => new Date(), workspaceId);
+        const message: RoutingJobMessage = {
+          kind: "process_change_request",
+          deliveryId: "worker-decision",
+          eventName: "change_request.opened",
+          workspaceId,
+          providerConnectionId: connection.id,
+          changeRequest: {
+            repository: { provider: "github", externalId: "101", owner: "acme", name: "api" },
+            externalId: "42",
+            number: 42,
+            baseRevision: "base-123",
+            headRevision: "head-123",
+          },
+          isDraft: false,
+          routingKey: "routing:worker-decision",
+        };
+        const worker = createWorkerRoutingServiceFactory({
+          db,
+          github: input.github,
+          createConfigurationSource: () => ({
+            async loadOrganization() { return null; },
+            async loadRepository() {
+              return { content: "version: 1\nmode: invalid\n", revision: "base-123", path: ".triagepilot.yml" };
+            },
+          }),
+        })(message);
+        await processRoutingJob(message, worker);
+        const stored = await db.selectFrom("routing_decisions").select(["id", "pull_number", "details"])
+          .executeTakeFirstOrThrow();
+        expect(stored.pull_number).toBe(42);
+        expect(stored.details).toMatchObject({ changeRequestNumber: 42 });
+        expect(stored.details).not.toHaveProperty("pullNumber");
+
+        const providerRequest = vi.fn(async () => ({ data: {
+          state: "open", draft: false, base: { sha: "base-current" }, head: { sha: "head-current" },
+        } }));
+        const recovery = createSelfHostedRoutingRecovery({
+          db, workspaceId, github: input.github,
+          createRequester: async () => ({ request: providerRequest }),
+          createRunId: () => "regression-recovery",
+        });
+        const services = createWebRuntimeServices({ ...input, queueRoutingRecovery: recovery.queue });
+        const overview = await services.listOperationsOverview();
+        expect(overview.decisions).toHaveLength(1);
+        expect(overview.decisions[0]).toMatchObject({
+          id: stored.id,
+          changeRequest: { label: "#42", href: "https://github.com/acme/api/pull/42" },
+        });
+        const queued = await services.queueRoutingRecovery({ decisionId: overview.decisions[0]!.id });
+        expect(providerRequest).toHaveBeenCalledExactlyOnceWith("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
+          owner: "acme", repo: "api", pull_number: 42,
+        });
+        await expect(db.selectFrom("jobs").select(["id", "payload"]).execute()).resolves.toEqual([{
+          id: queued.jobId,
+          payload: expect.objectContaining({
+            changeRequest: expect.objectContaining({ number: 42 }),
+          }),
+        }]);
+      });
+    },
+  );
+
   it("delegates routing recovery to the provider-aware self-hosted composition", async () => {
     const db = new NoAccessDb();
     const queueRoutingRecovery = vi.fn(async () => ({ jobId: "job-recovery-1", routingKey: "routing-key-1" }));

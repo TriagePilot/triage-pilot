@@ -23,8 +23,12 @@ afterEach(async () => {
 
 describe("mounted admin application", () => {
   it("keeps sidebar worker health in sync when recovery refreshes the ledger", async () => {
-    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
-      if (input === "/api/operations/routing-runs") return Response.json({ jobId: "job-2" });
+    const routingRequests: RequestInit[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === "/api/operations/routing-runs") {
+        routingRequests.push(init!);
+        return Response.json({ jobId: "job-2" });
+      }
       if (input === "/api/operations/overview") {
         return Response.json({
           ...emptyOverview,
@@ -49,10 +53,20 @@ describe("mounted admin application", () => {
       await flushAsyncWork();
     });
     expect(container.querySelector(".worker-summary strong")?.textContent).toBe("Worker healthy");
+    const pullRequestLink = container.querySelector<HTMLAnchorElement>('a[href="https://github.com/acme/api/pull/7"]');
+    expect(pullRequestLink?.textContent).toBe("#7");
+    expect(pullRequestLink?.target).toBe("_blank");
+    const rerunButton = buttonNamed(container, "Re-run routing");
+    expect(rerunButton).not.toBeNull();
 
     await act(async () => {
-      buttonNamed(container, "Re-run routing")?.click();
+      rerunButton!.click();
       await flushAsyncWork();
+    });
+    expect(routingRequests).toHaveLength(1);
+    expect(routingRequests[0]).toMatchObject({
+      method: "POST",
+      body: JSON.stringify({ decisionId: "decision-1" }),
     });
     expect(container.querySelector(".status-ledger")?.textContent).toContain("Worker unavailable");
     expect(container.querySelector(".worker-summary strong")?.textContent).toBe("Worker unavailable");
