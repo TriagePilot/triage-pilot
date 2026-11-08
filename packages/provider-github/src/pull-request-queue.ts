@@ -64,7 +64,15 @@ export function createGitHubPullRequestQueueReader(requester: Requester) {
   }
   return {
     async listRepositories(context: Context): Promise<RepositoryRef[]> {
-      const entries = await pages(context, "GET /installation/repositories", {}, (data) => record(data) && Number.isSafeInteger(data.total_count) && Number(data.total_count) >= 0 ? data.repositories : invalid());
+      let expectedCount: number | undefined;
+      const entries = await pages(context, "GET /installation/repositories", {}, (data) => {
+        if (!record(data) || !Number.isSafeInteger(data.total_count) || Number(data.total_count) < 0) return invalid();
+        const count = Number(data.total_count);
+        if (expectedCount !== undefined && expectedCount !== count) invalid();
+        expectedCount = count;
+        return data.repositories;
+      });
+      if (entries.length !== expectedCount) invalid();
       const result: RepositoryRef[] = []; const ids = new Set<string>(); const names = new Set<string>();
       for (const entry of entries) {
         if (!record(entry) || !record(entry.owner)) invalid();

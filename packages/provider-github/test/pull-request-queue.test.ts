@@ -41,3 +41,67 @@ describe("GitHub queue reader", () => {
     }
   });
 });
+
+describe("queue acquisition boundaries", () => {
+  it.each([
+    [{ total_count: 101, repositories: [] }],
+    [{ total_count: 101, repositories: [repo()] }],
+    [{ total_count: 101, repositories: Array.from({ length: 100 }, (_, i) => repo(i + 1)) }, { total_count: 102, repositories: [repo(101)] }],
+  ])("rejects incomplete or inconsistent inventory %#", async (...responses) => {
+    let index = 0;
+    const reader = createGitHubPullRequestQueueReader({ request: async () => ({ data: responses[index++] }) });
+    await expect(reader.listRepositories(context())).rejects.toMatchObject({ reason: "invalid_response" });
+  });
+  it("stops before a second page when authority is revoked or cancelled", async () => {
+    for (const mode of ["authority", "abort"]) {
+      const controller = new AbortController();
+      const assertAuthorized = vi.fn(async () => { if (mode === "authority" && assertAuthorized.mock.calls.length === 2) throw new Error("revoked"); });
+      const request = vi.fn(async () => { if (mode === "abort") controller.abort(); return { data: { total_count: 101, repositories: Array.from({ length: 100 }, (_, i) => repo(i + 1)) } }; });
+      const reader = createGitHubPullRequestQueueReader({ request });
+      await expect(reader.listRepositories({ signal: controller.signal, assertAuthorized, githubOrganization: "acme" })).rejects.toThrow();
+      expect(request).toHaveBeenCalledTimes(1);
+    }
+  });
+  it("stops before fallback on authority loss and rejects mismatched repositories", async () => {
+    const assertAuthorized = vi.fn(async () => { if (assertAuthorized.mock.calls.length === 2) throw new Error("revoked"); });
+    const request = vi.fn(async () => ({ data: [{ ...pr(), requested_reviewers: undefined }] }));
+    await expect(createGitHubPullRequestQueueReader({ request }).listOpenPullRequests({ ...context(), assertAuthorized, repository })).rejects.toThrow("revoked");
+    expect(request).toHaveBeenCalledTimes(1);
+    const mismatch = createGitHubPullRequestQueueReader({ request: async () => ({ data: [{ ...pr(), base: { sha: "base", repo: repo(2) } }] }) });
+    await expect(mismatch.listOpenPullRequests({ ...context(), repository })).rejects.toMatchObject({ reason: "invalid_response" });
+  });
+  it("does not issue a fallback request after cancellation", async () => {
+    const controller = new AbortController();
+    const request = vi.fn(async () => { controller.abort(); return { data: [{ ...pr(), requested_reviewers: undefined }] }; });
+    await expect(createGitHubPullRequestQueueReader({ request }).listOpenPullRequests({ ...context(), signal: controller.signal, repository })).rejects.toThrow();
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+  it("uses stable IDs across renamed logins and detects target, head and base changes", async () => {
+    const bot = { id: 33, login: "robot", type: "Bot" };
+    const listed = { ...pr(), requested_reviewers: [bot] };
+    const pull = (await createGitHubPullRequestQueueReader({ request: async () => ({ data: [listed] }) }).listOpenPullRequests({ ...context(), repository }))[0]!;
+    expect(pull.requestedUsers).toEqual([{ id: "33", login: "robot", type: "bot" }]);
+    let detail = { ...listed, requested_reviewers: [{ ...bot, login: "renamed" }] };
+    const reader = createGitHubPullRequestQueueReader({ request: async (route) => ({ data: route.endsWith("/reviews") ? [] : detail }) });
+    const read = () => reader.readReviewState({ ...context(), pullRequest: pull, includeLifecycle: false });
+    expect(await read()).toMatchObject({ status: "complete" });
+    detail = { ...detail, head: { sha: "new" } }; expect(await read()).toMatchObject({ status: "changed" });
+    detail = { ...listed, base: { ...listed.base, sha: "new" } }; expect(await read()).toMatchObject({ status: "changed" });
+    detail = { ...listed, requested_reviewers: [user] }; expect(await read()).toMatchObject({ status: "changed" });
+  });
+  it("paginates timeline and preserves unavailable lifecycle on transient failure", async () => {
+    const pull = (await createGitHubPullRequestQueueReader({ request: async () => ({ data: [pr()] }) }).listOpenPullRequests({ ...context(), repository }))[0]!;
+    let fail = false;
+    const reader = createGitHubPullRequestQueueReader({ request: async (route, params) => {
+      if (route.endsWith("/reviews")) return { data: [] };
+      if (route.endsWith("/timeline")) {
+        if (fail) throw { status: 500, message: "private" };
+        return { data: params.page === 1 ? Array.from({ length: 100 }, () => ({ event: "commented", body: "private" })) : [{ event: "reopened", created_at: "2020-02-01T00:00:00Z" }] };
+      }
+      return { data: pr() };
+    } });
+    const read = () => reader.readReviewState({ ...context(), pullRequest: pull, includeLifecycle: true });
+    expect(await read()).toMatchObject({ lifecycle: { status: "complete", openedSince: "2020-02-01T00:00:00Z" } });
+    fail = true; expect(await read()).toMatchObject({ lifecycle: { status: "unavailable", openedSince: null } });
+  });
+});
