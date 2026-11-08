@@ -4,6 +4,7 @@ import { queuePullRequestKey } from "@triagepilot/contracts";
 import { assertPullRequestQueueScopeActive, readQueueAssessments, resolvePullRequestQueueScope } from "../src/pull-request-queue";
 import { queuePull } from "../../../test/pull-request-queue-fixtures";
 import { withPostgresTestDatabase } from "./postgres";
+import { upsertConfiguredProviderConnection } from "../src/provider-connections";
 
 type Db = Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0];
 async function seed(db: Db, key: string) {
@@ -13,6 +14,8 @@ async function seed(db: Db, key: string) {
   return { workspaceId: workspace.id, connectionId: connection.id, repo };
 }
 async function decision(db: Db, workspaceId: string, repositoryId: string, key: string, date: string, status: "succeeded" | "failed", number = 7) {
+  const repository = await db.selectFrom("repositories").select("provider_connection_id").where("id", "=", repositoryId).executeTakeFirstOrThrow();
+  await db.insertInto("jobs").values({ workspace_id: workspaceId, provider: "github", provider_connection_id: repository.provider_connection_id, kind: "process_pull_request", payload: {}, idempotency_key: key, created_at: new Date(date) }).execute();
   await db.insertInto("routing_decisions").values({ workspace_id: workspaceId, repository_id: repositoryId, delivery_id: key, routing_key: key, action: "request_human_review", risk_score: 1, selected_reviewer: "alice", selected_reviewers: JSON.stringify(["alice"]), no_human_reason: null, pull_number: number, change_request_id: String(number), head_sha: key, mode: "shadow", action_status: status, action_error: status === "failed" ? "secret error" : null, details: { risk: { tier: "medium" }, routing: { requestedReviewerCount: 1, selectedReviewers: ["alice"] } }, effective_config_hash: key, inheritance_mode: "legacy", created_at: new Date(date) }).execute();
 }
 const ref = (externalId: string) => ({ provider: "github" as const, externalId, owner: "acme", name: externalId });
@@ -61,6 +64,34 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("pull request queue scope
     expect(facts.size).toBe(1);
     expect(returned).toHaveLength(1);
     expect(returned[0]).toMatchObject({ head_sha: "new" });
+  }));
+  it("does not attach retained decisions to a replacement connection sharing the repository row", async () => withPostgresTestDatabase(async db => {
+    const local = await seed(db, "old-installation"); const api = await local.repo("api");
+    await decision(db, local.workspaceId, api.id, "old-decision", "2026-01-01", "succeeded");
+    await db.updateTable("routing_decisions").set({ mode: "enforce", policy_check_state: "success", repository_config_revision: "base" }).execute();
+    await db.updateTable("provider_connections").set({ status: "suspended" }).where("id", "=", local.connectionId).execute();
+    await upsertConfiguredProviderConnection(db, local.workspaceId, { provider: "github", externalConnectionId: "replacement", workspaceLogin: "acme", accountType: "Organization", repositories: [{ provider: "github", externalRepositoryId: "api", owner: "acme", name: "api" }] });
+    const reassigned = await db.selectFrom("repositories").selectAll().where("id", "=", api.id).executeTakeFirstOrThrow();
+    expect(reassigned.provider_connection_id).not.toBe(local.connectionId);
+    const scope = await resolvePullRequestQueueScope(db, local.workspaceId, { githubOrganization: "acme" });
+    const pulls = [queuePull({ repository: ref("api"), number: 7, headRevision: "old-decision" })];
+    expect(await readQueueAssessments(db, scope, pulls)).toEqual(new Map());
+    // A routing key can be reused after completed-job retention. The new job
+    // must not retroactively prove that a preserved decision came from it.
+    await db.deleteFrom("jobs").where("idempotency_key", "=", "old-decision").execute();
+    await db.insertInto("jobs").values({ workspace_id: local.workspaceId, provider: "github", provider_connection_id: reassigned.provider_connection_id, kind: "process_pull_request", payload: {}, idempotency_key: "old-decision", created_at: new Date("2026-01-02") }).execute();
+    expect(await readQueueAssessments(db, scope, pulls)).toEqual(new Map());
+    await decision(db, local.workspaceId, api.id, "current-decision", "2026-01-02", "succeeded");
+    await db.updateTable("routing_decisions").set({ mode: "enforce", policy_check_state: "success", repository_config_revision: "base" }).where("routing_key", "=", "current-decision").execute();
+    expect((await readQueueAssessments(db, scope, pulls)).get(queuePullRequestKey(ref("api"), 7))).toMatchObject({ headRevision: "current-decision", mode: "enforce", actionStatus: "succeeded", policyCheckState: "success" });
+  }));
+  it("does not fall back to an older decision when the latest origin evidence was retained away", async () => withPostgresTestDatabase(async db => {
+    const local = await seed(db, "local"); const api = await local.repo("api");
+    await decision(db, local.workspaceId, api.id, "proved", "2026-01-01", "succeeded");
+    await decision(db, local.workspaceId, api.id, "unproved", "2026-01-02", "failed");
+    await db.deleteFrom("jobs").where("idempotency_key", "=", "unproved").execute();
+    const scope = await resolvePullRequestQueueScope(db, local.workspaceId, { githubOrganization: "acme" });
+    expect(await readQueueAssessments(db, scope, [queuePull({ repository: ref("api"), number: 7 })])).toEqual(new Map());
   }));
   it("rejects copied or modified scopes, connection changes, tombstones, and membership changes", async () => withPostgresTestDatabase(async db => {
     const local = await seed(db, "local"); const repo = await local.repo("api");

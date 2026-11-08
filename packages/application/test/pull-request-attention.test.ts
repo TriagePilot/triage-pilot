@@ -35,6 +35,14 @@ describe("pull request attention", () => {
     expect(run({}, { lifecycle: { status: "complete", openedSince: "2026-01-03T00:00:00Z" } }).assessmentStatus).toBe("historical");
     expect(run({}, {}, null).badge).toBe("policy_unknown");
   });
+  it("reports historical routing shortages without asserting current reviewer availability", () => {
+    const attention = run({}, {}, { ...assessment, action: "no_eligible_reviewer", policyCheckState: "failure" });
+    expect(attention).toMatchObject({ group: "reviewer_gap", badge: "needs_reviewer", approvedCount: 0, requiredCount: 1 });
+    expect(attention.reason).toContain("human approvals");
+    expect(attention.reason).toContain("no human review request is outstanding");
+    expect(attention.secondaryReasons).toContain("No eligible reviewer was found at routing time; current reviewer availability is unknown.");
+    expect(attention.reason).not.toContain("No eligible human reviewer is available");
+  });
   it("uses core approval semantics", () => {
     const reviews = [review("a", "APPROVED"), review("a", "COMMENTED", "2026-01-03T00:00:00Z"), review("b", "APPROVED"), review("b", "DISMISSED", "2026-01-03T00:00:00Z"), review("outsider", "APPROVED")];
     expect(run({}, { reviews }).approvedCount).toBe(activeApprovedReviewers(reviews.map((r) => ({ actor: r.actor.id, actorType: r.actor.type, state: r.state.toLowerCase(), submittedAt: r.submittedAt }))).length);

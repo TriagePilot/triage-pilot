@@ -42,10 +42,24 @@ export async function readQueueAssessments(db: Kysely<Database>, scope: PullRequ
     const rows = await db.selectFrom("routing_decisions").innerJoin("repositories", join => join.onRef("repositories.id", "=", "routing_decisions.repository_id").onRef("repositories.workspace_id", "=", "routing_decisions.workspace_id")).innerJoin("provider_connections", join => join.onRef("provider_connections.id", "=", "repositories.provider_connection_id").onRef("provider_connections.workspace_id", "=", "repositories.workspace_id").onRef("provider_connections.provider", "=", "repositories.provider"))
       .distinctOn(["routing_decisions.repository_id", "routing_decisions.pull_number"])
       .select(["routing_decisions.id", "routing_decisions.repository_id", "routing_decisions.change_request_id", "routing_decisions.pull_number", "routing_decisions.created_at", "routing_decisions.action_applied_at", "routing_decisions.mode", "routing_decisions.action", "routing_decisions.action_status", "routing_decisions.risk_score", "routing_decisions.details", "routing_decisions.head_sha", "routing_decisions.repository_config_revision", "routing_decisions.policy_check_state", "routing_decisions.action_error", "routing_decisions.selected_reviewers", "repositories.external_repository_id", "repositories.provider"])
+      // Repository rows can move to a replacement installation. Only the retained
+      // routing job proves the decision's originating immutable connection.
+      // It must predate the decision: retained-away jobs can have their keys reused.
+      // Keep this as a projection: filtering before DISTINCT ON could revive an
+      // older successful decision when the latest decision has lost provenance.
+      .select(sql<boolean>`exists (
+        select 1 from jobs
+        where jobs.workspace_id = routing_decisions.workspace_id
+          and jobs.provider = repositories.provider
+          and jobs.provider_connection_id = ${scope.providerConnectionId}
+          and jobs.kind = 'process_pull_request'
+          and jobs.idempotency_key = routing_decisions.routing_key
+          and jobs.created_at <= routing_decisions.created_at
+      )`.as("origin_proven"))
       .where("routing_decisions.workspace_id", "=", scope.workspaceId).where("repositories.provider", "=", "github").where("repositories.provider_connection_id", "=", scope.providerConnectionId).where("provider_connections.status", "=", "active").where(sql<boolean>`exists (select 1 from jsonb_to_recordset(${JSON.stringify(requested)}::jsonb) as requested(repository_id uuid, pull_number bigint) where requested.repository_id = routing_decisions.repository_id and requested.pull_number = routing_decisions.pull_number)`)
       .orderBy("routing_decisions.repository_id").orderBy("routing_decisions.pull_number").orderBy("routing_decisions.created_at", "desc").orderBy("routing_decisions.id", "desc").execute();
     for (const row of rows) {
-      if (row.pull_number === null) continue;
+      if (row.pull_number === null || !row.origin_proven) continue;
       const key = queuePullRequestKey({ provider: row.provider, externalId: row.external_repository_id, owner: "", name: "" }, row.pull_number);
       const known = scope.knownRepositories.find(r => r.recordId === row.repository_id)!;
       const fact = normalizeAnalyticsDecision({ ...row, change_request_id: row.change_request_id?.trim() || String(row.pull_number), repository_id: known.recordId, changeRequest: { repositoryRecordId: known.recordId, repository: known.repository, providerConnectionId: scope.providerConnectionId, changeRequestId: row.change_request_id ?? "", changeRequestNumber: row.pull_number } });

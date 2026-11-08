@@ -29,16 +29,52 @@ it("renders empty and partial snapshots accurately", async () => {
   await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
   expect(container.textContent).toContain("Partial coverage"); expect(container.textContent).not.toContain("No open pull requests.");
 });
-it("keeps rows during refresh, displays stale failures, and clears them on unauthorized", async () => {
-  let reject!: (reason: unknown) => void;
-  const pending = new Promise<never>((_, no) => { reject = no; });
-  const api = { readPullRequestQueue: vi.fn().mockResolvedValueOnce(queueSnapshot({ items: [item], totalOpen: 1 })).mockReturnValueOnce(pending).mockRejectedValueOnce(Object.assign(new Error("Signed out"), { status: 401 })) };
-  const onUnauthorized = vi.fn(); container = document.createElement("div"); document.body.append(container); root = createRoot(container);
-  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} onUnauthorized={onUnauthorized} />));
+it("keeps rows while updating and displays only server-revalidated stale snapshots", async () => {
+  let resolve!: (value: ReturnType<typeof queueSnapshot>) => void;
+  const pending = new Promise<ReturnType<typeof queueSnapshot>>((yes) => { resolve = yes; });
+  const snapshot = queueSnapshot({ items: [item], totalOpen: 1 });
+  const api = { readPullRequestQueue: vi.fn().mockResolvedValueOnce(snapshot).mockReturnValueOnce(pending) };
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
   await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Refresh")!.click());
   expect(container.textContent).toContain("Updating pull requests"); expect(container.textContent).toContain("Change");
-  await act(async () => reject(new Error("offline"))); expect(container.textContent).toContain("Refresh failed"); expect(container.textContent).toContain("Change");
-  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Refresh")!.click()); expect(onUnauthorized).toHaveBeenCalledWith("Signed out"); expect(container.textContent).not.toContain("Change");
+  await act(async () => resolve({ ...snapshot, stale: true, refreshError: "Refresh unavailable" }));
+  expect(container.textContent).toContain("Stale snapshot"); expect(container.textContent).toContain("Change");
+  expect(container.querySelector("time")?.dateTime).toBe(snapshot.observedAt);
+});
+it.each([401, 404, 503, null])("clears protected rows and details when refresh cannot verify authority (%s)", async (status) => {
+  const reason = Object.assign(new Error("Authority could not be verified"), status === null ? {} : { status });
+  const api = { readPullRequestQueue: vi.fn().mockResolvedValueOnce(queueSnapshot({ items: [item], totalOpen: 1 })).mockRejectedValueOnce(reason) };
+  const onUnauthorized = vi.fn(); container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} onUnauthorized={onUnauthorized} />));
+  await act(async () => container.querySelector<HTMLButtonElement>(".queue-title")!.click());
+  expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Refresh")!.click());
+  expect(container.textContent).toContain("Pull requests unavailable");
+  expect(container.textContent).not.toContain("Change");
+  expect(container.querySelector('[role="dialog"]')).toBeNull();
+  expect(container.querySelector('a[href="https://example.com/pr"]')).toBeNull();
+  if (status === 401) expect(onUnauthorized).toHaveBeenCalledWith(reason.message);
+  else expect(onUnauthorized).not.toHaveBeenCalled();
+});
+it("refreshes an open panel from the current scoped PR and closes it when that PR disappears", async () => {
+  const updated = { ...item, pullRequest: { ...item.pullRequest, title: "Updated change", requestedUsers: [{ id: "3", login: "charlie", type: "human" as const }], requestedTeams: [] }, attention: { ...item.attention, actorIds: ["3"], teamIds: [] } };
+  const otherRepo = { ...item, pullRequest: { ...item.pullRequest, repository: { ...item.pullRequest.repository, externalId: "other" }, title: "Other repository change" } };
+  const api = { readPullRequestQueue: vi.fn().mockResolvedValueOnce(queueSnapshot({ items: [item, otherRepo], totalOpen: 2 })).mockResolvedValueOnce(queueSnapshot({ items: [updated, otherRepo], totalOpen: 2 })).mockResolvedValueOnce(queueSnapshot({ items: [otherRepo], totalOpen: 1 })).mockResolvedValueOnce(queueSnapshot({ items: [updated], totalOpen: 1 })) };
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
+  await act(async () => container.querySelector<HTMLButtonElement>(".queue-title")!.click());
+  expect(container.querySelector('[role="dialog"]')?.textContent).toContain("bob");
+  const refresh = () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Refresh")!.click();
+  await act(async () => refresh());
+  expect(container.querySelector('[role="dialog"]')?.textContent).toContain("Updated change");
+  expect(container.querySelector('[role="dialog"]')?.textContent).toContain("Next action: charlie");
+  expect(container.querySelector('[role="dialog"]')?.textContent).not.toContain("bob");
+  await act(async () => refresh());
+  expect(container.querySelector('[role="dialog"]')).toBeNull();
+  expect(container.textContent).toContain("Other repository change");
+  await act(async () => refresh());
+  expect(container.querySelector('[role="dialog"]')).toBeNull();
 });
 it("limits each group to 50 and changes local filters without another request", async () => {
   const items = Array.from({ length: 51 }, (_, index) => ({ ...item, pullRequest: { ...item.pullRequest, number: index + 1, title: `Change ${index + 1}` } }));
