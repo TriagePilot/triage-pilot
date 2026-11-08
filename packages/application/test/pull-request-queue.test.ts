@@ -5,7 +5,7 @@ import { createPullRequestQueueService, type PullRequestQueuePorts } from "../sr
 const scope: PullRequestQueueScope = { workspaceId: "w", providerConnectionId: "c", externalConnectionId: "1", githubOrganization: "acme", knownRepositories: [] };
 function setup() {
   vi.useFakeTimers(); vi.setSystemTime(new Date("2026-01-01")); let id = 0;
-  const ports = { now: () => new Date(), createSnapshotId: () => String(++id), resolveScope: vi.fn<PullRequestQueuePorts["resolveScope"]>(async () => scope), assertActive: vi.fn(async () => {}), listRepositories: vi.fn(async () => [queuePull().repository]), listOpenPullRequests: vi.fn<PullRequestQueuePorts["listOpenPullRequests"]>(async () => [queuePull()]), readAssessments: vi.fn<PullRequestQueuePorts["readAssessments"]>(async () => new Map()), readReviewState: vi.fn<PullRequestQueuePorts["readReviewState"]>(async () => queueReviewState()), linksFor: vi.fn(() => ({ provider: "https://github.com/acme/api/pull/1", decision: null })) } satisfies PullRequestQueuePorts;
+  const ports = { now: () => new Date(), createSnapshotId: () => String(++id), resolveScope: vi.fn<PullRequestQueuePorts["resolveScope"]>(async () => scope), assertActive: vi.fn(async () => {}), listRepositories: vi.fn<PullRequestQueuePorts["listRepositories"]>(async () => [queuePull().repository]), listOpenPullRequests: vi.fn<PullRequestQueuePorts["listOpenPullRequests"]>(async () => [queuePull()]), readAssessments: vi.fn<PullRequestQueuePorts["readAssessments"]>(async () => new Map()), readReviewState: vi.fn<PullRequestQueuePorts["readReviewState"]>(async () => queueReviewState()), linksFor: vi.fn(() => ({ provider: "https://github.com/acme/api/pull/1", decision: null })) } satisfies PullRequestQueuePorts;
   return { ports, service: createPullRequestQueueService(ports) };
 }
 afterEach(() => vi.useRealTimers());
@@ -27,6 +27,30 @@ describe("queue acquisition", () => {
     ports.listOpenPullRequests.mockImplementation(() => new Promise(() => {}));
     const abandoned = service.read({workspaceId: "w", forceRefresh: true}); const rejected = expect(abandoned).rejects.toMatchObject({reason: "authority"});
     await vi.advanceTimersByTimeAsync(0); service.dispose(); await rejected; expect(vi.getTimerCount()).toBe(0);
+  });
+  it("expires final verification while its provider slot waits behind newer readers", async () => {
+    const { ports, service } = setup();
+    ports.resolveScope.mockImplementation(async workspaceId => ({ ...scope, workspaceId }));
+    ports.listOpenPullRequests.mockResolvedValue(Array.from({ length: 4 }, (_, index) => queuePull({ number: index + 1, changeRequestId: String(index + 1) })));
+    ports.readReviewState.mockImplementation(() => new Promise(() => {}));
+    ports.listRepositories.mockImplementation(async currentScope => {
+      if (currentScope.workspaceId === "w") return [queuePull().repository];
+      return new Promise(() => {});
+    });
+    let settled = false;
+    const original = service.read({ workspaceId: "w" }).then(result => { settled = true; return result; });
+    await vi.advanceTimersByTimeAsync(54_000);
+    const newer = ["a", "b", "c", "d"].map(workspaceId => service.read({ workspaceId }).catch(error => error));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(ports.listRepositories).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(settled).toBe(true);
+    const result = await original;
+    expect(result.status).toBe("unavailable"); expect(result.items).toEqual([]);
+    expect(result.acquiredAt).toBe("2026-01-01T00:01:00.000Z");
+    // Aborted queued verification never consumes a slot when newer readers release.
+    service.dispose(); await Promise.all(newer);
+    expect(ports.listRepositories).toHaveBeenCalledTimes(5); expect(vi.getTimerCount()).toBe(0);
   });
   it("restarts on changed inventory and never caches an obsolete generation", async () => {
     const { ports, service } = setup(); const firstRepo = queuePull().repository; const secondRepo = {...firstRepo, externalId: "2", name: "web"};

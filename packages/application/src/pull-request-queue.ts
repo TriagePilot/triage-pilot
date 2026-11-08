@@ -39,7 +39,20 @@ export function createPullRequestQueueService(ports: PullRequestQueuePorts) {
   const waiting: Array<() => void> = [];
   async function provider<T>(scope: PullRequestQueueScope, signal: AbortSignal, operation: (context: PullRequestQueueContext) => Promise<T>): Promise<T> {
     // Reserve a slot before waking the next waiter, including concurrent scope checks.
-    if (running >= 4) await new Promise<void>(resolve => waiting.push(resolve)); else running++;
+    signal.throwIfAborted();
+    if (running >= 4) {
+      await new Promise<void>((resolve, reject) => {
+        const grant = () => { signal.removeEventListener("abort", abort); resolve(); };
+        const abort = () => {
+          const index = waiting.indexOf(grant);
+          if (index !== -1) waiting.splice(index, 1);
+          signal.removeEventListener("abort", abort);
+          reject(signal.reason);
+        };
+        waiting.push(grant);
+        signal.addEventListener("abort", abort, { once: true });
+      });
+    } else running++;
     try {
       signal.throwIfAborted();
       await abortable(ports.assertActive(scope), signal);
