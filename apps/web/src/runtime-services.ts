@@ -18,6 +18,7 @@ import {
 import { formatLog } from "@triagepilot/shared";
 import { sql } from "kysely";
 
+import { createPullRequestQueueRuntime } from "./pull-request-queue-runtime.js";
 import { createAnalyticsRuntime } from "./analytics-runtime.js";
 import type { WebServices } from "./app.js";
 
@@ -42,7 +43,7 @@ interface WebRuntimeServicesInput {
   ): Promise<{ jobId: string; routingKey: string }>;
 }
 
-export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebServices {
+export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebServices & { disposePullRequestQueue(): void } {
   const repositories = input.repositories ?? createWorkspaceRepositories(input.db, input.workspaceId);
   const availability = createWorkspaceReviewerAvailability(input.db, input.workspaceId);
 
@@ -62,6 +63,7 @@ export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebSer
   }
   return {
     ...createAnalyticsRuntime(input),
+    ...createPullRequestQueueRuntime(input),
     adminUsername: input.adminUsername,
     adminPassword: input.adminPassword,
     sessionSecret: input.sessionSecret,
