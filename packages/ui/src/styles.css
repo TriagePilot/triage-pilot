@@ -216,3 +216,18 @@ a { color: var(--teal-dark); text-underline-offset: 2px; }
 .queue-dialog { background: white; color: #123444; width: min(36rem, 100%); height: 100%; overflow-y: auto; padding: 1.5rem; box-sizing: border-box; }
 @media (max-width: 700px) { .queue-row { grid-template-columns: 1fr; gap: .5rem; } .queue-filters label { flex: 1 1 12rem; min-width: 0; } }
 .queue-badge { display: inline-block; padding: .15rem .45rem; border-radius: .3rem; background: #dff2ef; color: #123f4b; font-weight: 700; }
+
+/* The queue uses the same workspace controls and typography as Analytics. */
+.queue .operations-heading h2 { font-size: 2rem; margin-bottom: .5rem; }
+.queue .queue-context { max-width: 48rem; margin-bottom: 0; color: var(--muted); font-size: .8rem; line-height: 1.5; }
+.queue-filters { padding: 1rem; border: 1px solid var(--rule); border-radius: .5rem; background: var(--surface); }
+.queue-filters label { min-width: 0; flex: 1 1 9rem; color: var(--muted); font-size: .78rem; }
+.queue-filters :is(input, select) { width: 100%; min-width: 0; border: 1px solid var(--rule); border-radius: .4rem; padding: .6rem; color: var(--ink); background: var(--surface); font: inherit; }
+.queue-group { background: var(--surface); }
+.queue-row { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr); font-size: .8rem; line-height: 1.5; overflow-wrap: anywhere; }
+.queue-title:hover { color: var(--navy); background: var(--surface-soft); text-decoration: underline; }
+.queue :is(button, input, select, a):focus-visible { outline: 3px solid var(--teal); outline-offset: 3px; }
+.queue-dialog { overflow-wrap: anywhere; line-height: 1.6; }
+.queue-dialog h2 { margin: 1rem 0; font-size: 1.5rem; }
+.queue-dialog :is(button, a):focus-visible { outline: 3px solid var(--teal); outline-offset: 3px; }
+@media (max-width: 700px) { .queue-row { grid-template-columns: minmax(0, 1fr); } }

@@ -1,5 +1,6 @@
 import type {
   AnalyticsApiClient,
+  PullRequestQueueApiClient,
   AvailabilitySettingsOverview,
   EffectiveConfigurationOverview,
   OperationsApiClient,
@@ -227,6 +228,25 @@ export function createSelfHostedAnalyticsApi(input: {
       for (const id of query.repositoryIds) params.append("repositoryId", id);
       if (query.forceRefresh !== undefined) params.set("forceRefresh", String(query.forceRefresh));
       return read(workspace, "/workload", params, "Could not load the current reviewer workload.", signal);
+    },
+  };
+}
+
+export function createSelfHostedPullRequestQueueApi(input: {
+  onUnauthorized?(message: string): void;
+} = {}): PullRequestQueueApiClient {
+  return {
+    readPullRequestQueue(workspace, query, signal) {
+      return withUnauthorized(input.onUnauthorized, async () => {
+        const response = await fetch(`/api/operations/pull-requests${query.forceRefresh ? "?refresh=true" : ""}`, {
+          credentials: "same-origin",
+          headers: workspaceHeaders(workspace),
+          ...(signal ? { signal } : {}),
+        });
+        if (response.status === 401) throw new AdminApiError("The administrator session has expired.", 401);
+        if (!response.ok) throw new AdminApiError("Could not load pull requests.", response.status);
+        return response.json();
+      });
     },
   };
 }

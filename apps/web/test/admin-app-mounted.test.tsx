@@ -83,6 +83,7 @@ describe("mounted admin application", () => {
         root.render(<Dashboard username="admin" overview={emptyOverview} analyticsApi={{ readAnalytics: async () => { throw new Error("History unavailable"); }, readCurrentWorkload: async () => { throw new Error("Current unavailable"); } }} onLogout={async () => {}} />);
       });
 
+      expect(container.querySelector('a[href="#pull-requests"]')?.textContent).toBe("Pull requests");
       const link = container.querySelector<HTMLAnchorElement>('a[href="#repositories"]');
       expect(link?.getAttribute("aria-current")).toBe("location");
       expect(container.querySelector(".app-topbar strong")?.textContent).toBe("Repositories");

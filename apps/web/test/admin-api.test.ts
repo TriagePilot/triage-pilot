@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createSelfHostedOperationsApi,
+  createSelfHostedPullRequestQueueApi,
   createSelfHostedAnalyticsApi,
   fetchEffectiveConfigurationForWorkspace,
   fetchOperationsOverviewForWorkspace,
@@ -262,4 +263,36 @@ it("maps analytics server failures and expires the administrator session", async
   await expect(client.readCurrentWorkload(workspace, { repositoryIds: [], averageReviewMinutes: 30 })).rejects.toMatchObject({ status: 503, message: "Could not load the current reviewer workload." });
   await expect(client.readAnalytics(workspace, { periodDays: 30, mode: "auto", repositoryIds: [], averageReviewMinutes: 30 })).rejects.toMatchObject({ status: 401 });
   expect(onUnauthorized).toHaveBeenCalledWith("The administrator session has expired.");
+});
+
+describe("pull request queue API", () => {
+  it("sends scoped cookies, propagates cancellation and refreshes only explicitly", async () => {
+    const fetcher = vi.fn().mockResolvedValue(Response.json({ items: [] }));
+    vi.stubGlobal("fetch", fetcher);
+    const api = createSelfHostedPullRequestQueueApi();
+    const workspace = { id: "workspace-a", displayName: "Test" };
+    const signal = new AbortController().signal;
+    await api.readPullRequestQueue(workspace, { forceRefresh: false }, signal);
+    expect(fetcher).toHaveBeenLastCalledWith("/api/operations/pull-requests", {
+      credentials: "same-origin", headers: { "x-triagepilot-workspace": "workspace-a" }, signal,
+    });
+    fetcher.mockResolvedValue(Response.json({ items: [] }));
+    await api.readPullRequestQueue(workspace, { forceRefresh: true });
+    expect(fetcher).toHaveBeenLastCalledWith("/api/operations/pull-requests?refresh=true", {
+      credentials: "same-origin", headers: { "x-triagepilot-workspace": "workspace-a" },
+    });
+  });
+
+  it("sanitizes provider errors and notifies session expiry", async () => {
+    const fetcher = vi.fn().mockResolvedValue(Response.json({ message: "secret provider token" }, { status: 503 }));
+    vi.stubGlobal("fetch", fetcher);
+    const onUnauthorized = vi.fn();
+    const api = createSelfHostedPullRequestQueueApi({ onUnauthorized });
+    const workspace = { id: "workspace-a", displayName: "Test" };
+    await expect(api.readPullRequestQueue(workspace, { forceRefresh: false })).rejects.toThrow("Could not load pull requests.");
+    expect(onUnauthorized).not.toHaveBeenCalled();
+    fetcher.mockResolvedValue(Response.json({}, { status: 401 }));
+    await expect(api.readPullRequestQueue(workspace, { forceRefresh: false })).rejects.toMatchObject({ status: 401 });
+    expect(onUnauthorized).toHaveBeenCalledWith("The administrator session has expired.");
+  });
 });

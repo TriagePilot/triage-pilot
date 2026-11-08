@@ -35,7 +35,7 @@ function QueueWorkspace({ api, workspace, authorization, onUnauthorized }: PullR
   if (!authorization.canViewOperations) return <section><p>You are not authorized to view pull requests.</p></section>;
   const view = snapshot ? buildPullRequestQueueView(snapshot, filters) : null;
   const filtered = !!filters.personId || !!filters.repositoryIds.length || !!filters.query.trim() || !!filters.group;
-  return <section className="queue" aria-label="Pull requests"><header className="operations-heading"><div><p className="eyebrow">Workspace · {workspace.displayName}</p><h2>Pull requests</h2><p>Open pull requests across the workspace.</p></div><button type="button" disabled={loading} onClick={() => setRefresh((value) => value + 1)}>Refresh</button></header>
+  return <section className="queue" aria-label="Pull requests"><header className="operations-heading"><div><p className="eyebrow">Workspace · {workspace.displayName}</p><h2>Pull requests</h2><p>Open pull requests across the workspace.</p><p className="queue-context">Shared administrator login · Everyone is shown by default. Choose a person to see authored or requested reviews.</p></div><button type="button" disabled={loading} onClick={() => setRefresh((value) => value + 1)}>Refresh</button></header>
     {loading ? <p role="status">{snapshot ? "Updating pull requests…" : "Loading pull requests…"}</p> : null}
     {error ? <p role="alert">{snapshot ? "Refresh failed; showing previous snapshot: " : "Pull requests unavailable: "}{error}</p> : null}
     {snapshot ? <><p>Last updated: {snapshot.observedAt ? <time dateTime={snapshot.observedAt}>{snapshot.observedAt}</time> : "Unknown"} · {snapshot.totalOpen === null ? "Total unavailable" : `${snapshot.totalOpen} open`} · {view?.filteredCount} shown</p>

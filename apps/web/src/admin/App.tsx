@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   Analytics,
+  PullRequests,
+  type PullRequestQueueApiClient,
   type AnalyticsApiClient,
   EffectiveConfiguration,
   OperationsDashboard,
@@ -16,6 +18,7 @@ import {
 import {
   AdminApiError,
   createSelfHostedAnalyticsApi,
+  createSelfHostedPullRequestQueueApi,
   createSelfHostedOperationsApi,
   getSession,
   login,
@@ -23,10 +26,11 @@ import {
 } from "./api";
 
 type AuthState = "checking" | "signed-out" | "signed-in";
-type SectionId = "analytics" | "overview" | "repositories" | "decisions" | "reviewer-availability" | "effective-configuration" | "system-health";
+type SectionId = "pull-requests" | "analytics" | "overview" | "repositories" | "decisions" | "reviewer-availability" | "effective-configuration" | "system-health";
 
 const sectionLabels: Record<SectionId, string> = {
   analytics: "Analytics",
+  "pull-requests": "Pull requests",
   overview: "Overview",
   repositories: "Repositories",
   decisions: "Routing decisions",
@@ -264,6 +268,7 @@ interface DashboardProps {
   onUnauthorized?(message: string): void;
   api?: OperationsApiClient;
   analyticsApi?: AnalyticsApiClient;
+  pullRequestQueueApi?: PullRequestQueueApiClient;
 }
 
 export function Dashboard({
@@ -276,6 +281,7 @@ export function Dashboard({
   onUnauthorized,
   api: providedApi,
   analyticsApi: providedAnalyticsApi,
+  pullRequestQueueApi: providedPullRequestQueueApi,
 }: DashboardProps) {
   const api = useMemo(
     () => providedApi ?? (overview
@@ -284,6 +290,7 @@ export function Dashboard({
     [providedApi, overview, onUnauthorized],
   );
   const analyticsApi = useMemo(() => providedAnalyticsApi ?? createSelfHostedAnalyticsApi(onUnauthorized ? { onUnauthorized } : {}), [providedAnalyticsApi, onUnauthorized]);
+  const pullRequestQueueApi = useMemo(() => providedPullRequestQueueApi ?? createSelfHostedPullRequestQueueApi(onUnauthorized ? { onUnauthorized } : {}), [providedPullRequestQueueApi, onUnauthorized]);
   const effectiveRepository = overview?.repositories[0];
   const hasConfiguration = Boolean(effectiveConfiguration && effectiveRepository);
   const [currentOverview, setCurrentOverview] = useState(overview);
@@ -316,6 +323,7 @@ export function Dashboard({
           {sectionLink("overview", "overview")}
           {sectionLink("repositories", "repository")}
           {sectionLink("decisions", "route")}
+          {sectionLink("pull-requests", "pull-request")}
           {sectionLink("analytics", "overview")}
           {sectionLink("reviewer-availability", "user")}
           {hasConfiguration ? sectionLink("effective-configuration", "settings") : null}
@@ -340,10 +348,11 @@ export function Dashboard({
             <button className="button--quiet" type="button" onClick={() => void onLogout()}>Sign out</button>
           </div>
         </header>
-        <main className="shell" aria-label={activeSection === "analytics" ? "Analytics" : undefined} aria-labelledby={activeSection === "analytics" ? undefined : "dashboard-title"}>
+        <main className="shell" aria-label={activeSection === "analytics" || activeSection === "pull-requests" ? sectionLabels[activeSection] : undefined} aria-labelledby={activeSection === "analytics" || activeSection === "pull-requests" ? undefined : "dashboard-title"}>
           {error ? <p role="alert" className="notice notice--danger dashboard-notice">{error}</p> : null}
           {activeSection === "analytics" ? <Analytics api={analyticsApi} workspace={workspace} authorization={selfHostedAuthorization} {...(onUnauthorized ? { onUnauthorized } : {})} /> : null}
-          <div hidden={activeSection === "analytics"} className="operations-pages">
+          {activeSection === "pull-requests" ? <PullRequests api={pullRequestQueueApi} workspace={workspace} authorization={selfHostedAuthorization} {...(onUnauthorized ? { onUnauthorized } : {})} /> : null}
+          {activeSection !== "pull-requests" ? <div hidden={activeSection === "analytics"} className="operations-pages">
             <OperationsDashboard
               api={api}
               workspace={workspace}
@@ -369,7 +378,7 @@ export function Dashboard({
                 initialConfiguration={effectiveConfiguration}
               />
             ) : null}
-          </div>
+          </div> : null}
         </main>
       </div>
     </div>
@@ -405,6 +414,7 @@ function UiIcon({ name }: { name: string }) {
     repository: <><path d="M5 4h12a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2V4Z" /><path d="M8 8h7M8 12h7" /></>,
     route: <><circle cx="6" cy="6" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="18" cy="18" r="2" /><path d="M8 6h4a6 6 0 0 1 6 6v4" /></>,
     settings: <><circle cx="12" cy="12" r="3" /><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1m0-12.8-2.1 2.1m-8.6 8.6-2.1 2.1" /></>,
+    "pull-request": <><circle cx="6" cy="5" r="2" /><circle cx="6" cy="19" r="2" /><circle cx="18" cy="19" r="2" /><path d="M6 7v10m8-13 4 4-4 4m0-4h1a3 3 0 0 1 3 3v6" /></>,
     health: <path d="M3 12h4l2-5 4 10 2-5h6" />,
   };
   return <svg className="ui-icon" viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>;
