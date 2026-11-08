@@ -7,6 +7,7 @@ import {
   RepositoriesPage,
   RoutingDecisionsPage,
   SystemHealthPage,
+  type DecisionOverview,
   type OperationsOverview,
   type OperationsApiClient,
 } from "../src/index";
@@ -122,6 +123,7 @@ async function change(label: string, value: string) {
 it("shows only the latest three overview decisions and real record counts", async () => {
   await mount(<OverviewPage navigation={navigation} overview={data} onRefresh={async () => {}} />);
   expect(rows()).toHaveLength(3);
+  expect(container.querySelector("table caption")?.textContent).toBe("Recent routing decisions");
   expect(container.querySelector(".summary-metrics")?.textContent).toContain(
     "18",
   );
@@ -133,6 +135,7 @@ it("shows only the latest three overview decisions and real record counts", asyn
 it("paginates eight repositories, resets pagination for filters, and links configuration", async () => {
   await mount(<RepositoriesPage navigation={navigation} overview={data} onRefresh={async () => {}} />);
   expect(rows()).toHaveLength(8);
+  expect(container.querySelector("table caption")?.textContent).toBe("Connected repositories");
   expect(
     container.querySelector(
       'a[href="#effective-configuration?repositoryId=r0"]',
@@ -161,6 +164,7 @@ it("uses recorded risk, filters six decisions, and expands the complete inspecto
     />,
   );
   expect(rows()).toHaveLength(6);
+  expect(container.querySelector("table caption")?.textContent).toBe("Recent routing decisions");
   expect(container.querySelector("tbody")?.textContent).toContain("Unknown");
   await click("Next");
   expect(container.textContent).toContain("Page 2 of 3");
@@ -246,12 +250,14 @@ it("separates current health from history, paginates failures, and preserves com
     "Worker available",
   );
   expect(rows()).toHaveLength(5);
+  expect(container.querySelector("table caption")?.textContent).toBe("Permanent job failures");
   expect(container.querySelector(".error-detail")?.textContent).toHaveLength(
     218,
   );
   await click("Next");
   expect(rows()).toHaveLength(2);
   await click("Action failures (2)");
+  expect(container.querySelector("table caption")?.textContent).toBe("Action failures");
   expect(container.textContent).toContain("Page 1 of 1");
   expect(
     container.querySelector('a[href="#decisions?decisionId=d13"]'),
@@ -260,4 +266,130 @@ it("separates current health from history, paginates failures, and preserves com
   expect(
     container.querySelector('a[href="#decisions?decisionId=old"]'),
   ).toBeNull();
+});
+
+async function mountDecision(changes: Partial<DecisionOverview> = {}) {
+  await mount(
+    <RoutingDecisionsPage
+      navigation={navigation}
+      overview={{ ...data, decisions: [{ ...data.decisions[1]!, ...changes }] }}
+      api={{} as OperationsApiClient}
+      workspace={{ id: "w", displayName: "Work" }}
+      authorization={authorization}
+      onRefresh={async () => {}}
+    />,
+  );
+  await click("View details");
+}
+
+it.each([
+  ["not_started", "Not started"],
+  ["in_progress", "Waiting for approval"],
+  ["success", "Approved"],
+  ["failure", "Failed"],
+] as const)(
+  "explains %s human-review state as %s in the decision inspector",
+  async (policyCheckState, label) => {
+    await mountDecision({ policyCheckState });
+    const heading = Array.from(
+      container.querySelectorAll(".decision-inspector dt"),
+    ).find(element => element.textContent === "Human review")!;
+    expect(heading.nextElementSibling?.textContent).toBe(label);
+  },
+);
+
+it("explains every risk contribution, including suppressor caps, in the shipped inspector", async () => {
+  await mountDecision({
+    riskBreakdown: {
+      classifierVersion: "risk-v1",
+      tier: "medium",
+      components: [
+        { reason: "changed_file_count", score: 10, detail: "7 changed files" },
+        {
+          reason: "high_risk_path:infrastructure",
+          score: 20,
+          detail: "3 files matched infrastructure/**",
+        },
+        {
+          reason: "docs_or_test_suppressor",
+          score: 0,
+          detail: "Risk score capped at 30",
+        },
+      ],
+    },
+  });
+  const inspector = container.querySelector(".decision-inspector")!;
+  expect(inspector.textContent).toContain("risk-v1 · medium");
+  expect(
+    Array.from(inspector.querySelectorAll(".score-components li")).map(item => ({
+      score: item.querySelector("strong")?.textContent,
+      detail: item.querySelector("small")?.textContent,
+    })),
+  ).toEqual([
+    { score: "+10", detail: "7 changed files" },
+    { score: "+20", detail: "3 files matched infrastructure/**" },
+    { score: "cap", detail: "Risk score capped at 30" },
+  ]);
+});
+
+it("shows an em dash and withholds recovery when the pull number is unavailable", async () => {
+  await mountDecision({ changeRequest: null });
+  expect(container.querySelector("tbody th .cell-detail")?.textContent).toBe("—");
+  expect(container.querySelector("tbody th .cell-detail a")).toBeNull();
+  expect(container.textContent).not.toContain("#null");
+  expect(
+    Array.from(container.querySelectorAll("button"))
+      .some(button => button.textContent === "Re-run routing"),
+  ).toBe(false);
+});
+
+it("keeps provider links and reviewer details in the shipped decision page", async () => {
+  await mountDecision({ selectedReviewers: ["@reviewer-one", "@reviewer-two"] });
+  const link = container.querySelector<HTMLAnchorElement>(
+    'a[href="https://provider.test/pull/1"]',
+  );
+  expect(link?.textContent).toBe("#1");
+  expect(link?.target).toBe("_blank");
+  expect(link?.rel).toBe("noreferrer");
+  expect(container.querySelector(".decision-inspector")?.textContent).toContain(
+    "@reviewer-one, @reviewer-two",
+  );
+});
+
+it("explains empty records in each shipped operations page", async () => {
+  const emptyOverview = {
+    ...data,
+    repositories: [],
+    decisions: [],
+    failures: { jobs: [], actions: [] },
+  };
+  await mount(
+    <RepositoriesPage
+      navigation={navigation}
+      overview={emptyOverview}
+      onRefresh={async () => {}}
+    />,
+  );
+  expect(container.textContent).toContain("No repositories are connected");
+  await act(async () => root.render(
+    <RoutingDecisionsPage
+      navigation={navigation}
+      overview={emptyOverview}
+      api={{} as OperationsApiClient}
+      workspace={{ id: "w", displayName: "Work" }}
+      authorization={authorization}
+      onRefresh={async () => {}}
+    />,
+  ));
+  expect(container.textContent).toContain("No routing decisions have been recorded yet.");
+  await act(async () => root.render(
+    <SystemHealthPage
+      navigation={navigation}
+      overview={emptyOverview}
+      onRefresh={async () => {}}
+    />,
+  ));
+  expect(container.textContent).toContain("No permanent job failures.");
+  await click("Action failures (0)");
+  expect(container.textContent).toContain("No action failures.");
 });

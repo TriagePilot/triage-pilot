@@ -1,7 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
-import { OperationsDashboard } from "@triagepilot/ui";
 import { App, Dashboard, LoginScreen } from "../src/admin/App";
 import type { OperationsOverview } from "../src/admin/api";
 
@@ -94,74 +93,9 @@ describe("admin application", () => {
     }
   });
 
-  it("renders the operational chain, recovery controls, and semantic data tables", () => {
-    const html = renderToStaticMarkup(
-      <LegacyOperations
-        username="admin"
-        overview={overview}
-        onLogout={async () => {}}
-      />,
-    );
-
-    expect(html).toContain("Operations ledger");
-    expect(html).toContain("acme");
-    expect(html).toContain("App 123");
-    expect(html).toContain("Installation 9007199254740993");
-    expect(html).toContain("Worker available");
-    expect(html).toContain("Connected repositories");
-    expect(html).toContain("Recent routing decisions");
-    expect(html).toContain("Permanent job failures");
-    expect(html).toContain("Action failures");
-    expect(html).toContain("acme/api");
-    expect(html).toContain("#7");
-    expect(html).toContain("Human review");
-    expect(html).toContain("Waiting for approval");
-    expect(html).toContain('href="https://github.com/acme/api/pull/7"');
-    expect(html).toContain('target="_blank"');
-    expect(html).toContain('rel="noreferrer"');
-    expect(html).toContain("Reviewers");
-    expect(html).toContain("@team-a7f19c/reviewers, @user-b4e82d");
-    expect(html).toContain("GitHub permission denied");
-    expect(html).toContain("Review request rejected");
-    expect(html.match(/<table/g)).toHaveLength(4);
-    expect(html.match(/role="region"/g)).toHaveLength(4);
-    expect(html.match(/tabindex="0"/g)).toHaveLength(4);
-    expect(html).toContain('aria-labelledby="repositories-heading"');
-    expect(html).toContain('aria-labelledby="decisions-heading"');
-    expect(html).toContain('aria-labelledby="job-failures-heading"');
-    expect(html).toContain('aria-labelledby="action-failures-heading"');
-    expect(html.match(/<button/g)).toHaveLength(2);
-    expect(html).toContain("Run missing change request");
-    expect(html).toContain("Re-run routing");
-    expect(html).toContain('id="routing-recovery-url"');
-    expect(html).not.toContain("<select");
-  });
-
-  it("explains empty operational sections without suggesting dashboard mutations", () => {
-    const html = renderToStaticMarkup(
-      <LegacyOperations
-        username="admin"
-        overview={{
-          ...overview,
-          repositories: [],
-          decisions: [],
-          failures: { jobs: [], actions: [] },
-        }}
-        onLogout={async () => {}}
-      />,
-    );
-
-    expect(html).toContain(
-      "No repositories are connected to this provider connection.",
-    );
-    expect(html).toContain("No routing decisions have been recorded yet.");
-    expect(html).toContain("No permanent job failures.");
-    expect(html).toContain("No action failures.");
-  });
-
   it("keeps an operational error visible without replacing readable data", () => {
     const html = renderToStaticMarkup(
-      <LegacyOperations
+      <Dashboard
         username="admin"
         overview={overview}
         error="Could not sign out."
@@ -171,92 +105,8 @@ describe("admin application", () => {
 
     expect(html).toContain('role="alert"');
     expect(html).toContain("Could not sign out.");
-    expect(html).toContain("Connected repositories");
-  });
-
-  it("renders an explicit em dash for an unavailable legacy pull number", () => {
-    const html = renderToStaticMarkup(
-      <LegacyOperations
-        username="admin"
-        overview={{
-          ...overview,
-          decisions: [{ ...overview.decisions[0]!, changeRequest: null }],
-        }}
-        onLogout={async () => {}}
-      />,
-    );
-
-    expect(html).toContain('<span class="cell-detail">—</span>');
-    expect(html).not.toContain("#null");
-  });
-
-  it.each([
-    ["success", "Approved"],
-    ["failure", "Failed"],
-  ] as const)(
-    "renders %s human-review state as %s",
-    (policyCheckState, label) => {
-      const html = renderToStaticMarkup(
-        <LegacyOperations
-          username="admin"
-          overview={{
-            ...overview,
-            decisions: [{ ...overview.decisions[0]!, policyCheckState }],
-          }}
-          onLogout={async () => {}}
-        />,
-      );
-
-      expect(html).toContain(label);
-    },
-  );
-
-  it("explains the rules that contributed to a routing decision's risk score", () => {
-    const html = renderToStaticMarkup(
-      <LegacyOperations
-        username="admin"
-        overview={
-          {
-            ...overview,
-            decisions: [
-              {
-                ...overview.decisions[0],
-                riskBreakdown: {
-                  classifierVersion: "risk-v1",
-                  tier: "medium",
-                  components: [
-                    {
-                      reason: "changed_file_count",
-                      score: 10,
-                      detail: "7 changed files",
-                    },
-                    {
-                      reason: "high_risk_path:infrastructure",
-                      score: 20,
-                      detail: "3 files matched infrastructure/**",
-                    },
-                    {
-                      reason: "docs_or_test_suppressor",
-                      score: 0,
-                      detail: "Risk score capped at 30",
-                    },
-                  ],
-                },
-              },
-            ],
-          } as unknown as OperationsOverview
-        }
-        onLogout={async () => {}}
-      />,
-    );
-
-    expect(html).toContain("Score breakdown");
-    expect(html).toContain("risk-v1 · medium");
-    expect(html).toContain("+10");
-    expect(html).toContain("7 changed files");
-    expect(html).toContain("+20");
-    expect(html).toContain("3 files matched infrastructure/**");
-    expect(html).toContain("Risk score capped at 30");
+    expect(html).toContain("Latest routing decisions");
+    expect(html).toContain("acme/api");
   });
 });
 
@@ -323,31 +173,3 @@ const overview: OperationsOverview = {
     lastHeartbeatAt: "2026-08-18T10:02:00.000Z",
   },
 };
-
-function LegacyOperations({
-  overview: data,
-  error,
-}: {
-  username: string;
-  overview: OperationsOverview;
-  error?: string;
-  onLogout(): Promise<void>;
-}) {
-  return (
-    <>
-      {error ? <p role="alert">{error}</p> : null}
-      <OperationsDashboard
-        api={{} as never}
-        workspace={{ id: "ws", displayName: "Self-hosted" }}
-        initialOverview={data}
-        authorization={{
-          canViewOperations: true,
-          canManageConfiguration: false,
-          canManageReviewerAvailability: true,
-          canRunRoutingRecovery: true,
-        }}
-        navigation={{ hrefFor: () => "#effective-configuration" }}
-      />
-    </>
-  );
-}

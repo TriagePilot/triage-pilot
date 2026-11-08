@@ -1,3 +1,5 @@
+// Keep the composite dashboard export compatible for existing package hosts.
+// The self-hosted app uses the dedicated pages exported below.
 export {
   OperationsDashboard,
   type OperationsDashboardProps,

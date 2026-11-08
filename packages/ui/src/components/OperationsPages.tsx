@@ -294,6 +294,7 @@ export function RepositoriesPage({
         </div>
         <TableRegion label="Connected repositories">
           <table>
+            <caption className="sr-only">Connected repositories</caption>
             <thead>
               <tr>
                 <th scope="col">Repository</th>
@@ -566,6 +567,7 @@ function DecisionTable({
   return (
     <TableRegion label="Recent routing decisions">
       <table className="decisions-table">
+        <caption className="sr-only">Recent routing decisions</caption>
         <thead>
           <tr>
             {[
@@ -817,6 +819,9 @@ export function SystemHealthPage({
           label={tab === "jobs" ? "Permanent job failures" : "Action failures"}
         >
           <table>
+            <caption className="sr-only">
+              {tab === "jobs" ? "Permanent job failures" : "Action failures"}
+            </caption>
             <thead>
               <tr>
                 <th scope="col">

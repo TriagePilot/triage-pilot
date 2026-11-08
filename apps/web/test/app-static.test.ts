@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { createWebApp } from "../src/app";
@@ -45,8 +46,11 @@ describe("static administration UI", () => {
 it("serves every locally declared font and its license through production asset routes", async () => {
   const css = await readFile(new URL("../src/admin/styles.css", import.meta.url), "utf8");
   const urls = [...css.matchAll(/url\(['"]([^'"]+\.ttf)['"]\)/g)].map(match => match[1]!);
-  expect(urls).toHaveLength(3);
-  const publicRoot = path.resolve("apps/web/public");
+  expect(
+    urls,
+    "Expected three quoted .ttf font URLs in the administration stylesheet",
+  ).toHaveLength(3);
+  const publicRoot = fileURLToPath(new URL("../public", import.meta.url));
   const app = createWebApp(buildServices(), { async readAsset(assetPath) {
     try { return {body: await readFile(path.join(publicRoot, assetPath)), contentType:"application/octet-stream"}; }
     catch { return null; }
