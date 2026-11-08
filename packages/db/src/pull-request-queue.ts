@@ -32,16 +32,21 @@ export async function assertPullRequestQueueScopeActive(db: Kysely<Database>, sc
 export async function readQueueAssessments(db: Kysely<Database>, scope: PullRequestQueueScope, pulls: QueuePullRequest[]): Promise<Map<string, QueueAssessment>> {
   await assertPullRequestQueueScopeActive(db, scope);
   const result = new Map<string, QueueAssessment>();
-  if (scope.knownRepositories.length && pulls.length) {
+  const knownByExternalId = new Map(scope.knownRepositories.map(repository => [repository.repository.externalId, repository]));
+  const requested = pulls.flatMap(pull => {
+    const known = pull.repository.provider === "github" ? knownByExternalId.get(pull.repository.externalId) : undefined;
+    return known && Number.isSafeInteger(pull.number) && pull.number > 0
+      ? [{ repository_id: known.recordId, pull_number: pull.number }] : [];
+  });
+  if (requested.length) {
     const rows = await db.selectFrom("routing_decisions").innerJoin("repositories", join => join.onRef("repositories.id", "=", "routing_decisions.repository_id").onRef("repositories.workspace_id", "=", "routing_decisions.workspace_id")).innerJoin("provider_connections", join => join.onRef("provider_connections.id", "=", "repositories.provider_connection_id").onRef("provider_connections.workspace_id", "=", "repositories.workspace_id").onRef("provider_connections.provider", "=", "repositories.provider"))
-      .selectAll("routing_decisions").select(["repositories.external_repository_id", "repositories.provider"])
-      .where("routing_decisions.workspace_id", "=", scope.workspaceId).where("repositories.provider", "=", "github").where("repositories.provider_connection_id", "=", scope.providerConnectionId).where("provider_connections.status", "=", "active").where("repositories.id", "in", scope.knownRepositories.map(r => r.recordId)).orderBy("routing_decisions.created_at", "desc").orderBy("routing_decisions.id", "desc").execute();
-    const wanted = new Map(pulls.map(p => [queuePullRequestKey(p.repository, p.number), p]));
-    const seen = new Set<string>();
+      .distinctOn(["routing_decisions.repository_id", "routing_decisions.pull_number"])
+      .select(["routing_decisions.id", "routing_decisions.repository_id", "routing_decisions.change_request_id", "routing_decisions.pull_number", "routing_decisions.created_at", "routing_decisions.action_applied_at", "routing_decisions.mode", "routing_decisions.action", "routing_decisions.action_status", "routing_decisions.risk_score", "routing_decisions.details", "routing_decisions.head_sha", "routing_decisions.repository_config_revision", "routing_decisions.policy_check_state", "routing_decisions.action_error", "routing_decisions.selected_reviewers", "repositories.external_repository_id", "repositories.provider"])
+      .where("routing_decisions.workspace_id", "=", scope.workspaceId).where("repositories.provider", "=", "github").where("repositories.provider_connection_id", "=", scope.providerConnectionId).where("provider_connections.status", "=", "active").where(sql<boolean>`exists (select 1 from jsonb_to_recordset(${JSON.stringify(requested)}::jsonb) as requested(repository_id uuid, pull_number bigint) where requested.repository_id = routing_decisions.repository_id and requested.pull_number = routing_decisions.pull_number)`)
+      .orderBy("routing_decisions.repository_id").orderBy("routing_decisions.pull_number").orderBy("routing_decisions.created_at", "desc").orderBy("routing_decisions.id", "desc").execute();
     for (const row of rows) {
       if (row.pull_number === null) continue;
       const key = queuePullRequestKey({ provider: row.provider, externalId: row.external_repository_id, owner: "", name: "" }, row.pull_number);
-      const pull = wanted.get(key); if (!pull || seen.has(key)) continue; seen.add(key);
       const known = scope.knownRepositories.find(r => r.recordId === row.repository_id)!;
       const fact = normalizeAnalyticsDecision({ ...row, change_request_id: row.change_request_id?.trim() || String(row.pull_number), repository_id: known.recordId, changeRequest: { repositoryRecordId: known.recordId, repository: known.repository, providerConnectionId: scope.providerConnectionId, changeRequestId: row.change_request_id ?? "", changeRequestNumber: row.pull_number } });
       if (!fact) continue;

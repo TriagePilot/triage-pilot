@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { KyselyPlugin } from "kysely";
 import { queuePullRequestKey } from "@triagepilot/contracts";
 import { assertPullRequestQueueScopeActive, readQueueAssessments, resolvePullRequestQueueScope } from "../src/pull-request-queue";
 import { queuePull } from "../../../test/pull-request-queue-fixtures";
@@ -38,6 +39,28 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("pull request queue scope
     expect(facts.get(queuePullRequestKey(ref("api"), 7))?.failureReason).not.toContain("secret");
     expect(facts.has(queuePullRequestKey(ref("new"), 8))).toBe(false);
     expect(await counts(db)).toEqual(before);
+  }));
+  it("only returns requested latest decision rows from SQL", async () => withPostgresTestDatabase(async db => {
+    const local = await seed(db, "local");
+    const api = await local.repo("api"), other = await local.repo("other");
+    await decision(db, local.workspaceId, api.id, "old", "2025-01-01", "succeeded");
+    await decision(db, local.workspaceId, api.id, "new", "2025-02-01", "failed");
+    await decision(db, local.workspaceId, api.id, "different-number", "2025-03-01", "succeeded", 8);
+    await decision(db, local.workspaceId, other.id, "different-repository", "2025-03-01", "succeeded");
+    const returned: unknown[] = [];
+    const plugin: KyselyPlugin = {
+      transformQuery: ({ node }) => node,
+      async transformResult({ result }) {
+        if (result.rows.some(row => "head_sha" in row)) returned.push(...result.rows);
+        return result;
+      },
+    };
+    const observedDb = db.withPlugin(plugin);
+    const scope = await resolvePullRequestQueueScope(observedDb, local.workspaceId, { githubOrganization: "acme" });
+    const facts = await readQueueAssessments(observedDb, scope, [queuePull({ repository: ref("api"), number: 7 })]);
+    expect(facts.size).toBe(1);
+    expect(returned).toHaveLength(1);
+    expect(returned[0]).toMatchObject({ head_sha: "new" });
   }));
   it("rejects copied or modified scopes, connection changes, tombstones, and membership changes", async () => withPostgresTestDatabase(async db => {
     const local = await seed(db, "local"); const repo = await local.repo("api");
