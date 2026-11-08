@@ -47,6 +47,10 @@ Routing decisions, action outcomes, and reviewer replacement history are the pro
 
 Provider-specific deployment adapters and private operational material are intentionally outside this repository.
 
+## Open pull-request queue
+
+The authenticated web host reads the current installation inventory and open pull requests through the GitHub adapter, joins retained assessment evidence, and serves a read-only snapshot to the shared UI. The application service classifies attention and caches complete content for one minute while revalidating authority and repository inventory on cache hits. This queue does not change webhook handling, routing, or reviewer-selection workload. See [Open pull-request queue](operations/pull-request-queue.md) for scope and limitations.
+
 ## Analytics and backlog
 
 Authenticated history reads existing routing and replacement records; current workload reads actual GitHub pending requests on the tracked 90-day population. Shared contracts and UI keep historical cohorts separate from current workload. Initial and replacement routing use ownership-first backlog comparisons with bounded live acquisition and stable fallback provenance; durable intents retain the chosen selection context for replay. There is no separate analytics fact store or retention extension. See [analytics and reviewer backlog](operations/analytics.md) for formulas, coverage, freshness, and API scope.
