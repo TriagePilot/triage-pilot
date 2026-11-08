@@ -17,3 +17,20 @@ it("orders groups, retains identical numbers in different repositories, and puts
   expect(view.groups.map((g) => g.group)).toEqual(["reviewers", "authors", "reviewer_gap", "policy_met", "other"]); expect(view.groups[0]?.items).toEqual([second, first]); expect(view.filteredCount).toBe(2);
   expect(buildPullRequestQueueView(queueSnapshot({ items: [first, second] }), { ...filters, sort: "risk" }).groups[0]?.items).toEqual([second, first]);
 });
+it("sorts created newest first, activity oldest first, and risk highest with deterministic ties", () => {
+  const a = item(2, { pullRequest: queuePull({ number: 2, createdAt: "2022-01-01", updatedAt: "2021-01-01" }), assessment: queueAssessment({ riskTier: "medium" }) });
+  const b = item(1, { pullRequest: queuePull({ number: 1, createdAt: "2023-01-01", updatedAt: "2022-01-01" }), assessment: queueAssessment({ riskTier: "high" }) });
+  const c = item(3, { pullRequest: queuePull({ number: 3, createdAt: "invalid", updatedAt: "invalid" }), assessment: queueAssessment({ riskTier: "high" }) });
+  const snapshot = queueSnapshot({ items: [c, a, b] });
+  expect(buildPullRequestQueueView(snapshot, filters).groups[0]?.items).toEqual([a, b, c]);
+  expect(buildPullRequestQueueView(snapshot, { ...filters, sort: "created" }).groups[0]?.items).toEqual([b, a, c]);
+  expect(buildPullRequestQueueView(snapshot, { ...filters, sort: "risk" }).groups[0]?.items).toEqual([b, c, a]);
+});
+it("deduplicates identity and excludes historical reviewers and team-only targets", () => {
+  const original = item(1, { reviewState: queueReviewState({ reviews: [{ id: "r", actor: { id: "history", login: "past", type: "human" }, state: "APPROVED", commitId: null, submittedAt: null }] }), pullRequest: queuePull({ requestedTeams: [{ id: "team", name: "team" }] }) });
+  const snapshot = queueSnapshot({ items: [original, original] });
+  expect(buildPullRequestQueueView(snapshot, filters).filteredCount).toBe(1);
+  expect(buildPullRequestQueueView(snapshot, { ...filters, personId: "history" }).filteredCount).toBe(0);
+  expect(buildPullRequestQueueView(snapshot, { ...filters, personId: "team" }).filteredCount).toBe(0);
+  expect(buildPullRequestQueueView(snapshot, filters).persons.map((person) => person.id)).toEqual(["1"]);
+});

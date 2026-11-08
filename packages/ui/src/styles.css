@@ -215,3 +215,4 @@ a { color: var(--teal-dark); text-underline-offset: 2px; }
 .queue-dialog-backdrop { position: fixed; inset: 0; z-index: 100; background: #071c2a99; display: flex; justify-content: flex-end; }
 .queue-dialog { background: white; color: #123444; width: min(36rem, 100%); height: 100%; overflow-y: auto; padding: 1.5rem; box-sizing: border-box; }
 @media (max-width: 700px) { .queue-row { grid-template-columns: 1fr; gap: .5rem; } .queue-filters label { flex: 1 1 12rem; min-width: 0; } }
+.queue-badge { display: inline-block; padding: .15rem .45rem; border-radius: .3rem; background: #dff2ef; color: #123f4b; font-weight: 700; }

@@ -61,3 +61,35 @@ it("ignores a late response after a workspace switch", async () => {
   await act(async () => root.render(<PullRequests api={api} workspace={{ id: "2", displayName: "Other" }} authorization={authorization} />));
   await act(async () => resolve(queueSnapshot({ items: [item], totalOpen: 1 }))); expect(container.textContent).not.toContain("Change"); expect(container.textContent).toContain("No open pull requests");
 });
+it("shows classification, risk and approvals with named unavailable repositories", async () => {
+  const items = [item, ...(["draft", "status_unknown", "policy_unknown"] as const).map((badge, index) => ({ ...item, pullRequest: { ...item.pullRequest, number: index + 2 }, attention: { ...item.attention, group: "other" as const, badge } }))];
+  const api = { readPullRequestQueue: vi.fn().mockResolvedValue(queueSnapshot({ status: "partial", items, unavailableRepositoryIds: ["1", "missing"], repositories: [{ recordId: null, repository: item.pullRequest.repository }], totalOpen: null })) };
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
+  const rows = [...container.querySelectorAll(".queue-row")]; expect(rows[0]?.textContent).toContain("Projected risk: medium"); expect(rows[0]?.textContent).toContain("Human approvals: Unknown / 1");
+  expect(container.textContent).toContain("Draft"); expect(container.textContent).toContain("Status unknown"); expect(container.textContent).toContain("Policy unknown"); expect(container.textContent).toContain("Unavailable: acme/api, missing");
+});
+it("searches people and displays both author and reviewer badges", async () => {
+  const both = { ...item, pullRequest: { ...item.pullRequest, requestedUsers: [item.pullRequest.author, ...item.pullRequest.requestedUsers] } };
+  const api = { readPullRequestQueue: vi.fn().mockResolvedValue(queueSnapshot({ items: [both], totalOpen: 1 })) };
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
+  const input = [...container.querySelectorAll("input")][1]!;
+  await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "ali"); input.dispatchEvent(new Event("input", { bubbles: true })); });
+  const person = [...container.querySelectorAll("select")].find((element) => element.parentElement?.textContent?.startsWith("Person"))!;
+  expect(person.textContent).toContain("alice"); expect(person.textContent).not.toContain("bob");
+  await act(async () => { person.value = "1"; person.dispatchEvent(new Event("change", { bubbles: true })); });
+  expect([...container.querySelectorAll(".queue-role")].map((node) => node.textContent)).toEqual(["author", "reviewer"]); expect(api.readPullRequestQueue).toHaveBeenCalledTimes(1);
+});
+it("does not poll as time advances or apply a response after unmount", async () => {
+  vi.useFakeTimers();
+  try {
+    let resolve!: (value: ReturnType<typeof queueSnapshot>) => void; const pending = new Promise<ReturnType<typeof queueSnapshot>>((yes) => { resolve = yes; });
+    const api = { readPullRequestQueue: vi.fn().mockReturnValue(pending) };
+    container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+    await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
+    await act(async () => { vi.advanceTimersByTime(300000); }); expect(api.readPullRequestQueue).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount()); await act(async () => resolve(queueSnapshot({ items: [item], totalOpen: 1 }))); expect(container.textContent).toBe("");
+    root = createRoot(container);
+  } finally { vi.useRealTimers(); }
+});
