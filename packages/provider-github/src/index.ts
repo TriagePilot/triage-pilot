@@ -30,3 +30,5 @@ export {
 export { verifyGitHubSignature } from "./webhook.js";
 
 export { listOpenReviewRequestsWithInstallationProbe, GitHubBacklogError, type GitHubBacklogFailureReason, type GitHubBacklogInput } from "./backlog.js";
+
+export { createGitHubPullRequestQueueReader } from "./pull-request-queue.js";
