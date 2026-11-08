@@ -52,8 +52,9 @@ it("loads the full report via HTTP at direct analytics entry and preserves histo
     expect(container.textContent).toContain("history-only");
     expect(fetcher.mock.calls.filter(([url]) => String(url).startsWith("/api/operations/analytics?"))).toHaveLength(1);
     await act(async () => { container.querySelector<HTMLAnchorElement>('a[href="#overview"]')!.click(); window.location.hash = "#overview"; window.dispatchEvent(new HashChangeEvent("hashchange")); });
-    expect(container.textContent).toContain("Operations ledger");
-    expect(container.textContent).toContain("Run missing change request");
+    expect(container.querySelector("main h1")?.textContent).toBe("Overview");
+    await act(async () => { window.location.hash = "#decisions"; window.dispatchEvent(new HashChangeEvent("hashchange")); });
+    expect(container.textContent).toContain("Run a missing change request");
     expect(container.querySelector('.worker-summary strong')?.textContent).toBe("Worker healthy");
     const url = container.querySelector<HTMLInputElement>('#routing-recovery-url')!;
     await act(async () => {

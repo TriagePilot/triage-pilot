@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { createWebApp } from "../src/app";
@@ -38,4 +41,28 @@ describe("static administration UI", () => {
     expect(response.headers.get("content-type")).toBe("image/png");
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(pngBytes);
   });
+});
+
+it("serves every locally declared font and its license through production asset routes", async () => {
+  const css = await readFile(new URL("../src/admin/styles.css", import.meta.url), "utf8");
+  const urls = [...css.matchAll(/url\(['"]([^'"]+\.ttf)['"]\)/g)].map(match => match[1]!);
+  expect(
+    urls,
+    "Expected three quoted .ttf font URLs in the administration stylesheet",
+  ).toHaveLength(3);
+  const publicRoot = fileURLToPath(new URL("../public", import.meta.url));
+  const app = createWebApp(buildServices(), { async readAsset(assetPath) {
+    try { return {body: await readFile(path.join(publicRoot, assetPath)), contentType:"application/octet-stream"}; }
+    catch { return null; }
+  }});
+  for (const url of urls) {
+    const response = await app.request(url);
+    expect(response.status, url).toBe(200);
+    expect((await response.arrayBuffer()).byteLength).toBeGreaterThan(100_000);
+  }
+  for (const name of ["inter", "geist", "geistmono"]) {
+    const response = await app.request(`/assets/fonts/${name}-OFL.txt`);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("SIL OPEN FONT LICENSE");
+  }
 });

@@ -112,3 +112,23 @@ async function flushAsyncWork(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
   await Promise.resolve();
 }
+
+it("filters configuration categories, expands details, and retries a failed read", async () => {
+  let reads = 0;
+  const client = { ...api, async readEffectiveConfiguration(w: WorkspaceContext, r: typeof repository) {
+    if (++reads === 1) throw new Error("temporary configuration outage");
+    const value = await api.readEffectiveConfiguration(w, r);
+    return { ...value, trustedPath: "config/review-policy.yml", values: [...value.values, {path:"$.risk.minimumScore", label:"risk.minimumScore", value:25, source:"default" as const}] };
+  }};
+  const container = document.createElement("div"); document.body.append(container);
+  await act(async () => { root = createRoot(container);root.render(<EffectiveConfiguration api={client} workspace={workspace} repository={repository} authorization={{canViewOperations:true,canManageConfiguration:false,canManageReviewerAvailability:false,canRunRoutingRecovery:false}} navigation={{hrefFor:()=>"/configuration"}}/>); });
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain("temporary configuration outage");
+  await act(async () => Array.from(container.querySelectorAll('button')).find(b=>b.textContent==='Retry configuration')!.click());
+  expect(container.textContent).toContain('config/review-policy.yml');
+  await act(async () => Array.from(container.querySelectorAll('button')).find(b=>b.textContent==='Risk scoring')!.click());
+  expect(container.querySelector('tbody')?.textContent).toContain('risk.minimumScore');
+  expect(container.querySelector('tbody')?.textContent).not.toContain('routing.includeDraftPullRequests');
+  expect(container.querySelector('details')?.open).toBe(false);
+  await act(async () => Array.from(container.querySelectorAll('button')).find(b=>b.textContent==='Ownership')!.click());
+  expect(container.querySelector('tbody')?.textContent).toContain('ownership.requiredApprovalCount');
+});

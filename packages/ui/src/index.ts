@@ -1,3 +1,5 @@
+// Keep the composite dashboard export compatible for existing package hosts.
+// The self-hosted app uses the dedicated pages exported below.
 export {
   OperationsDashboard,
   type OperationsDashboardProps,
@@ -35,3 +37,4 @@ export type {
 export { Analytics, type AnalyticsProps } from "./components/Analytics.js";
 export { AnalyticsCharts } from "./components/AnalyticsCharts.js";
 export type { AnalyticsApiClient } from "./analytics-api.js";
+export { OverviewPage, RepositoriesPage, RoutingDecisionsPage, SystemHealthPage, type OperationsPageProps, type OperationsPageNavigation, type RoutingDecisionsPageProps } from "./components/OperationsPages.js";
