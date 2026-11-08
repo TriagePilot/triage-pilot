@@ -128,3 +128,5 @@ export {
 } from "./reviewer-backlog.js";
 export { readAnalyticsFacts } from "./analytics.js";
 export { normalizeAnalyticsDecision, readOriginalReviewerActors, type AnalyticsDecisionRow } from "./analytics-records.js";
+
+export { resolvePullRequestQueueScope, assertPullRequestQueueScopeActive, readQueueAssessments } from "./pull-request-queue.js";
