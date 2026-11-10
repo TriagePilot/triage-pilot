@@ -4,7 +4,7 @@ TriagePilot can publish the `triagepilot/human-review-policy` GitHub App check f
 
 ## Prerequisites
 
-Use individual GitHub user handles in `.github/triagepilot.yml`; team handles such as `@organization/team` are not supported. Configure **Commit statuses: Read and write** (`statuses:write`) and the other App permissions, then subscribe to **Pull request review** events as described in the [GitHub App setup guide](setup.md). Existing installations must approve the permission update or be reinstalled before enforce mode is resumed. The policy check is created only when the trusted base configuration explicitly uses `mode: enforce`.
+Use individual GitHub user handles in `.triagepilot.yml`; team handles such as `@organization/team` are not supported. Configure **Commit statuses: Read and write** (`statuses:write`) and the other App permissions, then subscribe to **Pull request review** events as described in the [GitHub App setup guide](setup.md). Existing installations must approve the permission update or be reinstalled before enforce mode is resumed. The policy check is created only when the trusted base configuration explicitly uses `mode: enforce`.
 
 ## Ruleset configuration
 

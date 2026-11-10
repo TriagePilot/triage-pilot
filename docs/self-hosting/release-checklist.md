@@ -65,10 +65,10 @@ The exact parallel `pnpm test` gate packages in a disposable source workspace, s
 Use a disposable GitHub App and organization that are safe for acceptance testing:
 
 1. Configure TriagePilot for the test organization and install the App on exactly two selected repositories in that organization.
-2. Keep one repository's `.github/triagepilot.yml` in `mode: shadow`.
+2. Keep one repository's `.triagepilot.yml` in `mode: shadow`.
 3. Deliver one supported pull-request webhook, then redeliver that same delivery.
 4. Verify the duplicate delivery produces one webhook receipt, one job, and one complete routing decision, with no GitHub write.
-5. Open a pull request that changes only `.github/triagepilot.yml` to `mode: enforce`; verify its event remains governed by the shadow configuration at its base and performs no GitHub write.
+5. Open a pull request that changes only `.triagepilot.yml` to `mode: enforce`; verify its event remains governed by the shadow configuration at its base and performs no GitHub write.
 6. Merge that configuration change. For a different pull request, pause the worker, deliver an event at head A, advance the pull request to head B, then resume the worker. Verify a permanent action failure is recorded and no check, comment, reviewer, or approval write is made for the delayed job.
 7. Deliver a new supported event for head B and verify the intended GitHub action and recorded successful outcome. Confirm the check targets head B and any policy approval is pinned to head B.
 8. Verify the second selected repository is discovered and can be processed within the same configured organization.

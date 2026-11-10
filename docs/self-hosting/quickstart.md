@@ -82,7 +82,7 @@ For a build-from-source deployment, run the same command without the two `-f` ar
 
 Install the configured GitHub App in `GITHUB_ORGANIZATION` on only the repositories this deployment should process.
 
-Add `.github/triagepilot.yml` to each selected repository. Missing configuration and `mode: shadow` perform reads and record decisions without GitHub writes. The repository file at the pull request's base commit is the only mode control; an unmerged head change cannot enable writes for its own pull request. Follow the [shadow-to-enforce guide](../operations/shadow-to-enforce.md) before changing it to `mode: enforce`.
+Add `.triagepilot.yml` to each selected repository. Missing configuration and `mode: shadow` perform reads and record decisions without GitHub writes. The repository file at the pull request's base commit is the only mode control; an unmerged head change cannot enable writes for its own pull request. Follow the [shadow-to-enforce guide](../operations/shadow-to-enforce.md) before changing it to `mode: enforce`.
 
 ## Inspect analytics
 
