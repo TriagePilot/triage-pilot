@@ -8,6 +8,7 @@ const baseConfig = {
   thresholds: { low: 25, high: 70 },
   paths: [{ pattern: "src/auth/**", weight: 30, tag: "auth" }],
   suppressors: [{ ifAllMatch: ["docs/**", "*.md", "*.mdx"], ceiling: 25 }],
+  authors: [],
   aiAuthorship: { enabled: true, modifier: 10 },
 };
 
@@ -86,6 +87,7 @@ risk:
         thresholds: { low: 25, high: 70 },
         paths: [{ pattern: "src/routing.ts", weight, tag: "routing" }],
         suppressors: [],
+        authors: [],
         aiAuthorship: { enabled: false, modifier: 10 },
       },
     });
@@ -109,6 +111,7 @@ risk:
         thresholds: { low: 25, high: 70 },
         paths: [{ pattern: "src/auth/**", weight: 80, tag: "auth" }],
         suppressors: [],
+        authors: [],
         aiAuthorship: { enabled: true, modifier: 20 },
       },
     });
@@ -146,6 +149,7 @@ risk:
         size: { highChangedFiles: 100, highChangedLines: 5_000 },
         paths: [{ pattern: "src/auth/**", weight: 30, tag: "auth" }],
         suppressors: [],
+        authors: [],
         aiAuthorship: { enabled: false, modifier: 0 },
       },
     });
@@ -182,13 +186,14 @@ risk:
         size: { highChangedFiles: 100, highChangedLines: 5_000 },
         paths: [],
         suppressors: [],
+        authors: [],
         aiAuthorship: { enabled: false, modifier: 0 },
       },
     });
 
     expect(result.score).toBe(91);
     expect(result.tier).toBe("high");
-    expect(result.classifierVersion).toBe("risk-v2");
+    expect(result.classifierVersion).toBe("risk-v3");
     expect(result.components).toEqual([
       expect.objectContaining({ reason: "changed_file_count" }),
       ...(files.length === 1 ? [expect.objectContaining({ reason: "large_line_delta" })] : []),
@@ -207,6 +212,7 @@ risk:
         size: { highChangedFiles: 100, highChangedLines: 5_000 },
         paths: [],
         suppressors: [{ ifAllMatch: ["docs/**"], ceiling: 25 }],
+        authors: [],
         aiAuthorship: { enabled: false, modifier: 0 },
       },
     });
@@ -232,6 +238,7 @@ risk:
         size: { highChangedFiles: 100, highChangedLines: 5_000 },
         paths: [],
         suppressors: [],
+        authors: [],
         aiAuthorship: { enabled: false, modifier: 0 },
       },
     });
@@ -240,4 +247,40 @@ risk:
     expect(result.tier).toBe("high");
     expect(result.components).toContainEqual(expect.objectContaining({ reason: "large_change_size" }));
   });
+});
+
+it("adds every matching author rule before applying the existing suppressor", () => {
+  const config = { ...baseConfig, authors: [
+    { authors: ["@alex", "@sam"], weight: 30, tag: "review" },
+    { authors: ["@Alex"], weight: 15, tag: "extra" },
+  ] };
+  const input = { files: [{ path: "src/code.ts", additions: 1, deletions: 0 }], author: " @ALEX ", branchName: "feature", commitMessages: [], config };
+  const result = scorePullRequestRisk(input);
+  expect(result.score).toBe(50);
+  expect(result.components).toContainEqual({ reason: "author_rule:review", score: 30, detail: "PR author @alex matched author rule" });
+  expect(scorePullRequestRisk({ ...input, files: [{ path: "docs/readme.md", additions: 1, deletions: 0 }] }).score).toBe(25);
+  expect(scorePullRequestRisk({ ...input, author: "someone" }).score).toBe(5);
+});
+
+it.each([
+  { weight: 20, score: 25, tier: "low" },
+  { weight: 21, score: 26, tier: "medium" },
+  { weight: 65, score: 70, tier: "medium" },
+  { weight: 66, score: 71, tier: "high" },
+  { weight: 100, score: 100, tier: "high" },
+] as const)("uses existing thresholds with author weight $weight", ({ weight, score, tier }) => {
+  const result = scorePullRequestRisk({
+    files: [{ path: "src/code.ts", additions: 1, deletions: 0 }], author: "alex", branchName: "feature", commitMessages: [],
+    config: { ...baseConfig, authors: [{ authors: ["@alex"], weight, tag: "review" }] },
+  });
+  expect(result).toMatchObject({ score, tier });
+});
+
+it("scores test-only changes by author and keeps size escalation above suppressors", () => {
+  const config = { ...baseConfig, authors: [{ authors: ["@alex"], weight: 30, tag: "review" }] };
+  const input = { author: "alex", branchName: "feature", commitMessages: [], config };
+  expect(scorePullRequestRisk({ ...input, files: [{ path: "tests/example.test.ts", additions: 1, deletions: 0 }] }).score).toBe(30);
+  const result = scorePullRequestRisk({ ...input, files: [{ path: "docs/large.md", additions: 5000, deletions: 0 }] });
+  expect(result).toMatchObject({ score: 71, tier: "high" });
+  expect(result.components).toContainEqual(expect.objectContaining({ reason: "large_change_size", score: 21 }));
 });

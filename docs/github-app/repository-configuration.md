@@ -36,6 +36,10 @@ risk:
     - pattern: "src/auth/**"
       weight: 30
       tag: auth
+  authors:
+    - authors: ["@alex", "@sam"]
+      weight: 30
+      tag: additional-review
   suppressors:
     - if_all_match: ["docs/**", "*.md", "*.mdx"]
       ceiling: 25
@@ -56,6 +60,7 @@ ownership:
 Objects merge recursively. Repository scalar values replace organization values. Arrays place repository entries first, followed by organization entries whose normalized keys do not collide:
 
 - `risk.paths` entries are keyed by normalized `pattern`;
+- `risk.authors` entries are keyed by the sorted, case-insensitive set of author handles;
 - `risk.suppressors` entries are keyed by the sorted, normalized `if_all_match` set;
 - `ownership.rules` entries are keyed by the sorted, normalized `paths` set;
 - scalar arrays are keyed by their trimmed, lowercase value.
@@ -95,3 +100,9 @@ The only accepted mode values are `shadow` and `enforce`. In the OSS self-hosted
 In enforce mode, `triagepilot/human-review-policy` requires the number of individual human approvals determined by the risk tier: one for medium risk and the configured one or two for high risk. TriagePilot may request selected reviewers, but they are not an approval cohort. Any active individual approval on the pull request counts, including approval that predates TriagePilot; a later request for changes or dismissal from that reviewer removes it. New commits preserve active approvals and do not trigger automatic reviewer re-requests; developers request a fresh review manually in GitHub when needed. The check succeeds for a no-human route and when the required count is met. It remains in progress while more approvals are needed, and fails when a human-review route has no eligible individual reviewer or TriagePilot reaches a permanent evaluation failure. Team reviewer targets are invalid and result in no GitHub writes.
 
 Use the [required human-review policy guide](required-human-review-policy.md) to configure this check in a GitHub ruleset. Subscribe the GitHub App to `Pull request review` events as described in the [setup guide](setup.md); those events trigger the policy re-evaluation.
+
+## Author risk rules
+
+`risk.authors` assigns a weight to one or more individual GitHub accounts. A rule matches the pull request author case-insensitively and adds its weight once to the total risk score. Rules with overlapping author lists each add their weight. Authors not listed add no points. Each rule requires a nonempty `authors` list of `@handles`, an integer `weight` from 0 to 100, and a nonempty `tag`. The default is an empty list.
+
+When inheriting organization configuration, a repository rule replaces an organization rule only when their complete author sets match, regardless of ordering or case. Other groups remain and may overlap. Existing thresholds, score caps and suppressors apply, so a matching rule does not guarantee human review. Configuration is read from the trusted base revision.

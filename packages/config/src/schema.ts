@@ -50,6 +50,15 @@ const riskPathSchema = z.object({
   weight: z.number().int().min(0).max(100),
   tag: z.string().min(1),
 }).strict();
+const riskAuthorRuleSchema = z.object({
+  authors: z.array(z.string().regex(/^@[A-Za-z0-9_.-]+$/, "author must be an individual GitHub user handle")).min(1),
+  weight: z.number().int().min(0).max(100),
+  tag: z.string().min(1),
+}).strict();
+const riskAuthorRulesSchema = z.array(riskAuthorRuleSchema).superRefine((entries, context) => {
+  checkKeyedDuplicates(entries, (entry) => normalizeSetKey(entry.authors), [], "authors", context);
+  entries.forEach((entry, index) => checkScalarDuplicates(entry.authors, [index, "authors"], context));
+});
 const riskSuppressorDocumentSchema = z.object({
   if_all_match: z.array(z.string().min(1)).min(1),
   ceiling: z.number().int().min(0).max(100),
@@ -89,6 +98,7 @@ const riskDocumentSchema = z.object({
   size: riskSizeDocumentSchema.optional(),
   thresholds: riskThresholdDocumentSchema.optional(),
   paths: z.array(riskPathSchema).optional(),
+  authors: riskAuthorRulesSchema.optional(),
   suppressors: z.array(riskSuppressorDocumentSchema).optional(),
   ai_authorship: riskAiAuthorshipDocumentSchema.optional(),
 }).strict();
@@ -96,12 +106,14 @@ const riskInputSchema = z.object({
   size: riskSizeInputSchema,
   thresholds: riskThresholdInputSchema,
   paths: z.array(riskPathSchema).default([]),
+  authors: riskAuthorRulesSchema.default([]),
   suppressors: z.array(riskSuppressorInputSchema).default([]),
   ai_authorship: riskAiAuthorshipInputSchema,
 }).strict().default({}).transform((risk) => ({
   size: risk.size,
   thresholds: risk.thresholds,
   paths: risk.paths,
+  authors: risk.authors,
   suppressors: risk.suppressors,
   aiAuthorship: risk.ai_authorship,
 }));

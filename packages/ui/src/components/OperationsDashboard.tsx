@@ -541,6 +541,7 @@ function labelForRiskComponent(reason: string): string {
     ai_authorship_signal: "AI authorship signal",
     docs_or_test_suppressor: "Documentation or test-only cap",
   };
+  if (reason.startsWith("author_rule:")) return `Author rule: ${reason.slice("author_rule:".length)}`;
   if (reason.startsWith("high_risk_path:")) {
     return `High-risk path: ${reason.slice("high_risk_path:".length)}`;
   }

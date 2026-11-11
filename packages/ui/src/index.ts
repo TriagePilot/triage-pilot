@@ -1,3 +1,5 @@
+// Keep the composite dashboard export compatible for existing package hosts.
+// The self-hosted app uses the dedicated pages exported below.
 export {
   OperationsDashboard,
   type OperationsDashboardProps,
@@ -39,3 +41,5 @@ export { PullRequests, type PullRequestsProps } from "./components/PullRequests.
 export { PullRequestDetails, type PullRequestDetailsProps } from "./components/PullRequestDetails.js";
 export { buildPullRequestQueueView, matchedQueueRoles, type PullRequestQueueFilters } from "./pull-request-queue-view.js";
 export type { PullRequestQueueApiClient } from "./pull-request-queue-api.js";
+
+export { OverviewPage, RepositoriesPage, RoutingDecisionsPage, SystemHealthPage, type OperationsPageProps, type OperationsPageNavigation, type RoutingDecisionsPageProps } from "./components/OperationsPages.js";

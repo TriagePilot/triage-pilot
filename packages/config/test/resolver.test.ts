@@ -246,3 +246,15 @@ describe("resolveConfiguration", () => {
     });
   });
 });
+
+it("tracks provenance for inherited author groups and changes the effective hash", async () => {
+  const organization = 'risk:\n  authors:\n    - { authors: ["@Alex", "@Sam"], weight: 10, tag: group }\n    - { authors: ["@jordan"], weight: 15, tag: other }';
+  const repository = 'inheritance: true\nrisk:\n  authors:\n    - { authors: ["@sam", "@alex"], weight: 30, tag: override }';
+  const result = await resolveFixture({ organization, repository });
+  const changed = await resolveFixture({ organization, repository: repository.replace('weight: 30', 'weight: 31') });
+  expect(result).toMatchObject({ ok: true, config: { risk: { authors: [
+    { authors: ["@sam", "@alex"], weight: 30 }, { authors: ["@jordan"], weight: 15 },
+  ] } }, provenance: { sources: { "$.risk.authors.0.weight": "repository", "$.risk.authors.1.weight": "organization" } } });
+  if (!result.ok || !changed.ok) throw new Error("expected valid configurations");
+  expect(result.provenance.effectiveHash).not.toBe(changed.provenance.effectiveHash);
+});

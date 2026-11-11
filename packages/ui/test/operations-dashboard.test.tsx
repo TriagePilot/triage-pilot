@@ -46,6 +46,8 @@ describe("OperationsDashboard", () => {
     expect(container.textContent).toContain("Review request rejected");
     expect(container.textContent).toContain("Score breakdown");
     expect(container.textContent).toContain("Large line delta");
+    expect(container.textContent).toContain("Author rule: review");
+    expect(container.textContent).toContain("PR author @alex matched author rule");
     expect(container.textContent).toContain("1 of 2 required · shortfall 1");
     expect(container.textContent).not.toContain("0 of 0 required");
     expect(
@@ -243,6 +245,7 @@ const api: OperationsApiClient = {
             classifierVersion: "risk-v2",
             tier: "medium",
             components: [
+              { reason: "author_rule:review", score: 30, detail: "PR author @alex matched author rule" },
               {
                 reason: "large_line_delta",
                 score: 25,
