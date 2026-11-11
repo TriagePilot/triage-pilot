@@ -5,13 +5,15 @@ Every repository starts in shadow mode. Review recent decisions before enabling 
 ## Preconditions
 
 - Shadow decisions follow the expected zero/one/two reviewer distribution, never exceed two people, and reserve two-reviewer decisions for the intended high-risk cases.
-- `.github/triagepilot.yml` parses without diagnostics.
+- `.triagepilot.yml` parses without diagnostics.
 - The GitHub App has the permissions documented in [GitHub App permissions](../github-app/permissions.md).
 - Branch protection and repository policy allow the intended actions.
 
+If the repository only has the legacy `.github/triagepilot.yml`, update that file or migrate its configuration to the root path. If both exist, the root file takes precedence. See the [repository configuration reference](../github-app/repository-configuration.md).
+
 ## Enable Enforce Mode
 
-Change the repository's `.github/triagepilot.yml` to:
+Change the repository's `.triagepilot.yml` to:
 
 ```yaml
 version: 1

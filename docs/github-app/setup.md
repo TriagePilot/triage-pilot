@@ -17,6 +17,6 @@ Install the App in the one configured organization and choose **Only select repo
 
 For an existing installation, changing the App permissions is not sufficient on its own. Approve GitHub's requested permission update for the configured organization installation. If no approval action is available, reinstall the App and reselect the intended repositories. Confirm the installation grants `statuses:write` before enabling or resuming enforce mode.
 
-Add `.github/triagepilot.yml` using the [repository configuration reference](repository-configuration.md). Repositories remain in shadow mode by default.
+Add `.triagepilot.yml` using the [repository configuration reference](repository-configuration.md). Repositories remain in shadow mode by default.
 
 For enforce-mode repositories that use required human review, follow the [required human-review policy guide](required-human-review-policy.md) to configure the repository or organization ruleset. The status permission lets the ruleset pin `triagepilot/human-review-policy` to the expected **TriagePilot** source. TriagePilot does not create or edit GitHub rulesets.

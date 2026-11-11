@@ -8,6 +8,8 @@ Your first outcome is an inspectable routing decision in the operations dashboar
 
 **[Run TriagePilot in shadow mode](docs/self-hosting/quickstart.md)**
 
+**[Configure your repositories with a coding assistant](SETUP_PROMPT.md)** using a copyable setup prompt that proposes policy before creating local shadow-mode configuration.
+
 You need Docker Engine with Docker Compose v2 and permission to create and install an organization GitHub App with the [required permissions](docs/github-app/permissions.md). The supported stack runs `web`, exactly one `worker`, and PostgreSQL; one deployment serves one GitHub organization and its selected repositories.
 
 ## Get help

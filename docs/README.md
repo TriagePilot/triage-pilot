@@ -14,6 +14,7 @@
 
 ## Configure GitHub
 
+- [Repository setup prompt for coding assistants](../SETUP_PROMPT.md)
 - [GitHub App setup](github-app/setup.md)
 - [GitHub App permissions](github-app/permissions.md)
 - [Repository configuration](github-app/repository-configuration.md)
