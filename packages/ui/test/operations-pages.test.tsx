@@ -305,6 +305,7 @@ it("explains every risk contribution, including suppressor caps, in the shipped 
       tier: "medium",
       components: [
         { reason: "changed_file_count", score: 10, detail: "7 changed files" },
+        { reason: "author_rule:review", score: 30, detail: "PR author @alex matched author rule" },
         {
           reason: "high_risk_path:infrastructure",
           score: 20,
@@ -320,6 +321,7 @@ it("explains every risk contribution, including suppressor caps, in the shipped 
   });
   const inspector = container.querySelector(".decision-inspector")!;
   expect(inspector.textContent).toContain("risk-v1 · medium");
+  expect(inspector.textContent).toContain("Author rule: review");
   expect(
     Array.from(inspector.querySelectorAll(".score-components li")).map(item => ({
       score: item.querySelector("strong")?.textContent,
@@ -327,6 +329,7 @@ it("explains every risk contribution, including suppressor caps, in the shipped 
     })),
   ).toEqual([
     { score: "+10", detail: "7 changed files" },
+    { score: "+30", detail: "PR author @alex matched author rule" },
     { score: "+20", detail: "3 files matched infrastructure/**" },
     { score: "cap", detail: "Risk score capped at 30" },
   ]);

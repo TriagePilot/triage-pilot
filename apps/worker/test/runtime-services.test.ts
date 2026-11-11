@@ -377,10 +377,11 @@ describe("worker routing GitHub reads", () => {
       riskTier: "low",
       risk: {
         score: 40,
-        classifierVersion: "risk-v2",
+        classifierVersion: "risk-v3",
         components: [
           { reason: "changed_file_count", score: 10, detail: "10 changed files" },
           { reason: "high_risk_path:auth", score: 30, detail: "1 file matched src/auth/**" },
+          { reason: "author_rule:review", score: 30, detail: "PR author @alex matched author rule" },
         ],
       },
     } as Parameters<typeof services.applyDecisionActions>[0];
@@ -421,7 +422,7 @@ describe("worker routing GitHub reads", () => {
       owner: "acme",
       repo: "api",
       issue_number: 7,
-      body: "<!-- triagepilot:decision:decision-1 -->\nTriagePilot decision: policy_approval\n\n**Risk score:** 40/100 · **Tier:** low\n**Classifier:** risk-v2\n\n<details>\n<summary>Score breakdown</summary>\n\n- **+10 Changed file count** — 10 changed files\n- **+30 High-risk path: auth** — 1 file matched src/auth/**\n</details>",
+      body: "<!-- triagepilot:decision:decision-1 -->\nTriagePilot decision: policy_approval\n\n**Risk score:** 40/100 · **Tier:** low\n**Classifier:** risk-v3\n\n<details>\n<summary>Score breakdown</summary>\n\n- **+10 Changed file count** — 10 changed files\n- **+30 High-risk path: auth** — 1 file matched src/auth/**\n- **+30 Author rule: review** — PR author @alex matched author rule\n</details>",
     });
   });
 

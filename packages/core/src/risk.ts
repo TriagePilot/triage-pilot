@@ -2,7 +2,7 @@ import { minimatch } from "minimatch";
 
 import type { RiskTier, ScoreComponent } from "@triagepilot/contracts";
 
-export const CLASSIFIER_VERSION = "risk-v2";
+export const CLASSIFIER_VERSION = "risk-v3";
 
 export interface ChangedFileMetadata {
   path: string;
@@ -36,10 +36,17 @@ export interface RiskSizeConfig {
   highChangedLines: number;
 }
 
+export interface RiskAuthorConfig {
+  authors: string[];
+  weight: number;
+  tag: string;
+}
+
 export interface RiskScoringConfig {
   size: RiskSizeConfig;
   thresholds: RiskThresholdConfig;
   paths: RiskPathConfig[];
+  authors: RiskAuthorConfig[];
   suppressors: RiskSuppressorConfig[];
   aiAuthorship: AiAuthorshipConfig;
 }
@@ -141,6 +148,13 @@ export function scorePullRequestRisk(input: RiskScoringInput): RiskScoringResult
       score: config.aiAuthorship.modifier,
       detail: "Author, branch, or commit metadata indicates AI-authored changes",
     });
+  }
+
+  const author = input.author.trim().replace(/^@/, "").toLowerCase();
+  for (const rule of config.authors) {
+    if (rule.authors.some((handle) => handle.trim().replace(/^@/, "").toLowerCase() === author)) {
+      components.push({ reason: `author_rule:${rule.tag}`, score: rule.weight, detail: `PR author @${author} matched author rule` });
+    }
   }
 
   const reachedFileThreshold = scoredFiles.length >= config.size.highChangedFiles;

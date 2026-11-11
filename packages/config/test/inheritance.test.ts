@@ -137,3 +137,17 @@ describe("parseConfigurationDocument", () => {
     }));
   });
 });
+
+it("overrides identical author sets and retains overlapping groups", () => {
+  const parent = { risk: { authors: [
+    { authors: ["@Alex", "@Sam"], weight: 10, tag: "group" },
+    { authors: ["@jordan"], weight: 15, tag: "other" },
+  ] } };
+  const child = { risk: { authors: [
+    { authors: ["@sam", "@alex"], weight: 30, tag: "override" },
+    { authors: ["@alex"], weight: 20, tag: "overlap" },
+  ] } };
+  expect(mergeConfiguration(parent, child)).toEqual({ risk: { authors: [
+    ...child.risk.authors, parent.risk.authors[1],
+  ] } });
+});

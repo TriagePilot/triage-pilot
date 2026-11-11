@@ -41,6 +41,7 @@ function effectiveConfiguration(mode: "shadow" | "enforce") {
         thresholds: { low: 25, high: 70 },
         paths: [],
         suppressors: [],
+        authors: [],
         aiAuthorship: { enabled: false, modifier: 0 },
       },
       ownership: { rules: [], fallbackReviewers: [] },

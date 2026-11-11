@@ -82,6 +82,9 @@ function mergeAtPath(
 
 function arrayEntryKey(path: string[], entry: unknown): string {
   const pathKey = path.join(".");
+  if (pathKey === "risk.authors" && isObject(entry) && Array.isArray(entry.authors)) {
+    return normalizeSetKey(entry.authors);
+  }
   if (pathKey === "risk.paths" && isObject(entry) && typeof entry.pattern === "string") {
     return normalizeScalarKey(entry.pattern);
   }
