@@ -10,19 +10,49 @@ function setup() {
 }
 afterEach(() => vi.useRealTimers());
 describe("queue acquisition", () => {
-  it("cancels an old details acquisition when a manual list refresh supersedes it", async () => {
+  it("retries both viewers' details against a manually refreshed list", async () => {
     const { ports, service } = setup(); let release!: (value: ReturnType<typeof queueReviewState>) => void;
     ports.readReviewState.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
     await service.readInitial({ workspaceId: "w" });
     const old = service.read({ workspaceId: "w", progressive: true });
-    const rejected = expect(old).rejects.toMatchObject({ reason: "provider_unavailable" });
+    const otherViewer = service.read({ workspaceId: "w", progressive: true });
     await vi.advanceTimersByTimeAsync(0);
     ports.listOpenPullRequests.mockResolvedValue([queuePull({ number: 2, changeRequestId: "2" })]);
     const fresh = await service.readInitial({ workspaceId: "w", forceRefresh: true });
-    release(queueReviewState()); await rejected;
+    release(queueReviewState());
     expect(fresh.items.map(item => item.pullRequest.number)).toEqual([2]);
-    const next = await service.read({ workspaceId: "w", progressive: true });
-    expect(next.items.map(item => item.pullRequest.number)).toEqual([2]); service.dispose();
+    expect((await old).items.map(item => item.pullRequest.number)).toEqual([2]);
+    expect((await otherViewer).items.map(item => item.pullRequest.number)).toEqual([2]); service.dispose();
+  });
+  it("retries both viewers' details when another viewer renews an expired list", async () => {
+    const { ports, service } = setup(); let release!: (value: ReturnType<typeof queueReviewState>) => void;
+    ports.readReviewState.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    await service.readInitial({ workspaceId: "w" });
+    await vi.advanceTimersByTimeAsync(59_000);
+    const first = service.read({ workspaceId: "w", progressive: true });
+    const second = service.read({ workspaceId: "w", progressive: true });
+    await vi.advanceTimersByTimeAsync(1_000);
+    ports.listOpenPullRequests.mockResolvedValue([queuePull({ number: 2, changeRequestId: "2" })]);
+    const fresh = await service.readInitial({ workspaceId: "w" });
+    release(queueReviewState());
+    expect(fresh.items.map(item => item.pullRequest.number)).toEqual([2]);
+    expect((await first).items.map(item => item.pullRequest.number)).toEqual([2]);
+    expect((await second).items.map(item => item.pullRequest.number)).toEqual([2]); service.dispose();
+  });
+  it("revalidates authority when retrying a superseded details acquisition", async () => {
+    const { ports, service } = setup();
+    ports.readReviewState.mockImplementationOnce(() => new Promise(() => {}));
+    await service.readInitial({ workspaceId: "w" });
+    const pending = service.read({ workspaceId: "w", progressive: true });
+    const rejected = expect(pending).rejects.toMatchObject({ reason: "authority" });
+    await vi.advanceTimersByTimeAsync(0);
+    // Revoke access while a second viewer's refresh is acquiring the replacement list.
+    ports.listOpenPullRequests.mockImplementationOnce(async () => {
+      ports.assertActive.mockRejectedValue(new PullRequestQueueUnavailableError("authority"));
+      return [queuePull({ number: 2, changeRequestId: "2" })];
+    });
+    await expect(service.readInitial({ workspaceId: "w", forceRefresh: true })).rejects.toMatchObject({ reason: "authority" });
+    await rejected; service.dispose();
   });
   it("reuses a short-lived partial list without losing its coverage warning", async () => {
     const { ports, service } = setup(); const other = { ...queuePull().repository, externalId: "2", name: "other" };

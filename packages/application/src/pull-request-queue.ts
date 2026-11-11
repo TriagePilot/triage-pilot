@@ -189,14 +189,14 @@ export function createPullRequestQueueService(ports: PullRequestQueuePorts) {
         continue;
       }
       const existing = flights.get(key);
-      if (existing) { task.close(); try { return await existing.promise; } catch (error) { if (error instanceof ScopeChanged && !progressive) continue; throw safeError(error); } }
+      if (existing) { task.close(); try { return await existing.promise; } catch (error) { if (error instanceof ScopeChanged) { if (flights.get(key) === existing) flights.delete(key); continue; } throw safeError(error); } }
       const cached = cache.get(key);
       if (!forceRefresh && cached && ports.now().getTime() < Date.parse(cached.expiresAt)) { task.close(); cache.delete(key); cache.set(key, cached); return cached; }
       if (forceRefresh) reviewCache.delete(key);
       const flight = { controller: task.controller, promise: acquire(scope, repositories, key, current.generation, task) };
       flights.set(key, flight);
       try { return await flight.promise; }
-      catch (error) { if (error instanceof ScopeChanged && !progressive) continue; throw safeError(error); }
+      catch (error) { if (error instanceof ScopeChanged) continue; throw safeError(error); }
       finally { if (flights.get(key) === flight) flights.delete(key); }
     }
     throw new PullRequestQueueUnavailableError("authority");
