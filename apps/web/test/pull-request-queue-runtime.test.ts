@@ -14,6 +14,26 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("pull request queue runti
     const runtime = createPullRequestQueueRuntime({ db, workspaceId, githubOrganization: "acme", github, now: () => new Date(), createRequester: createRequester as never });
     return { runtime, request, createRequester, repositories };
   }
+  it("returns eligible PRs before slow review reads and enriches them separately", async () => withPostgresTestDatabase(async db => {
+    const { runtime, request } = await fixture(db); let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const bot = { ...pull, id: 7002, number: 8, user: { id: 2, login: "automation[bot]", type: "Bot" } };
+    const draft = { ...pull, id: 7003, number: 9, draft: true };
+    request.mockImplementation(async route => {
+      if (route.endsWith("/pulls")) return { data: [pull, bot, draft] };
+      if (route.endsWith("/reviews")) { await blocked; return { data: [] }; }
+      return provider(route);
+    });
+    try {
+      const initial = await runtime.readPullRequestQueue({ forceRefresh: false, phase: "initial" });
+      expect(initial.totalOpen).toBe(1); expect(initial.items.map(item => item.pullRequest.number)).toEqual([7]);
+      expect(initial.items[0]?.attention.badge).toBe("checking");
+      expect(request.mock.calls.some(([route]) => route.endsWith("/reviews"))).toBe(false);
+      const details = runtime.readPullRequestQueue({ forceRefresh: false, phase: "details" });
+      release(); expect((await details).items[0]?.reviewState.status).toBe("complete");
+      expect(request.mock.calls.filter(([route]) => route.endsWith("/pulls"))).toHaveLength(1);
+    } finally { release(); runtime.disposePullRequestQueue(); }
+  }));
   it("discovers unrecorded selected repositories without inserts and reuses cached PR/review reads", async () => withPostgresTestDatabase(async db => {
     const { runtime, request } = await fixture(db);
     try {

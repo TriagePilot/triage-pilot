@@ -21,7 +21,7 @@ it("renders owners and evidence, traps dialog focus, restores focus, and refresh
   const dialog = container.querySelector('[role="dialog"]')!; const close = dialog.querySelector("button")!; expect(document.activeElement).toBe(close);
   await act(async () => close.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true }))); expect(document.activeElement?.textContent).toBe("View routing decisions");
   await act(async () => dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))); expect(document.activeElement).toBe(trigger);
-  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Refresh")!.click()); expect(api.readPullRequestQueue).toHaveBeenCalledTimes(2); expect(api.readPullRequestQueue).toHaveBeenLastCalledWith(workspace, { forceRefresh: true }, expect.any(AbortSignal));
+  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Refresh")!.click()); expect(api.readPullRequestQueue).toHaveBeenCalledTimes(2); expect(api.readPullRequestQueue).toHaveBeenLastCalledWith(workspace, { forceRefresh: true, phase: "initial" }, expect.any(AbortSignal));
 });
 it("renders empty and partial snapshots accurately", async () => {
   const api = { readPullRequestQueue: vi.fn().mockResolvedValue(queueSnapshot({ status: "partial", membershipComplete: false, totalOpen: null })) };
@@ -128,4 +128,26 @@ it("does not poll as time advances or apply a response after unmount", async () 
     await act(async () => root.unmount()); await act(async () => resolve(queueSnapshot({ items: [item], totalOpen: 1 }))); expect(container.textContent).toBe("");
     root = createRoot(container);
   } finally { vi.useRealTimers(); }
+});
+it("shows open PRs while review details are still loading", async () => {
+  let resolve!: (value: ReturnType<typeof queueSnapshot>) => void;
+  const pending = new Promise<ReturnType<typeof queueSnapshot>>(yes => { resolve = yes; });
+  const checking = { ...item, reviewState: { ...item.reviewState, status: "checking" as const }, attention: { ...item.attention, group: "other" as const, badge: "checking" as const, reason: "Checking review status." } };
+  const api = { readPullRequestQueue: vi.fn().mockResolvedValueOnce(queueSnapshot({ status: "partial", classificationComplete: false, items: [checking], totalOpen: 1, enrichmentPending: true })).mockReturnValueOnce(pending) };
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
+  expect(container.textContent).toContain("Change"); expect(container.textContent).toContain("Checking"); expect(api.readPullRequestQueue).toHaveBeenCalledTimes(2);
+  await act(async () => resolve(queueSnapshot({ items: [item], totalOpen: 1 })));
+  expect(container.textContent).toContain("Waiting for reviewers");
+});
+it("clears the initial list if background enrichment loses authority", async () => {
+  const checking = { ...item, reviewState: { ...item.reviewState, status: "checking" as const }, attention: { ...item.attention, group: "other" as const, badge: "checking" as const, reason: "Checking review status." } };
+  let reject!: (reason: Error) => void;
+  const pending = new Promise<ReturnType<typeof queueSnapshot>>((_resolve, fail) => { reject = fail; });
+  const api = { readPullRequestQueue: vi.fn().mockResolvedValueOnce(queueSnapshot({ status: "partial", classificationComplete: false, items: [checking], totalOpen: 1, enrichmentPending: true })).mockReturnValueOnce(pending) };
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
+  expect(container.textContent).toContain("Change");
+  await act(async () => reject(Object.assign(new Error("Not authorized"), { status: 404 })));
+  expect(container.textContent).not.toContain("Change"); expect(container.textContent).toContain("Pull requests unavailable");
 });

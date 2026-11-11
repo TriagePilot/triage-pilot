@@ -238,7 +238,11 @@ export function createSelfHostedPullRequestQueueApi(input: {
   return {
     readPullRequestQueue(workspace, query, signal) {
       return withUnauthorized(input.onUnauthorized, async () => {
-        const response = await fetch(`/api/operations/pull-requests${query.forceRefresh ? "?refresh=true" : ""}`, {
+        const params = new URLSearchParams();
+        if (query.forceRefresh) params.set("refresh", "true");
+        if (query.phase) params.set("phase", query.phase);
+        const suffix = params.toString();
+        const response = await fetch(`/api/operations/pull-requests${suffix ? `?${suffix}` : ""}`, {
           credentials: "same-origin",
           headers: workspaceHeaders(workspace),
           ...(signal ? { signal } : {}),

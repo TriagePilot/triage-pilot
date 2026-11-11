@@ -56,7 +56,7 @@ it("loads everyone across repos, filters both roles, opens exact links and refre
   await act(async () => container.querySelector('[role="dialog"]')!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
   expect(document.activeElement).toBe(trigger);
   await act(async () => button(container, "Refresh").click());
-  expect(api.readPullRequestQueue).toHaveBeenLastCalledWith(workspace, { forceRefresh: true }, expect.any(AbortSignal));
+  expect(api.readPullRequestQueue).toHaveBeenLastCalledWith(workspace, { forceRefresh: true, phase: "initial" }, expect.any(AbortSignal));
   expect(container.textContent).not.toContain("Authored and requested");
   await act(async () => { window.location.hash = "#analytics"; window.dispatchEvent(new HashChangeEvent("hashchange")); });
   expect(container.querySelector(".queue")).toBeNull();

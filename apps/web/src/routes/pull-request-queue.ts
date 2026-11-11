@@ -3,7 +3,7 @@ import { PullRequestQueueUnavailableError, type PullRequestQueueSnapshot } from 
 import { requireAdminSession, type AdminSessionServices } from "./auth.js";
 
 export interface PullRequestQueueServices extends AdminSessionServices {
-  readPullRequestQueue(input: { forceRefresh: boolean; signal?: AbortSignal }): Promise<PullRequestQueueSnapshot>;
+  readPullRequestQueue(input: { forceRefresh: boolean; phase?: "initial" | "details"; signal?: AbortSignal }): Promise<PullRequestQueueSnapshot>;
 }
 export function pullRequestQueueRoutes(services: PullRequestQueueServices) {
   const app = new Hono();
@@ -20,8 +20,9 @@ export function pullRequestQueueRoutes(services: PullRequestQueueServices) {
   });
   app.get("/", async c => {
     const query = new URL(c.req.url).searchParams;
-    if ([...query.keys()].some(key => key !== "refresh") || query.getAll("refresh").length > 1 || (query.has("refresh") && query.get("refresh") !== "true" && query.get("refresh") !== "false")) return c.json({ error: "invalid_query" }, 400);
-    const snapshot = await services.readPullRequestQueue({ forceRefresh: query.get("refresh") === "true", signal: c.req.raw.signal });
+    const phase = query.get("phase");
+    if ([...query.keys()].some(key => key !== "refresh" && key !== "phase") || query.getAll("refresh").length > 1 || query.getAll("phase").length > 1 || (query.has("refresh") && query.get("refresh") !== "true" && query.get("refresh") !== "false") || (phase !== null && phase !== "initial" && phase !== "details")) return c.json({ error: "invalid_query" }, 400);
+    const snapshot = await services.readPullRequestQueue({ forceRefresh: query.get("refresh") === "true", ...(phase ? { phase } : {}), signal: c.req.raw.signal });
     return c.json(snapshot, snapshot.status === "unavailable" ? 503 : 200);
   });
   return app;

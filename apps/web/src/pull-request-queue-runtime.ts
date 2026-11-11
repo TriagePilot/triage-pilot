@@ -51,7 +51,9 @@ export function createPullRequestQueueRuntime(input: {
     linksFor: (_scope, pull, assessment) => ({ provider: githubChangeRequestUrl(pull.repository, pull.number), decision: assessment ? "/#decisions" : null }),
   });
   return {
-    readPullRequestQueue: request => service.read({ ...request, workspaceId: input.workspaceId }),
+    readPullRequestQueue: ({ phase, ...request }) => phase === "initial"
+      ? service.readInitial({ ...request, workspaceId: input.workspaceId })
+      : service.read({ ...request, progressive: phase === "details", workspaceId: input.workspaceId }),
     disposePullRequestQueue: () => service.dispose(),
   };
 }

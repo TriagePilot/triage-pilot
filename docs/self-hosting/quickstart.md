@@ -90,4 +90,4 @@ After administrator login, open **Analytics** for historical enforced outcomes o
 
 ## Inspect open pull requests
 
-After administrator login, open **Pull requests** for the grouped queue of open pull requests in selected repositories. See [Open pull-request queue](../operations/pull-request-queue.md) for filters, evidence, freshness, and coverage.
+After administrator login, open **Pull requests** for the grouped queue of open pull requests in selected repositories, excluding drafts and bot-authored pull requests. See [Open pull-request queue](../operations/pull-request-queue.md) for filters, evidence, freshness, and coverage.

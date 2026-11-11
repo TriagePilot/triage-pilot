@@ -283,6 +283,15 @@ describe("pull request queue API", () => {
     });
   });
 
+  it("sends staged list and enrichment requests with the correct refresh scope", async () => {
+    const fetcher = vi.fn(async () => Response.json({ items: [] })); vi.stubGlobal("fetch", fetcher);
+    const api = createSelfHostedPullRequestQueueApi(); const workspace = { id: "workspace-a", displayName: "Test" };
+    await api.readPullRequestQueue(workspace, { forceRefresh: true, phase: "initial" });
+    expect(fetcher).toHaveBeenLastCalledWith("/api/operations/pull-requests?refresh=true&phase=initial", expect.anything());
+    await api.readPullRequestQueue(workspace, { forceRefresh: false, phase: "details" });
+    expect(fetcher).toHaveBeenLastCalledWith("/api/operations/pull-requests?phase=details", expect.anything());
+  });
+
   it("sanitizes provider errors and notifies session expiry", async () => {
     const fetcher = vi.fn().mockResolvedValue(Response.json({ message: "secret provider token" }, { status: 503 }));
     vi.stubGlobal("fetch", fetcher);

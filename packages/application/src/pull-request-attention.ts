@@ -20,6 +20,7 @@ export function classifyPullRequestAttention(input: { pullRequest: QueuePullRequ
   else if (assessmentStatus === "historical") secondaryReasons.push("The assessment is historical and may not apply to this pull request.");
   const result = (group: QueueAttention["group"], badge: QueueAttention["badge"], reason: string, actorIds: string[] = [], teamIds: string[] = [], checkUpdatePending = false): QueueAttention => ({ group, badge, reason, actorIds, teamIds, secondaryReasons, approvedCount, requiredCount, assessmentStatus, checkUpdatePending });
   if (pr.isDraft) return result("other", "draft", "Pull request is a draft.", [pr.author.id]);
+  if (reviewState.status === "checking") return result("other", "checking", "Checking review status.");
   if (reviewState.status !== "complete") return result("other", "status_unknown", "Review state is unavailable or changed during acquisition.");
 
   const latest = new Map<string, { state: string; time: number; index: number }>();

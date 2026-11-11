@@ -10,6 +10,102 @@ function setup() {
 }
 afterEach(() => vi.useRealTimers());
 describe("queue acquisition", () => {
+  it("cancels an old details acquisition when a manual list refresh supersedes it", async () => {
+    const { ports, service } = setup(); let release!: (value: ReturnType<typeof queueReviewState>) => void;
+    ports.readReviewState.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    await service.readInitial({ workspaceId: "w" });
+    const old = service.read({ workspaceId: "w", progressive: true });
+    const rejected = expect(old).rejects.toMatchObject({ reason: "provider_unavailable" });
+    await vi.advanceTimersByTimeAsync(0);
+    ports.listOpenPullRequests.mockResolvedValue([queuePull({ number: 2, changeRequestId: "2" })]);
+    const fresh = await service.readInitial({ workspaceId: "w", forceRefresh: true });
+    release(queueReviewState()); await rejected;
+    expect(fresh.items.map(item => item.pullRequest.number)).toEqual([2]);
+    const next = await service.read({ workspaceId: "w", progressive: true });
+    expect(next.items.map(item => item.pullRequest.number)).toEqual([2]); service.dispose();
+  });
+  it("reuses a short-lived partial list without losing its coverage warning", async () => {
+    const { ports, service } = setup(); const other = { ...queuePull().repository, externalId: "2", name: "other" };
+    ports.listRepositories.mockResolvedValue([queuePull().repository, other]);
+    ports.listOpenPullRequests.mockImplementation(async (_scope, repo) => {
+      if (repo.externalId === "2") throw new PullRequestQueueUnavailableError("provider_unavailable");
+      return [queuePull()];
+    });
+    const initial = await service.readInitial({ workspaceId: "w" });
+    expect(initial.membershipComplete).toBe(false); expect(initial.totalOpen).toBeNull(); expect(initial.unavailableRepositoryIds).toEqual(["2"]);
+    const partial = await service.read({ workspaceId: "w", progressive: true });
+    expect(partial.membershipComplete).toBe(false); expect(partial.totalOpen).toBeNull(); expect(partial.items).toHaveLength(1);
+    expect(ports.listOpenPullRequests).toHaveBeenCalledTimes(2); service.dispose();
+  });
+
+  it("revalidates authorization before serving the fast list cache", async () => {
+    const { ports, service } = setup(); await service.readInitial({ workspaceId: "w" });
+    ports.assertActive.mockRejectedValue(new PullRequestQueueUnavailableError("authority"));
+    await expect(service.readInitial({ workspaceId: "w" })).rejects.toMatchObject({ reason: "authority" });
+    expect(ports.listOpenPullRequests).toHaveBeenCalledTimes(1); service.dispose();
+  });
+  it("refreshes changed PR status after list expiry and manual refresh", async () => {
+    const { ports, service } = setup(); await service.readInitial({ workspaceId: "w" });
+    await service.read({ workspaceId: "w", progressive: true }); expect(ports.readReviewState).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(60000);
+    ports.listOpenPullRequests.mockResolvedValue([queuePull({ updatedAt: "2026-01-01T00:00:30.000Z" })]);
+    await service.readInitial({ workspaceId: "w" }); await service.read({ workspaceId: "w", progressive: true });
+    expect(ports.readReviewState).toHaveBeenCalledTimes(2);
+    await service.readInitial({ workspaceId: "w", forceRefresh: true }); await service.read({ workspaceId: "w", progressive: true });
+    expect(ports.readReviewState).toHaveBeenCalledTimes(3); service.dispose();
+  });
+
+  it("rechecks settled review status after list expiry even when PR metadata is unchanged", async () => {
+    const { ports, service } = setup();
+    await service.readInitial({ workspaceId: "w" });
+    await service.read({ workspaceId: "w", progressive: true });
+    await vi.advanceTimersByTimeAsync(60000);
+    await service.readInitial({ workspaceId: "w" });
+    await service.read({ workspaceId: "w", progressive: true });
+    expect(ports.readReviewState).toHaveBeenCalledTimes(2);
+    service.dispose();
+  });
+
+  it("resumes timed-out review batches without rereading earlier PRs, even when the list expires", async () => {
+    const { ports, service } = setup();
+    const pulls = Array.from({ length: 11 }, (_, i) => queuePull({ number: i + 1, changeRequestId: String(i + 1) }));
+    ports.listOpenPullRequests.mockResolvedValue(pulls);
+    ports.readReviewState.mockImplementation(async () => { await new Promise(resolve => setTimeout(resolve, 2000)); return queueReviewState(); });
+    await service.readInitial({ workspaceId: "w" });
+    const first = service.read({ workspaceId: "w", progressive: true }); await vi.advanceTimersByTimeAsync(5000);
+    const part = await first; expect(part.enrichmentPending).toBe(true); expect(part.items.filter(item => item.reviewState.status === "complete")).toHaveLength(8);
+    await vi.advanceTimersByTimeAsync(60000); await service.readInitial({ workspaceId: "w" });
+    const second = service.read({ workspaceId: "w", progressive: true }); await vi.advanceTimersByTimeAsync(2000);
+    const done = await second; expect(done.items.filter(item => item.reviewState.status === "complete")).toHaveLength(11); expect(done.enrichmentPending).toBe(false);
+    expect(ports.readReviewState.mock.calls.filter(call => call[1].number === 1)).toHaveLength(1);
+    service.dispose();
+  });
+
+  it("excludes drafts and bot authors before assessment and review reads", async () => {
+    const { ports, service } = setup();
+    const human = queuePull(); const draft = queuePull({ number: 2, changeRequestId: "2", isDraft: true });
+    const bot = queuePull({ number: 3, changeRequestId: "3", author: { id: "9", login: "dependabot[bot]", type: "bot" } });
+    const other = queuePull({ number: 4, changeRequestId: "4", author: { id: "8", login: "org", type: "other" } });
+    ports.listOpenPullRequests.mockResolvedValue([human, draft, bot, other]);
+    const result = await service.read({ workspaceId: "w" });
+    expect(result.items.map(item => item.pullRequest.number)).toEqual([1, 4]); expect(result.totalOpen).toBe(2);
+    expect(ports.readAssessments.mock.calls[0][1].map(pull => pull.number)).toEqual([1, 4]);
+    expect(ports.readReviewState.mock.calls.map(call => call[1].number)).toEqual([1, 4]);
+  });
+
+  it("returns open PRs before slow reviews, caches the list, and enriches without rereading it", async () => {
+    const { ports, service } = setup(); let release!: (state: ReturnType<typeof queueReviewState>) => void;
+    ports.readReviewState.mockImplementation(() => new Promise(resolve => { release = resolve; }));
+    const first = await service.readInitial({ workspaceId: "w" });
+    expect(first.items).toHaveLength(1); expect(first.items[0].attention.badge).toBe("checking");
+    expect(ports.readReviewState).not.toHaveBeenCalled();
+    const second = await service.readInitial({ workspaceId: "w" });
+    expect(second.snapshotId).toBe(first.snapshotId); expect(ports.listOpenPullRequests).toHaveBeenCalledTimes(1);
+    const detail = service.read({ workspaceId: "w" }); await vi.advanceTimersByTimeAsync(0);
+    expect(ports.listOpenPullRequests).toHaveBeenCalledTimes(1);
+    release(queueReviewState()); expect((await detail).items[0].reviewState.status).toBe("complete");
+  });
+
   it("starts TTL at completion and explicitly forced reads bypass completed entries", async () => {
     const { ports, service } = setup();
     ports.listOpenPullRequests.mockImplementationOnce(async () => { await new Promise(r => setTimeout(r, 5000)); return [queuePull()]; });

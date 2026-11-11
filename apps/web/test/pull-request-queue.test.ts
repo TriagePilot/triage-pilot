@@ -10,6 +10,12 @@ async function setup(overrides: Parameters<typeof buildServices>[0] = {}) {
 }
 const path = "/api/operations/pull-requests";
 describe("pull request queue route", () => {
+  it("requests the fast initial snapshot for the initial phase", async () => {
+    const read = vi.fn(async () => queueSnapshot()); const { app, headers } = await setup({ readPullRequestQueue: read });
+    expect((await app.request(path + "?phase=initial", { headers })).status).toBe(200);
+    expect(read).toHaveBeenCalledWith({ forceRefresh: false, phase: "initial", signal: expect.any(AbortSignal) });
+  });
+
   it("protects reads before calling providers and prevents HTTP caching", async () => {
     const read = vi.fn(async () => queueSnapshot()), recovery = vi.fn(), routing = vi.fn();
     const { app, headers } = await setup({ readPullRequestQueue: read, queueRoutingRecovery: recovery, acceptRoutingDelivery: routing });
@@ -21,7 +27,7 @@ describe("pull request queue route", () => {
     expect((await app.request(path, { headers })).status).toBe(200);
     expect(recovery).not.toHaveBeenCalled(); expect(routing).not.toHaveBeenCalled();
   });
-  it.each(["?refresh=1", "?refresh=", "?refresh=true&refresh=false", "?workspaceId=x", "?repositoryId=x"])("rejects invalid query %s", async query => {
+  it.each(["?refresh=1", "?refresh=", "?refresh=true&refresh=false", "?workspaceId=x", "?repositoryId=x", "?phase=other", "?phase=initial&phase=details"])("rejects invalid query %s", async query => {
     const read = vi.fn(); const { app, headers } = await setup({ readPullRequestQueue: read });
     expect((await app.request(path + query, { headers })).status).toBe(400); expect(read).not.toHaveBeenCalled();
   });
