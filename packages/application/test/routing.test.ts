@@ -542,3 +542,54 @@ describe("tracked backlog routing", () => {
     expect(ports.reviewerBacklog).not.toHaveBeenCalled();
   });
 });
+
+it("routes an author-adjusted medium-risk decision in shadow mode", async () => {
+  const ports = buildPorts(effectiveConfiguration(`
+mode: shadow
+risk:
+  authors:
+    - { authors: ["@user-c91e46"], weight: 30, tag: review }
+  ai_authorship: { enabled: false }
+ownership:
+  fallback_reviewers: ["@reviewer-a", "@reviewer-b"]
+`));
+  vi.mocked(ports.provider.fetchChangedFiles).mockResolvedValueOnce([{ path: "src/change.ts", additions: 1, deletions: 0 }]);
+  await processChangeRequest(job, ports);
+  expect(ports.decisions.persistWithEvent).toHaveBeenCalledWith(expect.objectContaining({
+    riskScore: 35, action: "request_human_review",
+    selectedActors: expect.arrayContaining([expect.any(String)]),
+    details: expect.objectContaining({ risk: expect.objectContaining({ tier: "medium", components: expect.arrayContaining([
+      expect.objectContaining({ reason: "author_rule:review", score: 30 }),
+    ]) }) }),
+  }), expect.any(Function));
+  expect(ports.provider.applyActions).not.toHaveBeenCalled();
+});
+
+it.each([
+  { mode: "shadow", weight: 70, score: 75, count: 2 },
+  { mode: "enforce", weight: 30, score: 35, count: 1 },
+] as const)("uses the existing reviewer policy for $mode author risk", async ({ mode, weight, score, count }) => {
+  const ports = buildPorts(effectiveConfiguration(`
+mode: ${mode}
+routing: { high_risk_reviewers: 2 }
+risk:
+  authors:
+    - { authors: ["@user-c91e46"], weight: ${weight}, tag: review }
+  ai_authorship: { enabled: false }
+ownership:
+  fallback_reviewers: ["@reviewer-a", "@reviewer-b"]
+`));
+  vi.mocked(ports.provider.fetchChangedFiles).mockResolvedValueOnce([{ path: "src/change.ts", additions: 1, deletions: 0 }]);
+  await processChangeRequest(job, ports);
+  const decision = vi.mocked(ports.decisions.persistWithEvent).mock.calls[0]![0];
+  expect(decision.riskScore).toBe(score);
+  expect(decision.action).toBe("request_human_review");
+  expect(decision.selectedActors).toHaveLength(count);
+  if (mode === "shadow") {
+    expect(ports.provider.applyActions).not.toHaveBeenCalled();
+    expect(ports.enqueueReviewPolicy).not.toHaveBeenCalled();
+  } else {
+    expect(ports.provider.applyActions).toHaveBeenCalledWith(expect.objectContaining({ risk: expect.objectContaining({ score, tier: "medium" }) }));
+    expect(ports.enqueueReviewPolicy).toHaveBeenCalledOnce();
+  }
+});

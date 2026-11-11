@@ -35,6 +35,8 @@ import {
   type JobLease,
 } from "@triagepilot/db";
 import {
+  CLASSIFIER_VERSION,
+  type RiskScoringResult,
   activeApprovedReviewers,
   evaluateHumanReviewPolicy,
   type ChangedFileMetadata,
@@ -486,7 +488,7 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
         expectedHeadSha: string;
         decisionId: string;
         riskTier: "low" | "medium" | "high";
-        risk?: { score: number; classifierVersion: "risk-v2"; components: ScoreComponent[]; tier?: "low" | "medium" | "high" };
+        risk?: Omit<RiskScoringResult, "tier"> & Partial<Pick<RiskScoringResult, "tier">>;
         selectedReviewers?: string[];
         reviewersToRequest?: string[];
         noHumanReason?: string;
@@ -501,7 +503,7 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
           decisionId: action.decisionId,
           action: action.action as "policy_approval" | "request_human_review" | "no_eligible_reviewer",
           risk: {
-            classifierVersion: action.risk?.classifierVersion ?? "risk-v2",
+            classifierVersion: action.risk?.classifierVersion ?? CLASSIFIER_VERSION,
             score: action.risk?.score ?? 0,
             tier: action.riskTier,
             components: action.risk?.components ?? [],
@@ -864,6 +866,7 @@ function labelForRiskComponent(reason: string): string {
     ai_authorship_signal: "AI authorship signal",
     docs_or_test_suppressor: "Documentation or test-only cap",
   };
+  if (reason.startsWith("author_rule:")) return `Author rule: ${reason.slice("author_rule:".length)}`;
   if (reason.startsWith("high_risk_path:")) return `High-risk path: ${reason.slice("high_risk_path:".length)}`;
   return labels[reason] ?? reason.replaceAll("_", " ");
 }

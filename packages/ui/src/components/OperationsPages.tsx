@@ -707,7 +707,7 @@ function DecisionTable({
                                         : c.score}
                                   </strong>
                                   <span>
-                                    {c.reason.replaceAll("_", " ")}
+                                    {c.reason.startsWith("author_rule:") ? `Author rule: ${c.reason.slice("author_rule:".length)}` : c.reason.replaceAll("_", " ")}
                                     <small>{c.detail}</small>
                                   </span>
                                 </li>

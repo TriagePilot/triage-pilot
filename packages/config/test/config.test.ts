@@ -156,3 +156,30 @@ risk:
     expect(result.diagnostics[0]?.path).toBe("$");
   });
 });
+
+it("accepts and validates author risk rules", () => {
+  const valid = parseTriagePilotConfig('risk:\n  authors:\n    - { authors: ["@Alex", "@sam"], weight: 30, tag: review }');
+  expect(valid).toMatchObject({ ok: true, config: { risk: { authors: [{ authors: ["@Alex", "@sam"], weight: 30, tag: "review" }] } } });
+  const duplicate = parseTriagePilotConfig('risk:\n  authors:\n    - { authors: ["@Alex", "@alex"], weight: 30, tag: review }');
+  expect(duplicate.ok).toBe(false);
+});
+
+it.each([
+  '{ authors: [], weight: 1, tag: x }',
+  '{ authors: ["alex"], weight: 1, tag: x }',
+  '{ authors: ["@team/name"], weight: 1, tag: x }',
+  '{ authors: ["@alex"], weight: -1, tag: x }',
+  '{ authors: ["@alex"], weight: 101, tag: x }',
+  '{ authors: ["@alex"], weight: 1, tag: "" }',
+  '{ author: "@alex", weight: 1, tag: x }',
+])("rejects invalid author rules: %s", (rule) => {
+  expect(parseTriagePilotConfig(`risk:\n  authors:\n    - ${rule}`).ok).toBe(false);
+});
+
+it("rejects duplicate author sets in direct and document parsing", () => {
+  const source = 'risk:\n  authors:\n    - { authors: ["@Alex", "@Sam"], weight: 1, tag: a }\n    - { authors: ["@sam", "@alex"], weight: 2, tag: b }';
+  for (const result of [parseTriagePilotConfig(source), parseConfigurationDocument(source, { partial: true })]) {
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.diagnostics).toContainEqual(expect.objectContaining({ path: "$.risk.authors[1].authors" }));
+  }
+});
