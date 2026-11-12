@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
+import { describeBranchExclusion, IGNORED_RISK_DESCRIPTION } from "../decision-presentation.js";
+
 import type {
   AuthorizationCapabilities,
   NavigationHost,
@@ -295,8 +297,17 @@ function OperationsDashboardWorkspace({
                       </span>
                     </th>
                     <td>
-                      <span className="data-text">{decision.riskScore}</span>
-                      <RiskBreakdown breakdown={decision.riskBreakdown} />
+                      {decision.branchExclusion ? (
+                        <>
+                          <span className="data-text">{IGNORED_RISK_DESCRIPTION}</span>
+                          <span className="cell-detail">{describeBranchExclusion(decision.branchExclusion)}</span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="data-text">{decision.riskScore ?? "—"}</span>
+                          <RiskBreakdown breakdown={decision.riskBreakdown} />
+                        </>
+                      )}
                     </td>
                     <td>
                       <span className="data-text">{labelFor(decision.action)}</span>

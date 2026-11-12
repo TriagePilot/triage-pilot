@@ -124,7 +124,7 @@ export function githubWebhookRoutes(services: WebhookServices) {
             trustedConfigRevision: normalized.changeRequest.baseRevision,
             headRevision: normalized.changeRequest.headRevision,
             isDraft: normalized.isDraft,
-          }),
+          }) + (normalized.eventAction === "edited" ? `:retarget:${deliveryId}` : ""),
         };
         const accepted = await services.acceptRoutingDelivery({
           deliveryId,

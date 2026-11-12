@@ -396,3 +396,13 @@ it("explains empty records in each shipped operations page", async () => {
   await click("Action failures (0)");
   expect(container.textContent).toContain("No action failures.");
 });
+
+it("shows branch exclusions as ignored without a risk score in history and details", async () => {
+  const ignored = { ...data.decisions[0]!, riskScore: null, riskBreakdown: null, branchExclusion: { type: "source_branch" as const, branch: "dependabot/npm", matchingRule: "dependabot/**" }, action: "policy_approval" as const, selectedReviewers: [], requestedReviewerCount: 0, reviewerShortfall: 0 };
+  await mount(<RoutingDecisionsPage navigation={navigation} workspace={{ id: "w", displayName: "Work" }} authorization={authorization} api={{} as OperationsApiClient} overview={{ ...data, decisions: [ignored] }} onRefresh={async () => {}} />);
+  expect(container.textContent).toContain("Ignored — risk not evaluated");
+  expect(container.textContent).not.toContain("Score 0");
+  await click("View details");
+  expect(container.textContent).toContain("dependabot/npm");
+  expect(container.textContent).toContain("dependabot/**");
+});
