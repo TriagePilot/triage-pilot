@@ -499,6 +499,26 @@ describe("worker routing GitHub reads", () => {
     expect(request.mock.calls.some(([route]) => route.endsWith("/reviews") && route.startsWith("POST "))).toBe(false);
   });
 
+  it("does not fail the policy check or request anyone when existing approvals left nobody to request", async () => {
+    const request = actionRequester("unmerged-head-456");
+    const services = buildServices(message, request);
+
+    await services.applyDecisionActions({
+      action: "request_human_review",
+      decisionId: "decision-1",
+      expectedHeadSha: "unmerged-head-456",
+      riskTier: "medium" as const,
+      selectedReviewers: [],
+    });
+
+    const policyChecks = request.mock.calls.filter(
+      ([route, parameters]) => route === "POST /repos/{owner}/{repo}/check-runs" && parameters.name === "triagepilot/human-review-policy",
+    );
+    expect(policyChecks).toHaveLength(1);
+    expect(policyChecks[0]?.[1]).toEqual(expect.objectContaining({ status: "completed", conclusion: "success" }));
+    expect(request.mock.calls.some(([route]) => route.includes("requested_reviewers"))).toBe(false);
+  });
+
   it("reuses the recorded policy check for a retried decision on the same head", async () => {
     const request = actionRequester("unmerged-head-456");
     const services = buildServices(message, request, knownRepositoryDatabase("71"));

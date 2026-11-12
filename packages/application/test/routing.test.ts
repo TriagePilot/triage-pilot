@@ -431,6 +431,37 @@ ownership:
     }));
   });
 
+  it("routes to policy evaluation when existing approvals already meet the requirement and nobody is left to request", async () => {
+    const ports = buildPorts(effectiveConfiguration(`
+version: 1
+mode: enforce
+risk:
+  paths:
+    - pattern: README.md
+      weight: 35
+      tag: docs
+ownership:
+  fallback_reviewers: ["@user-4d8a2e", "@user-7c1f9b", "@user-c91e46"]
+`));
+    vi.mocked(ports.provider.fetchCurrentRevisionApprovals).mockResolvedValueOnce(["@user-4d8a2e", "@user-7c1f9b"]);
+
+    await processChangeRequest(job, ports);
+
+    const decision = vi.mocked(ports.decisions.persistWithEvent).mock.calls[0]![0];
+    expect(decision).toMatchObject({
+      action: "request_human_review",
+      actionStatus: "pending",
+      details: { risk: { tier: "medium" }, routing: { requestedReviewerCount: 1 } },
+    });
+    expect(decision).not.toHaveProperty("noHumanReason");
+    expect(ports.provider.applyActions).toHaveBeenCalledWith(expect.objectContaining({
+      action: "request_human_review",
+      selectedActors: [],
+      actorsToRequest: [],
+    }));
+    expect(ports.enqueueReviewPolicy).toHaveBeenCalledOnce();
+  });
+
   it("applies enforce actions through a provider-neutral port and durably enqueues policy evaluation", async () => {
     const ports = buildPorts(effectiveConfiguration(`
 version: 1

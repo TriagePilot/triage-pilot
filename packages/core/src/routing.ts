@@ -57,7 +57,7 @@ export function decideRouting(input: RoutingInput): RoutingDecision {
   const selectedReviewers = reviewersToRequest;
   const reviewerShortfall = requestedReviewerCount - selectedReviewers.length;
 
-  if (selectedReviewers.length === 0) {
+  if (selectedReviewers.length === 0 && existingApprovedReviewers.length < requestedReviewerCount) {
     return {
       action: "no_eligible_reviewer",
       candidates,

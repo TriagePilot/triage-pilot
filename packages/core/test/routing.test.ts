@@ -131,4 +131,71 @@ describe("decideRouting", () => {
       reviewerShortfall: 0,
     });
   });
+
+  it("evaluates existing approvals instead of failing when they already meet the required count", () => {
+    const decision = decideRouting({
+      risk: { score: 35, tier: "medium" },
+      author: "@user-c91e46",
+      eligibleReviewers: ["@user-c91e46", "@user-4d8a2e", "@user-7c1f9b"],
+      existingApprovedReviewers: ["@user-4d8a2e", "@user-7c1f9b", "@user-e64b19"],
+      load: {},
+      highRiskReviewers: 2,
+      selectionKey: "acme/api#12",
+    });
+
+    expect(decision).toMatchObject({
+      action: "request_human_review",
+      requestedReviewerCount: 1,
+      selectedReviewers: [],
+      reviewersToRequest: [],
+    });
+    expect(decision).not.toHaveProperty("noHumanReason");
+  });
+
+  it("evaluates existing approvals when they meet a two-reviewer high-risk requirement", () => {
+    expect(
+      decideRouting({
+        risk: { score: 95, tier: "high" },
+        author: "@user-c91e46",
+        eligibleReviewers: ["@user-c91e46", "@user-4d8a2e"],
+        existingApprovedReviewers: ["@user-4d8a2e", "@user-e64b19"],
+        load: {},
+        highRiskReviewers: 2,
+        selectionKey: "acme/api#13",
+      }),
+    ).toMatchObject({ action: "request_human_review", selectedReviewers: [], reviewersToRequest: [] });
+  });
+
+  it("still reports no eligible reviewer when existing approvals fall short and nobody is left to request", () => {
+    expect(
+      decideRouting({
+        risk: { score: 95, tier: "high" },
+        author: "@user-c91e46",
+        eligibleReviewers: ["@user-c91e46", "@user-4d8a2e"],
+        existingApprovedReviewers: ["@user-4d8a2e", "@user-c91e46"],
+        load: {},
+        highRiskReviewers: 2,
+        selectionKey: "acme/api#14",
+      }),
+    ).toMatchObject({
+      action: "no_eligible_reviewer",
+      requestedReviewerCount: 2,
+      selectedReviewers: [],
+      reviewerShortfall: 2,
+      noHumanReason: "no_eligible_reviewer",
+    });
+  });
+
+  it("reports no eligible reviewer when only the author is eligible and nobody approved", () => {
+    expect(
+      decideRouting({
+        risk: { score: 45, tier: "medium" },
+        author: "@user-c91e46",
+        eligibleReviewers: ["@user-c91e46"],
+        load: {},
+        highRiskReviewers: 2,
+        selectionKey: "acme/api#15",
+      }),
+    ).toMatchObject({ action: "no_eligible_reviewer", noHumanReason: "no_eligible_reviewer" });
+  });
 });

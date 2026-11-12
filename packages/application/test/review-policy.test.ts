@@ -78,6 +78,37 @@ describe("evaluateReviewPolicy", () => {
     expect(outcome).toEqual({ status: "evaluated", decisionId: "decision-1", state: "success" });
   });
 
+  it("passes on existing approvals when routing had no reviewer left to request", async () => {
+    const ports = buildPorts();
+    const satisfiedDecision = { ...decision, selectedActors: [], requiredApprovalCount: 1 };
+    vi.mocked(ports.decisions.findLatest).mockResolvedValueOnce(satisfiedDecision);
+    vi.mocked(ports.provider.fetchReviews).mockResolvedValueOnce([
+      { actor: "@user-d82a5f", actorType: "human", state: "approved", submittedAt: "2026-08-20T10:00:00Z" },
+    ]);
+
+    const outcome = await evaluateReviewPolicy(job, ports);
+
+    expect(ports.provider.updatePolicyCheck).toHaveBeenCalledWith({
+      decision: satisfiedDecision,
+      state: "success",
+      summary: "Required human approval count met.",
+    });
+    expect(outcome).toEqual({ status: "evaluated", decisionId: "decision-1", state: "success" });
+  });
+
+  it("keeps waiting rather than passing when an approval is withdrawn after routing found nobody to request", async () => {
+    const ports = buildPorts();
+    vi.mocked(ports.decisions.findLatest).mockResolvedValueOnce({ ...decision, selectedActors: [], requiredApprovalCount: 1 });
+    vi.mocked(ports.provider.fetchReviews).mockResolvedValueOnce([
+      { actor: "@user-d82a5f", actorType: "human", state: "approved", submittedAt: "2026-08-20T10:00:00Z" },
+      { actor: "@user-d82a5f", actorType: "human", state: "changes_requested", submittedAt: "2026-08-20T11:00:00Z" },
+    ]);
+
+    const outcome = await evaluateReviewPolicy(job, ports);
+
+    expect(outcome).toEqual({ status: "evaluated", decisionId: "decision-1", state: "in_progress" });
+  });
+
   it("uses only the latest active review per human and ignores bots", async () => {
     const ports = buildPorts();
     vi.mocked(ports.provider.fetchReviews).mockResolvedValueOnce([

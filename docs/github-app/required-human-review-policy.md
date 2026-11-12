@@ -30,7 +30,7 @@ Reviewer availability is centrally administered. It may change future selected c
 - A human-review route immediately evaluates GitHub's active review state, then re-evaluates after each later review event. A later request for changes or dismissal from an approving reviewer removes that approval from the total.
 - A new pull-request head receives a new policy check and preserves the pull request's active approval total.
 - TriagePilot does not re-request reviewers when a pull request receives a new head. A developer must explicitly request another review in GitHub when a follow-up change needs one.
-- A human-review route with no eligible individual reviewer completes as a failure. Because the check is required by the ruleset, that failure blocks merge.
+- A human-review route with no eligible individual reviewer left to request completes as a failure, unless active approvals already meet the required count. In that case TriagePilot requests nobody and the check passes on those approvals. Because the check is required by the ruleset, a failure blocks merge.
 - A permanent configuration, authorization, or GitHub API evaluation failure also completes the check as a failure and blocks merge while it remains required.
 
 In enforce mode, replacing an outstanding reviewer request uses **Pull requests: Read and write**. Re-evaluating or failing this policy check uses **Commit statuses: Read and write** (`statuses:write`). Shadow-mode replacement simulations call neither write path. Approve both permissions on an existing App installation before relying on availability replacement under a required ruleset.
