@@ -1558,19 +1558,23 @@ describe("branch exclusion GitHub actions", () => {
     await services.provider.applyActions(ignoredAction());
     expect(request.mock.calls.filter(([route]) => route === "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews")).toHaveLength(1);
   });
-  it.each([401, 403, 422, 429, 500])(
-    "preserves policy failure handling for a raw pre-write read error with status %s",
-    async status => {
+  it.each([401, 403, 422, 429, 500].flatMap(status => [
+    { status, persistent: false },
+    { status, persistent: true },
+  ]))(
+    "preserves policy failure handling for a raw pre-write read error: status $status, persistent $persistent",
+    async ({ status, persistent }) => {
       const base = actionRequester(message.changeRequest.headRevision);
       const failure = Object.assign(new Error("pre-write read failed"), { status });
+      const repeatedFailure = Object.assign(new Error("repeated pre-write read failed"), { status });
       const db = policyStateDatabase();
       let policyPublished = false;
-      let readFailed = false;
+      let failedReads = 0;
       let remotePolicyState: string | undefined;
       const request = vi.fn(async (route: string, parameters: Record<string, unknown>) => {
-        if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}" && policyPublished && !readFailed) {
-          readFailed = true;
-          throw failure;
+        if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}" && policyPublished && (persistent || failedReads === 0)) {
+          failedReads++;
+          throw failedReads === 1 ? failure : repeatedFailure;
         }
         if (route === "POST /repos/{owner}/{repo}/check-runs" && parameters.name === "triagepilot/human-review-policy") {
           policyPublished = true;
@@ -1586,7 +1590,7 @@ describe("branch exclusion GitHub actions", () => {
       await expect(buildServices(message, request, db).provider.applyActions(ignoredAction())).rejects.toBe(failure);
 
       const expectedState = status === 429 || status === 500 ? "success" : "failure";
-      expect(readFailed).toBe(true);
+      expect(failedReads).toBe(1);
       expect(remotePolicyState).toBe(expectedState);
       expect(db.policyCheck()).toEqual({ checkRunId: "71", state: expectedState });
       expect(request.mock.calls.some(([route]) => route === "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews")).toBe(false);

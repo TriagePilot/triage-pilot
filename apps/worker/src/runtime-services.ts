@@ -391,7 +391,9 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
             const classified = classifyWorkerError(error);
             if (classified instanceof PermanentJobError && !contextValidationFailed) {
               const summary = `TriagePilot routing action failed: ${classified.message}`;
-              await adapter.updateHumanReviewPolicyCheck({ checkRun, checkRunId: policyCheckRunId, state: "failure", summary });
+              // Failure reporting must not repeat a failed PR-context read. The
+              // requester still validates live provider authority before this write.
+              await createAdapter(githubRequester).updateHumanReviewPolicyCheck({ checkRun, checkRunId: policyCheckRunId, state: "failure", summary });
               await updatePolicyCheckState(input.db, message.workspaceId, { decisionId: action.decisionId, state: "failure" });
             }
             throw error;

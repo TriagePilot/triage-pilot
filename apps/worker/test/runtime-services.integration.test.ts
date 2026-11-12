@@ -461,9 +461,12 @@ it.runIf(Boolean(process.env.TEST_DATABASE_URL)).each([
   });
 });
 
-it.runIf(Boolean(process.env.TEST_DATABASE_URL)).each([403, 500])(
-  "persists the policy outcome after a raw pre-write read failure with status %s",
-  async status => {
+it.runIf(Boolean(process.env.TEST_DATABASE_URL)).each([403, 500].flatMap(status => [
+  { status, persistent: false },
+  { status, persistent: true },
+]))(
+  "persists the policy outcome after a raw pre-write read failure: status $status, persistent $persistent",
+  async ({ status, persistent }) => {
     await withPostgresTestDatabase(async db => {
       const workspaceId = await ensureLocalWorkspace(db);
       const connection = await db.insertInto("provider_connections").values({
@@ -476,14 +479,15 @@ it.runIf(Boolean(process.env.TEST_DATABASE_URL)).each([403, 500])(
       }).execute();
       const scopedMessage = { ...message, workspaceId, providerConnectionId: connection.id };
       const failure = Object.assign(new Error("pre-write read failed"), { status });
+      const repeatedFailure = Object.assign(new Error("repeated pre-write read failed"), { status });
       let policyPublished = false;
-      let readFailed = false;
+      let failedReads = 0;
       let remotePolicyState: string | undefined;
       const request = vi.fn(async (route: string, params: Record<string, unknown>) => {
         if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
-          if (policyPublished && !readFailed) {
-            readFailed = true;
-            throw failure;
+          if (policyPublished && (persistent || failedReads === 0)) {
+            failedReads++;
+            throw failedReads === 1 ? failure : repeatedFailure;
           }
           return { data: { state: "open", draft: false, head: { sha: "abc123", ref: "feature" },
             base: { sha: "base-123", ref: "main" }, user: { login: "author" } } };
@@ -511,7 +515,7 @@ it.runIf(Boolean(process.env.TEST_DATABASE_URL)).each([403, 500])(
       await expect(processRoutingJob(scopedMessage, services)).rejects.toBe(failure);
 
       const expectedState = status === 403 ? "failure" : "success";
-      expect(readFailed).toBe(true);
+      expect(failedReads).toBe(1);
       expect(remotePolicyState).toBe(expectedState);
       expect(await db.selectFrom("routing_decisions").select(["action_status", "action_error", "policy_check_state"]).executeTakeFirstOrThrow())
         .toEqual({ action_status: "failed", action_error: "pre-write read failed", policy_check_state: expectedState });
