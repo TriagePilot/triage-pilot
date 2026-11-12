@@ -939,7 +939,7 @@ function recoverablePolicyCheckRequester() {
   let created = false;
   return vi.fn(async (route: string, parameters: Record<string, unknown>) => {
     if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
-      return { data: { head: { sha: "unmerged-head-456" } } };
+      return { data: { state: "open", draft: false, base: { sha: "trusted-base-123", ref: "main" }, head: { sha: "unmerged-head-456", ref: "feature" } } };
     }
     if (route === "GET /repos/{owner}/{repo}/commits/{ref}/check-runs") {
       if (parameters.check_name === "triagepilot/human-review-policy") {
@@ -1064,7 +1064,7 @@ function stalePersistencePolicyRequester() {
 function permanentlyFailingActionRequester(failurePoint: "routing_check" | "comment" | "reviewer" | "approval") {
   return vi.fn(async (route: string, parameters: Record<string, unknown>) => {
     if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
-      return { data: { head: { sha: "unmerged-head-456" } } };
+      return { data: { state: "open", draft: false, base: { sha: "trusted-base-123", ref: "main" }, head: { sha: "unmerged-head-456", ref: "feature" } } };
     }
     if (route === "GET /repos/{owner}/{repo}/commits/{ref}/check-runs") {
       if (parameters.check_name === "triagepilot/human-review-policy") return { data: { check_runs: [] } };
@@ -1094,7 +1094,7 @@ function permanentlyFailingActionRequester(failurePoint: "routing_check" | "comm
 function transientlyFailingActionRequester() {
   return vi.fn(async (route: string, parameters: Record<string, unknown>) => {
     if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
-      return { data: { head: { sha: "unmerged-head-456" } } };
+      return { data: { state: "open", draft: false, base: { sha: "trusted-base-123", ref: "main" }, head: { sha: "unmerged-head-456", ref: "feature" } } };
     }
     if (route === "GET /repos/{owner}/{repo}/commits/{ref}/check-runs") return { data: { check_runs: [] } };
     if (route === "GET /repos/{owner}/{repo}/issues/{issue_number}/comments") return { data: [] };
@@ -1217,6 +1217,7 @@ function buildPolicyServices(
 }
 
 function knownRepositoryDatabase(recordedCheckRunId?: string) {
+  const updateQuery = { where: () => updateQuery, execute: async () => [] };
   return {
     selectFrom: (table: string) => table === "routing_decisions"
       ? {
@@ -1242,7 +1243,7 @@ function knownRepositoryDatabase(recordedCheckRunId?: string) {
           }),
         }),
     updateTable: () => ({
-      set: () => ({ where: () => ({ execute: async () => [] }) }),
+      set: () => updateQuery,
     }),
   };
 }
@@ -1345,6 +1346,137 @@ describe("branch exclusion GitHub actions", () => {
   function ignoredAction() {
     return { workspaceId: message.workspaceId, providerConnectionId: message.providerConnectionId, repository: message.changeRequest.repository, changeRequestId: "7", changeRequestNumber: 7, expectedHeadRevision: message.changeRequest.headRevision, decisionId: "ignored-1", action: "policy_approval" as const, risk: null, branchExclusion, expectedBranches: { source: "feature", target: "main" }, expectedBaseRevision: "trusted-base-123", selectedActors: [], actorsToRequest: [], noHumanReason: 'Branch exclusion: target branch "main" matches "main". Risk not evaluated.' };
   }
+  function rerouteDatabase() {
+    const queued: Record<string, unknown>[] = [];
+    const db = { ...knownRepositoryDatabase(), insertInto: () => ({ values: (row: Record<string, unknown>) => {
+      queued.push(row);
+      return { onConflict: () => ({ returning: () => ({ executeTakeFirst: async () => ({ id: "reroute-job" }) }) }) };
+    } }) };
+    return { db, queued };
+  }
+
+  it("rejects a closed pull request before any exclusion writes", async () => {
+    const base = actionRequester(message.changeRequest.headRevision);
+    const request = vi.fn(async (route: string, params: Record<string, unknown>) => {
+      const response = await base(route, params);
+      return route === "GET /repos/{owner}/{repo}/pulls/{pull_number}"
+        ? { data: { ...response.data, state: "closed" } } : response;
+    });
+    await expect(buildServices(message, request).provider.applyActions(ignoredAction())).rejects.toThrow("not open");
+    expect(request.mock.calls.every(([route]) => route.startsWith("GET "))).toBe(true);
+  });
+
+  it.each([false, true])("reroutes a changed draft state (previously draft: %s) before exclusion writes", async isDraft => {
+    const base = actionRequester(message.changeRequest.headRevision);
+    const request = vi.fn(async (route: string, params: Record<string, unknown>) => {
+      const response = await base(route, params);
+      return route === "GET /repos/{owner}/{repo}/pulls/{pull_number}"
+        ? { data: { ...response.data, draft: !isDraft } } : response;
+    });
+    const { db, queued } = rerouteDatabase();
+    await expect(buildServices({ ...message, isDraft }, request, db).provider.applyActions(ignoredAction())).rejects.toThrow("routing context changed");
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toMatchObject({ payload: { isDraft: !isDraft } });
+    expect(request.mock.calls.every(([route]) => route.startsWith("GET "))).toBe(true);
+  });
+
+  it.each([
+    "GET /repos/{owner}/{repo}/commits/{ref}/check-runs",
+    "POST /repos/{owner}/{repo}/check-runs",
+    "GET /repos/{owner}/{repo}/issues/{issue_number}/labels",
+    "DELETE /repos/{owner}/{repo}/issues/{issue_number}/labels/{name}",
+    "POST /repos/{owner}/{repo}/labels",
+    "POST /repos/{owner}/{repo}/issues/{issue_number}/labels",
+    "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+  ])("stops obsolete exclusion writes when retargeted after %s", async after => {
+    const base = actionRequester(message.changeRequest.headRevision);
+    let changed = false;
+    const writesAfterChange: string[] = [];
+    const request = vi.fn(async (route: string, params: Record<string, unknown>) => {
+      if (changed && !route.startsWith("GET ")) writesAfterChange.push(route);
+      const response = route.startsWith("DELETE ") ? { data: {} } : await base(route, params);
+      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
+        return { data: { ...response.data, base: { sha: "trusted-base-123", ref: changed ? "release" : "main" } } };
+      }
+      if (route === after) changed = true;
+      if (route === "GET /repos/{owner}/{repo}/issues/{issue_number}/labels") return { data: [{ name: "triagepilot:risk-high" }] };
+      return response;
+    });
+    const { db, queued } = rerouteDatabase();
+    await expect(buildServices(message, request, db).provider.applyActions(ignoredAction())).rejects.toThrow("routing context changed");
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toMatchObject({ payload: { changeRequest: { targetBranch: "release" } } });
+    expect(writesAfterChange).toEqual([]);
+  });
+
+  it.each(["closed", "draft", "base", "head"])("stops approval if the PR changes to %s during the review lookup", async change => {
+    const base = actionRequester(message.changeRequest.headRevision);
+    let changed = false;
+    const writesAfterChange: string[] = [];
+    const request = vi.fn(async (route: string, params: Record<string, unknown>) => {
+      if (changed && !route.startsWith("GET ")) writesAfterChange.push(route);
+      const response = await base(route, params);
+      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}" && changed) {
+        return { data: { ...response.data, state: change === "closed" ? "closed" : "open", draft: change === "draft",
+          base: { sha: change === "base" ? "new-base" : "trusted-base-123", ref: "main" },
+          head: { sha: change === "head" ? "new-head" : message.changeRequest.headRevision, ref: "feature" } } };
+      }
+      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") changed = true;
+      return response;
+    });
+    const { db, queued } = rerouteDatabase();
+    await expect(buildServices(message, request, db).provider.applyActions(ignoredAction())).rejects.toThrow(
+      change === "closed" ? "not open" : change === "head" ? "head changed" : "routing context changed",
+    );
+    expect(queued).toHaveLength(change === "base" || change === "draft" ? 1 : 0);
+    expect(writesAfterChange).toEqual([]);
+  });
+
+  it("reroutes a signed job with unchanged branches when its base SHA advances", async () => {
+    const request = vi.fn(async () => ({ data: { state: "open", draft: false,
+      head: { sha: message.changeRequest.headRevision, ref: "feature" }, base: { sha: "new-base", ref: "main" } } }));
+    const { db, queued } = rerouteDatabase();
+    const signedJob = { ...message, changeRequest: { ...message.changeRequest, sourceBranch: "feature", targetBranch: "main" } };
+    await expect(buildServices(signedJob, request, db).provider.fetchChangeRequestMetadata(signedJob)).rejects.toThrow("routing context changed");
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toMatchObject({ payload: { changeRequest: { baseRevision: "new-base" } } });
+  });
+
+  it("reroutes a scored action when its trusted base changes after metadata acquisition", async () => {
+    const base = actionRequester(message.changeRequest.headRevision);
+    const request = vi.fn(async (route: string, params: Record<string, unknown>) => {
+      const response = await base(route, params);
+      return route === "GET /repos/{owner}/{repo}/pulls/{pull_number}"
+        ? { data: { ...response.data, base: { sha: "new-base", ref: "main" } } } : response;
+    });
+    const { db, queued } = rerouteDatabase();
+    await expect(buildServices(message, request, db).applyDecisionActions({
+      action: "policy_approval", expectedHeadSha: message.changeRequest.headRevision, decisionId: "scored-1", riskTier: "low",
+    })).rejects.toThrow("routing context changed");
+    expect(queued).toHaveLength(1);
+    expect(request.mock.calls.every(([route]) => route.startsWith("GET "))).toBe(true);
+  });
+
+  it("retains the resolved base revision for legacy jobs without a signed base SHA", async () => {
+    let changed = false;
+    const base = configRequester();
+    const request = vi.fn(async (route: string, params: Record<string, unknown>) => {
+      const response = await base(route, params);
+      return route === "GET /repos/{owner}/{repo}/pulls/{pull_number}" && changed
+        ? { data: { ...response.data, base: { sha: "new-base", ref: "main" } } } : response;
+    });
+    const { db, queued } = rerouteDatabase();
+    const legacyJob = { ...message, changeRequest: { ...message.changeRequest, baseRevision: "" } };
+    const services = buildServices(legacyJob, request, db);
+    await services.resolveConfiguration(legacyJob);
+    changed = true;
+    await expect(services.applyDecisionActions({
+      action: "policy_approval", expectedHeadSha: message.changeRequest.headRevision, decisionId: "legacy-1", riskTier: "low",
+    })).rejects.toThrow("routing context changed");
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toMatchObject({ payload: { changeRequest: { baseRevision: "new-base" } } });
+    expect(request.mock.calls.every(([route]) => route.startsWith("GET "))).toBe(true);
+  });
   it("approves the validated head and publishes the ignored label and successful checks without comments", async () => {
     const request = actionRequester(message.changeRequest.headRevision);
     const services = buildServices(message, request);

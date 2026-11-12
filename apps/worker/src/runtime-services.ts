@@ -109,6 +109,7 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
     let requesterConnectionId: string | null = null;
     let pullRequestPromise: Promise<unknown> | null = null;
     let persistedDecisionId: string | null = null;
+    let trustedConfigurationRevision = trustedBaseSha(message);
     const clock = input.clock ?? { now: () => new Date() };
     const availability = createWorkspaceReviewerAvailability(input.db, message.workspaceId);
 
@@ -199,6 +200,7 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
       async resolveConfiguration() {
         const trustedRevision = trustedBaseSha(message) ?? readNestedString(await pullRequest(), ["base", "sha"]);
         if (!trustedRevision) throw new Error("pull request base SHA is unavailable");
+        trustedConfigurationRevision = trustedRevision;
         const result = await resolveEffectiveConfiguration({
           workspaceId: message.workspaceId,
           repository,
@@ -225,10 +227,9 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
           const currentHeadRevision = readNestedString(pullRequestData, ["head", "sha"]);
           const sourceBranch = readNestedString(pullRequestData, ["head", "ref"]);
           const targetBranch = readNestedString(pullRequestData, ["base", "ref"]);
-          const legacyBaseRevision = changeRequest.targetBranch === undefined ? trustedBaseSha(message) : undefined;
           const contextChanged = (changeRequest.targetBranch !== undefined && changeRequest.targetBranch !== targetBranch)
             || (changeRequest.sourceBranch !== undefined && changeRequest.sourceBranch !== sourceBranch)
-            || (legacyBaseRevision !== undefined && legacyBaseRevision !== readNestedString(pullRequestData, ["base", "sha"]));
+            || (trustedConfigurationRevision !== undefined && trustedConfigurationRevision !== readNestedString(pullRequestData, ["base", "sha"]));
           if (currentHeadRevision === changeRequest.headRevision && contextChanged) {
             return rerouteCurrent(pullRequestData);
           }
@@ -284,28 +285,53 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
             repo: repository.name,
             pullNumber: changeRequest.number,
           };
-          const currentPullRequest = await githubRequester.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
-            owner: repository.owner,
-            repo: repository.name,
-            pull_number: changeRequest.number,
-          });
-          if (readNestedString(currentPullRequest.data, ["head", "sha"]) !== action.expectedHeadRevision) {
-            throw new PermanentJobError("pull request head changed before enforce actions");
-          }
-
-          if (action.risk === null) {
-            const current = currentPullRequest.data;
-            const source = readNestedString(current, ["head", "ref"]);
-            const target = readNestedString(current, ["base", "ref"]);
-            const baseRevision = readNestedString(current, ["base", "sha"]);
-            const excludedBranch = action.branchExclusion.type === "target_branch" ? target : source;
-            if (source !== action.expectedBranches.source || target !== action.expectedBranches.target
-              || baseRevision !== action.expectedBaseRevision || excludedBranch !== action.branchExclusion.branch) {
+          async function validateCurrentContext() {
+            const { data: current } = await githubRequester.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
+              owner: repository.owner,
+              repo: repository.name,
+              pull_number: changeRequest.number,
+            });
+            if (readNestedString(current, ["head", "sha"]) !== action.expectedHeadRevision) {
+              throw new PermanentJobError("pull request head changed before enforce actions");
+            }
+            if (action.risk === null) {
+              const source = readNestedString(current, ["head", "ref"]);
+              const target = readNestedString(current, ["base", "ref"]);
+              const baseRevision = readNestedString(current, ["base", "sha"]);
+              const excludedBranch = action.branchExclusion.type === "target_branch" ? target : source;
+              if (readNestedString(current, ["state"]) !== "open") {
+                throw new PermanentJobError("pull request is not open before exclusion writes");
+              }
+              const draft = typeof current === "object" && current !== null && "draft" in current ? current.draft : undefined;
+              if (source !== action.expectedBranches.source || target !== action.expectedBranches.target
+                || baseRevision !== action.expectedBaseRevision || excludedBranch !== action.branchExclusion.branch
+                || draft !== message.isDraft) {
+                return rerouteCurrent(current);
+              }
+            } else if (trustedConfigurationRevision !== undefined
+              && trustedConfigurationRevision !== readNestedString(current, ["base", "sha"])) {
               return rerouteCurrent(current);
             }
           }
+          await validateCurrentContext();
 
-          const adapter = createAdapter(githubRequester);
+          // Adapter operations can perform several reads/writes internally. Check
+          // every exclusion mutation, including the final approval, at that boundary.
+          let contextValidationFailed = false;
+          const actionRequester: Requester = action.risk === null ? {
+            async request(route, parameters) {
+              if (!route.startsWith("GET ")) {
+                try {
+                  await validateCurrentContext();
+                } catch (error) {
+                  contextValidationFailed = true;
+                  throw error;
+                }
+              }
+              return githubRequester.request(route, parameters);
+            },
+          } : githubRequester;
+          const adapter = createAdapter(actionRequester);
           const route = action.action === "policy_approval"
             ? "no_human"
             : action.action === "no_eligible_reviewer"
@@ -363,7 +389,7 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
             }
           } catch (error) {
             const classified = classifyWorkerError(error);
-            if (classified instanceof PermanentJobError) {
+            if (classified instanceof PermanentJobError && !contextValidationFailed) {
               const summary = `TriagePilot routing action failed: ${classified.message}`;
               await adapter.updateHumanReviewPolicyCheck({ checkRun, checkRunId: policyCheckRunId, state: "failure", summary });
               await updatePolicyCheckState(input.db, message.workspaceId, { decisionId: action.decisionId, state: "failure" });

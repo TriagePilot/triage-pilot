@@ -394,7 +394,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
 
 const policyCheckRequester = async (route: string, parameters: Record<string, unknown>) => {
   if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
-    return { data: { state: "open", head: { sha: "abc123" } } };
+    return { data: { state: "open", draft: false, base: { sha: "base-123", ref: "main" }, head: { sha: "abc123", ref: "feature" } } };
   }
   if (route === "POST /repos/{owner}/{repo}/check-runs" && parameters.name === "triagepilot/human-review-policy") {
     return { data: { id: 71 } };
@@ -423,7 +423,7 @@ it.runIf(Boolean(process.env.TEST_DATABASE_URL)).each([
     await db.insertInto("repositories").values({ workspace_id: workspaceId, provider: "github", provider_connection_id: connection.id, external_repository_id: "101", owner: "acme", name: "api", default_branch: "main", config_state: "unknown" }).execute();
     const scopedMessage = { ...message, workspaceId, providerConnectionId: connection.id };
     const request = vi.fn(async (route: string, params: Record<string, unknown>) => {
-      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") return { data: { head: { sha: "abc123", ref: "dependabot/npm" }, base: { sha: "base-123", ref: "main" }, user: { login: "author" } } };
+      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") return { data: { state: "open", draft: false, head: { sha: "abc123", ref: "dependabot/npm" }, base: { sha: "base-123", ref: "main" }, user: { login: "author" } } };
       if (route === "GET /repos/{owner}/{repo}/commits/{ref}/check-runs") return { data: { check_runs: [] } };
       if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews" || route === "GET /repos/{owner}/{repo}/issues/{issue_number}/labels") return { data: [] };
       if (route === "POST /repos/{owner}/{repo}/check-runs") return { data: { id: params.name === "triagepilot/human-review-policy" ? 71 : 72 } };
@@ -460,6 +460,59 @@ it.runIf(Boolean(process.env.TEST_DATABASE_URL)).each([
     if (mode === "shadow") expect(request.mock.calls.every(([route]) => route.startsWith("GET "))).toBe(true);
   });
 });
+
+it.runIf(Boolean(process.env.TEST_DATABASE_URL)).each(["draft", "closed", "retarget"] as const)(
+  "persists an aborted exclusion when the live PR changes to %s, then honors fresh routing",
+  async change => {
+    await withPostgresTestDatabase(async db => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const connection = await db.insertInto("provider_connections").values({ workspace_id: workspaceId, provider: "github", external_connection_id: "99", workspace_login: "acme", account_type: "Organization", status: "active", permissions: {} }).returning("id").executeTakeFirstOrThrow();
+      await db.insertInto("repositories").values({ workspace_id: workspaceId, provider: "github", provider_connection_id: connection.id, external_repository_id: "101", owner: "acme", name: "api", default_branch: "main", config_state: "unknown" }).execute();
+      const scopedMessage = { ...message, workspaceId, providerConnectionId: connection.id,
+        changeRequest: { ...message.changeRequest, sourceBranch: "feature", targetBranch: "main" } };
+      let reads = 0;
+      let changed = false;
+      let checkId = 70;
+      const request = vi.fn(async (route: string, params: Record<string, unknown>) => {
+        if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
+          if (++reads >= 2 && change !== "retarget") changed = true;
+          return { data: { state: changed && change === "closed" ? "closed" : "open", draft: changed && change === "draft",
+            head: { sha: "abc123", ref: "feature" }, base: { sha: "base-123", ref: changed && change === "retarget" ? "release" : "main" }, user: { login: "author" } } };
+        }
+        if (route === "POST /repos/{owner}/{repo}/check-runs") {
+          if (change === "retarget") changed = true;
+          return { data: { id: ++checkId } };
+        }
+        if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/files") return { data: [{ filename: "README.md", additions: 1, deletions: 0 }] };
+        if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/commits") return { data: [] };
+        return policyCheckRequester(route, params);
+      });
+      const factory = createWorkerRoutingServiceFactory({ db, github: { appId: "123", privateKey: "test-key" }, createRequester: async () => ({ request }), createConfigurationSource: () => ({
+        async loadOrganization() { return null; },
+        async loadRepository() {
+          return { content: 'mode: enforce\nrouting:\n  exclude_target_branches: [main]\nrisk:\n  paths:\n    - pattern: README.md\n      weight: 50\n      tag: docs\nownership:\n  fallback_reviewers: ["@reviewer"]\n', path: ".triagepilot.yml", revision: "base-123" };
+        },
+      }) });
+      await expect(processRoutingJob(scopedMessage, factory(scopedMessage))).rejects.toThrow(change === "closed" ? "not open" : "routing context changed");
+      expect(await db.selectFrom("routing_decisions").select(["action_status", "policy_check_state"]).executeTakeFirstOrThrow())
+        .toEqual({ action_status: "failed", policy_check_state: change === "retarget" ? "success" : "not_started" });
+      const writes = request.mock.calls.filter(([route]) => !route.startsWith("GET "));
+      expect(writes).toHaveLength(change === "retarget" ? 1 : 0);
+      const jobs = await db.selectFrom("jobs").selectAll().execute();
+      expect(jobs).toHaveLength(change === "closed" ? 0 : 1);
+      if (change === "closed") return;
+      const reroute = jobs[0]!.payload as RoutingJobMessage;
+      await processRoutingJob(reroute, factory(reroute));
+      const decisions = await db.selectFrom("routing_decisions").select(["action", "action_status", "policy_check_state"]).execute();
+      expect(decisions).toHaveLength(change === "draft" ? 1 : 2);
+      if (change === "retarget") {
+        expect(decisions).toContainEqual({ action: "request_human_review", action_status: "succeeded", policy_check_state: "in_progress" });
+        expect(request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", expect.objectContaining({ reviewers: ["reviewer"] }));
+      }
+      expect(request.mock.calls.some(([route]) => route === "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews")).toBe(false);
+    });
+  },
+);
 
 it.runIf(Boolean(process.env.TEST_DATABASE_URL)).each([
   { name: "target retarget on identical commits", sourceRule: false, liveTarget: "release", liveSource: "feature", liveBase: "base-123" },
