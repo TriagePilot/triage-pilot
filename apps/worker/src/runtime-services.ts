@@ -324,7 +324,7 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
                 try {
                   await validateCurrentContext();
                 } catch (error) {
-                  contextValidationFailed = true;
+                  if (error instanceof PermanentJobError) contextValidationFailed = true;
                   throw error;
                 }
               }

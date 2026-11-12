@@ -461,6 +461,65 @@ it.runIf(Boolean(process.env.TEST_DATABASE_URL)).each([
   });
 });
 
+it.runIf(Boolean(process.env.TEST_DATABASE_URL)).each([403, 500])(
+  "persists the policy outcome after a raw pre-write read failure with status %s",
+  async status => {
+    await withPostgresTestDatabase(async db => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const connection = await db.insertInto("provider_connections").values({
+        workspace_id: workspaceId, provider: "github", external_connection_id: "99",
+        workspace_login: "acme", account_type: "Organization", status: "active", permissions: {},
+      }).returning("id").executeTakeFirstOrThrow();
+      await db.insertInto("repositories").values({
+        workspace_id: workspaceId, provider: "github", provider_connection_id: connection.id,
+        external_repository_id: "101", owner: "acme", name: "api", default_branch: "main", config_state: "unknown",
+      }).execute();
+      const scopedMessage = { ...message, workspaceId, providerConnectionId: connection.id };
+      const failure = Object.assign(new Error("pre-write read failed"), { status });
+      let policyPublished = false;
+      let readFailed = false;
+      let remotePolicyState: string | undefined;
+      const request = vi.fn(async (route: string, params: Record<string, unknown>) => {
+        if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
+          if (policyPublished && !readFailed) {
+            readFailed = true;
+            throw failure;
+          }
+          return { data: { state: "open", draft: false, head: { sha: "abc123", ref: "feature" },
+            base: { sha: "base-123", ref: "main" }, user: { login: "author" } } };
+        }
+        if (route === "POST /repos/{owner}/{repo}/check-runs" && params.name === "triagepilot/human-review-policy") {
+          policyPublished = true;
+          remotePolicyState = String(params.conclusion);
+        }
+        if (route === "PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}") {
+          remotePolicyState = String(params.conclusion);
+          return { data: {} };
+        }
+        return policyCheckRequester(route, params);
+      });
+      const services = createWorkerRoutingServiceFactory({
+        db, github: { appId: "123", privateKey: "test-key" }, createRequester: async () => ({ request }),
+        createConfigurationSource: () => ({
+          async loadOrganization() { return null; },
+          async loadRepository() {
+            return { content: "mode: enforce\nrouting:\n  exclude_target_branches: [main]\n", path: ".triagepilot.yml", revision: "base-123" };
+          },
+        }),
+      })(scopedMessage);
+
+      await expect(processRoutingJob(scopedMessage, services)).rejects.toBe(failure);
+
+      const expectedState = status === 403 ? "failure" : "success";
+      expect(readFailed).toBe(true);
+      expect(remotePolicyState).toBe(expectedState);
+      expect(await db.selectFrom("routing_decisions").select(["action_status", "action_error", "policy_check_state"]).executeTakeFirstOrThrow())
+        .toEqual({ action_status: "failed", action_error: "pre-write read failed", policy_check_state: expectedState });
+      expect(request.mock.calls.some(([route]) => route === "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews")).toBe(false);
+    });
+  },
+);
+
 it.runIf(Boolean(process.env.TEST_DATABASE_URL)).each(["draft", "closed", "retarget"] as const)(
   "persists an aborted exclusion when the live PR changes to %s, then honors fresh routing",
   async change => {
