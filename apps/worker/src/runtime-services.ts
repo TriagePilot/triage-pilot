@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   createInstallationRequester,
   GitHubAdapter,
@@ -7,6 +8,7 @@ import {
 import { resolveConfiguration as resolveEffectiveConfiguration } from "@triagepilot/config";
 import {
   trustedBaseSha,
+  buildRoutingKey,
   type Clock,
   type ConfigurationSource,
   type CredentialProvider,
@@ -107,6 +109,7 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
     let requesterConnectionId: string | null = null;
     let pullRequestPromise: Promise<unknown> | null = null;
     let persistedDecisionId: string | null = null;
+    let trustedConfigurationRevision = trustedBaseSha(message);
     const clock = input.clock ?? { now: () => new Date() };
     const availability = createWorkspaceReviewerAvailability(input.db, message.workspaceId);
 
@@ -152,10 +155,52 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
       return pullRequestPromise;
     }
 
+    async function rerouteCurrent(current: unknown): Promise<never> {
+      const sourceBranch = readNestedString(current, ["head", "ref"]);
+      const targetBranch = readNestedString(current, ["base", "ref"]);
+      const baseRevision = readNestedString(current, ["base", "sha"]);
+      const headRevision = readNestedString(current, ["head", "sha"]);
+      if (!sourceBranch || !targetBranch || !baseRevision || !headRevision || readNestedString(current, ["state"]) !== "open"
+        || typeof current !== "object" || current === null || !("draft" in current) || typeof current.draft !== "boolean") {
+        throw new PermanentJobError("current pull request routing context is unavailable for rerouting");
+      }
+      // Both identities include the parent and complete live context: retries reuse
+      // one job, while another retarget cannot collide with its persisted delivery.
+      const contextId = createHash("sha256").update(JSON.stringify([
+        message.routingKey, sourceBranch, targetBranch, baseRevision, headRevision, current.draft,
+      ])).digest("hex");
+      const routingKey = `${buildRoutingKey({
+        workspaceId: message.workspaceId,
+        provider: repository.provider,
+        repositoryId: repository.externalId,
+        changeRequestId: changeRequest.externalId,
+        trustedConfigRevision: baseRevision,
+        headRevision,
+        isDraft: current.draft,
+      })}:context:${contextId}`;
+      await knownRepository();
+      await createWorkspaceJobQueue(input.db, message.workspaceId).enqueue({
+        provider: repository.provider,
+        providerConnectionId: message.providerConnectionId,
+        kind: "process_pull_request",
+        payload: {
+          ...message,
+          deliveryId: `reroute:${contextId}`,
+          eventName: "routing.context_changed",
+          changeRequest: { ...changeRequest, baseRevision, headRevision, sourceBranch, targetBranch },
+          isDraft: current.draft,
+          routingKey,
+        },
+        idempotencyKey: routingKey,
+      });
+      throw new PermanentJobError("pull request routing context changed before enforce actions; fresh routing queued");
+    }
+
     const services: RoutingJobServices = {
       async resolveConfiguration() {
         const trustedRevision = trustedBaseSha(message) ?? readNestedString(await pullRequest(), ["base", "sha"]);
         if (!trustedRevision) throw new Error("pull request base SHA is unavailable");
+        trustedConfigurationRevision = trustedRevision;
         const result = await resolveEffectiveConfiguration({
           workspaceId: message.workspaceId,
           repository,
@@ -179,12 +224,21 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
       provider: {
         async fetchChangeRequestMetadata() {
           const pullRequestData = await pullRequest();
+          const currentHeadRevision = readNestedString(pullRequestData, ["head", "sha"]);
+          const sourceBranch = readNestedString(pullRequestData, ["head", "ref"]);
+          const targetBranch = readNestedString(pullRequestData, ["base", "ref"]);
+          const contextChanged = (changeRequest.targetBranch !== undefined && changeRequest.targetBranch !== targetBranch)
+            || (changeRequest.sourceBranch !== undefined && changeRequest.sourceBranch !== sourceBranch)
+            || (trustedConfigurationRevision !== undefined && trustedConfigurationRevision !== readNestedString(pullRequestData, ["base", "sha"]));
+          if (currentHeadRevision === changeRequest.headRevision && contextChanged) {
+            return rerouteCurrent(pullRequestData);
+          }
           const author = readNestedString(pullRequestData, ["user", "login"]);
           return {
             author,
-            sourceBranch: readNestedString(pullRequestData, ["head", "ref"]),
-            targetBranch: readNestedString(pullRequestData, ["base", "ref"]),
-            currentHeadRevision: readNestedString(pullRequestData, ["head", "sha"]),
+            sourceBranch,
+            targetBranch,
+            currentHeadRevision,
           };
         },
 
@@ -231,16 +285,53 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
             repo: repository.name,
             pullNumber: changeRequest.number,
           };
-          const currentPullRequest = await githubRequester.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
-            owner: repository.owner,
-            repo: repository.name,
-            pull_number: changeRequest.number,
-          });
-          if (readNestedString(currentPullRequest.data, ["head", "sha"]) !== action.expectedHeadRevision) {
-            throw new PermanentJobError("pull request head changed before enforce actions");
+          async function validateCurrentContext() {
+            const { data: current } = await githubRequester.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
+              owner: repository.owner,
+              repo: repository.name,
+              pull_number: changeRequest.number,
+            });
+            if (readNestedString(current, ["head", "sha"]) !== action.expectedHeadRevision) {
+              throw new PermanentJobError("pull request head changed before enforce actions");
+            }
+            if (action.risk === null) {
+              const source = readNestedString(current, ["head", "ref"]);
+              const target = readNestedString(current, ["base", "ref"]);
+              const baseRevision = readNestedString(current, ["base", "sha"]);
+              const excludedBranch = action.branchExclusion.type === "target_branch" ? target : source;
+              if (readNestedString(current, ["state"]) !== "open") {
+                throw new PermanentJobError("pull request is not open before exclusion writes");
+              }
+              const draft = typeof current === "object" && current !== null && "draft" in current ? current.draft : undefined;
+              if (source !== action.expectedBranches.source || target !== action.expectedBranches.target
+                || baseRevision !== action.expectedBaseRevision || excludedBranch !== action.branchExclusion.branch
+                || draft !== message.isDraft) {
+                return rerouteCurrent(current);
+              }
+            } else if (trustedConfigurationRevision !== undefined
+              && trustedConfigurationRevision !== readNestedString(current, ["base", "sha"])) {
+              return rerouteCurrent(current);
+            }
           }
+          await validateCurrentContext();
 
-          const adapter = createAdapter(githubRequester);
+          // Adapter operations can perform several reads/writes internally. Check
+          // every exclusion mutation, including the final approval, at that boundary.
+          let contextValidationFailed = false;
+          const actionRequester: Requester = action.risk === null ? {
+            async request(route, parameters) {
+              if (!route.startsWith("GET ")) {
+                try {
+                  await validateCurrentContext();
+                } catch (error) {
+                  if (error instanceof PermanentJobError) contextValidationFailed = true;
+                  throw error;
+                }
+              }
+              return githubRequester.request(route, parameters);
+            },
+          } : githubRequester;
+          const adapter = createAdapter(actionRequester);
           const route = action.action === "policy_approval"
             ? "no_human"
             : action.action === "no_eligible_reviewer"
@@ -273,12 +364,14 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
               conclusion: "success",
               summary: action.noHumanReason ?? (action.selectedActors.join(", ") || action.action),
             });
-            await adapter.syncRiskLabel({ pullRequest, tier: action.risk.tier });
-            await adapter.upsertRoutingComment({
-              pullRequest,
-              decisionId: action.decisionId,
-              body: formatRoutingComment({ action: action.action, riskTier: action.risk.tier, risk: action.risk }),
-            });
+            await adapter.syncRiskLabel({ pullRequest, tier: action.risk === null ? "ignored" : action.risk.tier });
+            if (action.risk !== null) {
+              await adapter.upsertRoutingComment({
+                pullRequest,
+                decisionId: action.decisionId,
+                body: formatRoutingComment({ action: action.action, riskTier: action.risk.tier, risk: action.risk }),
+              });
+            }
             if (route === "human_review" && action.actorsToRequest.length > 0) {
               try {
                 await adapter.requestHumanReviewers({ pullRequest, reviewers: action.actorsToRequest });
@@ -296,9 +389,11 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
             }
           } catch (error) {
             const classified = classifyWorkerError(error);
-            if (classified instanceof PermanentJobError) {
+            if (classified instanceof PermanentJobError && !contextValidationFailed) {
               const summary = `TriagePilot routing action failed: ${classified.message}`;
-              await adapter.updateHumanReviewPolicyCheck({ checkRun, checkRunId: policyCheckRunId, state: "failure", summary });
+              // Failure reporting must not repeat a failed PR-context read. The
+              // requester still validates live provider authority before this write.
+              await createAdapter(githubRequester).updateHumanReviewPolicyCheck({ checkRun, checkRunId: policyCheckRunId, state: "failure", summary });
               await updatePolicyCheckState(input.db, message.workspaceId, { decisionId: action.decisionId, state: "failure" });
             }
             throw error;

@@ -21,12 +21,15 @@ const pullRequestWebhookSchema = z.object({
     name: z.string().trim().min(1),
     owner: z.object({ login: z.string().trim().min(1), type: z.string().trim().min(1) }),
   }),
+  changes: z.object({
+    base: z.object({ ref: z.object({ from: z.string().trim().min(1) }).optional() }).optional(),
+  }).optional(),
   pull_request: z.object({
     id: githubIdSchema,
     number: z.number().int().positive(),
     draft: z.boolean(),
-    base: z.object({ sha: z.string().trim().min(1) }),
-    head: z.object({ sha: z.string().trim().min(1) }),
+    base: z.object({ sha: z.string().trim().min(1), ref: z.string().trim().min(1).optional() }),
+    head: z.object({ sha: z.string().trim().min(1), ref: z.string().trim().min(1).optional() }),
   }),
 });
 
@@ -48,7 +51,10 @@ export interface NormalizedGitHubWebhookEvent extends NormalizedChangeRequestEve
 export function normalizeGitHubWebhook(input: GitHubWebhookInput): NormalizedGitHubWebhookEvent | null {
   if (input.eventName === "pull_request") {
     const payload = pullRequestWebhookSchema.parse(input.payload);
-    if (!ROUTING_PULL_REQUEST_ACTIONS.has(payload.action)) return null;
+    const previousBase = payload.changes?.base?.ref?.from;
+    const retargeted = payload.action === "edited" && previousBase !== undefined
+      && payload.pull_request.base.ref !== undefined && previousBase !== payload.pull_request.base.ref;
+    if (!ROUTING_PULL_REQUEST_ACTIONS.has(payload.action) && !retargeted) return null;
     return toNormalizedEvent(input.deliveryId, "change_request", payload);
   }
 
@@ -87,6 +93,8 @@ function toNormalizedEvent(
       number: payload.pull_request.number,
       baseRevision: payload.pull_request.base.sha,
       headRevision: payload.pull_request.head.sha,
+      ...(payload.pull_request.base.ref === undefined ? {} : { targetBranch: payload.pull_request.base.ref }),
+      ...(payload.pull_request.head.ref === undefined ? {} : { sourceBranch: payload.pull_request.head.ref }),
     },
     actor: {
       externalId: payload.sender.id,

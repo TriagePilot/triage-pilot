@@ -1,5 +1,7 @@
 import type { ActionStatus, AnalyticsDecisionFact, ExternalActorId, RepositoryMode, TrackedPullRequest } from "@triagepilot/contracts";
 
+import { readBranchExclusion } from "./decision-details.js";
+
 /** Selected persistence columns plus the authorized repository identity. */
 export interface AnalyticsDecisionRow {
   id: string;
@@ -28,12 +30,13 @@ export function normalizeAnalyticsDecision(row: AnalyticsDecisionRow): Analytics
   if (!row.change_request_id?.trim() || !Number.isSafeInteger(row.pull_number) || row.pull_number! <= 0) return null;
   if (row.action !== "policy_approval" && row.action !== "request_human_review" && row.action !== "no_eligible_reviewer" && row.action !== "configuration_failure") return null;
   const details = object(row.details);
+  const excluded = readBranchExclusion(details) !== undefined;
   const tier = object(details.risk).tier;
-  const riskTier = row.action !== "configuration_failure" && (tier === "low" || tier === "medium" || tier === "high") ? tier : null;
+  const riskTier = !excluded && row.action !== "configuration_failure" && (tier === "low" || tier === "medium" || tier === "high") ? tier : null;
   const routing = object(details.routing);
   const quota = routing.requestedReviewerCount;
   let requiredReviews: AnalyticsDecisionFact["requiredReviews"] = null;
-  if (row.action === "policy_approval" && riskTier === "low") {
+  if (row.action === "policy_approval" && (excluded || riskTier === "low")) {
     requiredReviews = 0;
   } else if (row.action === "request_human_review" || row.action === "no_eligible_reviewer") {
     // An explicit historical quota remains reliable even when the tier is missing.
@@ -48,7 +51,7 @@ export function normalizeAnalyticsDecision(row: AnalyticsDecisionRow): Analytics
     decisionId: row.id, changeRequest: row.changeRequest,
     createdAt: row.created_at.toISOString(), actionAppliedAt: row.action_applied_at?.toISOString() ?? null,
     mode: row.mode, action: row.action, actionStatus: row.action_status,
-    riskScore: row.action !== "configuration_failure" && Number.isFinite(row.risk_score) ? row.risk_score : null,
+    riskScore: !excluded && row.action !== "configuration_failure" && Number.isFinite(row.risk_score) ? row.risk_score : null,
     riskTier, requiredReviews, reviewerShortfall,
   };
 }

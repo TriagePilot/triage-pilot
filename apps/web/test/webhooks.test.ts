@@ -565,3 +565,20 @@ const signedWebhook = (
     },
     body,
   });
+
+it("queues repeated retargets on identical commits without reusing a completed routing identity", async () => {
+  const acceptRoutingDelivery = vi.fn(async () => ({ inserted: true, jobId: "job" }));
+  const app = createWebApp(buildServices({ acceptRoutingDelivery }));
+  for (const [deliveryId, from, to] of [["retarget-1", "main", "release"], ["retarget-2", "release", "main"], ["retarget-1", "main", "release"]] as const) {
+    const body = JSON.parse(pullRequestBody({ owner: { login: "acme", type: "Organization" } }));
+    body.action = "edited";
+    body.changes = { base: { ref: { from }, sha: { from: "trusted-base-123" } } };
+    body.pull_request.base.ref = to;
+    expect((await signedWebhook(app, JSON.stringify(body), { deliveryId })).status).toBe(202);
+  }
+  expect(acceptRoutingDelivery).toHaveBeenCalledTimes(3);
+  const keys = acceptRoutingDelivery.mock.calls.map(call => (call as unknown as [{ payload: { routingKey: string } }])[0].payload.routingKey);
+  expect(keys[0]).not.toBe(keys[1]);
+  expect(keys[0]).toBe(keys[2]);
+  expect(keys[0]).not.toBe("routing:00000000-0000-4000-8000-000000000001:github:101:7:trusted-base-123:abc123:ready");
+});

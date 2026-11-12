@@ -18,4 +18,7 @@ export interface ChangeRequestRef {
   number: number;
   baseRevision: string;
   headRevision: string;
+  /** Signed routing context; optional for jobs queued before branch validation. */
+  targetBranch?: string;
+  sourceBranch?: string;
 }

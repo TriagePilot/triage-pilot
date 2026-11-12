@@ -169,3 +169,19 @@ describe("normalizeGitHubWebhook", () => {
     });
   });
 });
+
+it.each([
+  { changes: { base: { ref: { from: "main" }, sha: { from: "same-base" } } }, accepted: true },
+  { changes: { title: { from: "old title" } }, accepted: false },
+  { changes: { body: { from: "old body" } }, accepted: false },
+  { changes: { base: { ref: { from: "release" }, sha: { from: "old-sha" } } }, accepted: false },
+])("routes only base-branch edits: $changes", ({ changes, accepted }) => {
+  const result = normalizeGitHubWebhook({ deliveryId: "retarget-1", eventName: "pull_request", payload: {
+    action: "edited", changes,
+    installation: { id: 99 }, sender: { id: 502, login: "sender" },
+    repository: { id: 101, name: "api", owner: { login: "acme", type: "Organization" } },
+    pull_request: { id: 7001, number: 7, draft: false, base: { sha: "same-base", ref: "release" }, head: { sha: "same-head" } },
+  } });
+  if (accepted) expect(result).toMatchObject({ eventAction: "edited", changeRequest: { baseRevision: "same-base", headRevision: "same-head", targetBranch: "release" } });
+  else expect(result).toBeNull();
+});

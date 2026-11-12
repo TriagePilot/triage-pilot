@@ -49,3 +49,11 @@ it("does not count configuration failures as assessed shortage coverage or accep
  expect(normalizedReport([{ ...analyticsRow, action: "configuration_failure", details: { routing: { reviewerShortfall: 2 } } }], "enforce").shortages).toEqual({ affectedPrs: 0, missingReviewers: 0, unknownPrs: 0 });
  expect(normalizeAnalyticsDecision({ ...analyticsRow, details: { routing: { requestedReviewerCount: 1, reviewerShortfall: 2 } } })?.reviewerShortfall).toBeNull();
 });
+
+it.each(["shadow", "enforce"] as const)("treats %s branch approvals as unassessed and excludes them from savings", mode => {
+ const ignored = { ...analyticsRow, mode, action: "policy_approval", risk_score: 0, details: { branchExclusion: { type: "target_branch", branch: "main", matchingRule: "main" }, risk: null, routing: { requestedReviewerCount: 0, selectedReviewers: [], reviewerShortfall: 0 } } };
+ expect(normalizeAnalyticsDecision(ignored)).toMatchObject({ riskScore: null, riskTier: null, requiredReviews: 0 });
+ const report = normalizedReport([ignored], mode);
+ expect(report.counts).toMatchObject({ assessed: 0, couldNotAssess: 1, riskLow: 0 });
+ expect(report.savings).toMatchObject({ eligiblePrs: 0, excludedPrs: 1, netFewerReviews: 0, estimatedHoursSaved: 0 });
+});
