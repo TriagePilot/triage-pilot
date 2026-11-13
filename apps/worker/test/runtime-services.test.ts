@@ -170,7 +170,7 @@ describe("worker routing GitHub reads", () => {
       return base(route, parameters);
     });
     const services = createWorkerRoutingServiceFactory({ db: knownRepositoryDatabase() as never, github: { appId: "123", privateKey: "key" }, createRequester: async () => ({ request }), reviewerBacklog: { readLoad: vi.fn(), readCurrent: vi.fn(), invalidate } })(message);
-    const attempt = services.applyDecisionActions({ action: "request_human_review", expectedHeadSha: "unmerged-head-456", decisionId: "decision-1", riskTier: "medium", selectedReviewers: ["@reviewer"], reviewersToRequest: ["@reviewer"] });
+    const attempt = services.applyDecisionActions({ action: "request_human_review", requiredApprovalCount: 1, expectedHeadSha: "unmerged-head-456", decisionId: "decision-1", riskTier: "medium", selectedReviewers: ["@reviewer"], reviewersToRequest: ["@reviewer"] });
     if (outcome === "accepted") await attempt;
     else await expect(attempt).rejects.toThrow(outcome === "timeout" ? "timeout" : "read failed");
     expect(invalidate).toHaveBeenCalledTimes(outcome === "read-failure" ? 0 : 1);
@@ -350,6 +350,7 @@ describe("worker routing GitHub reads", () => {
 
     await expect(
       services.applyDecisionActions({
+        requiredApprovalCount: 0,
         action: "policy_approval",
         decisionId: "decision-1",
         expectedHeadSha: "unmerged-head-456",
@@ -432,6 +433,7 @@ describe("worker routing GitHub reads", () => {
 
     await services.applyDecisionActions({
       action: "request_human_review",
+      requiredApprovalCount: 1,
       decisionId: "decision-1",
       expectedHeadSha: "unmerged-head-456",
       riskTier: "high",
@@ -452,6 +454,7 @@ describe("worker routing GitHub reads", () => {
 
     await services.applyDecisionActions({
       action: "request_human_review",
+      requiredApprovalCount: 1,
       decisionId: "decision-1",
       expectedHeadSha: "unmerged-head-456",
       riskTier: "medium" as const,
@@ -475,12 +478,25 @@ describe("worker routing GitHub reads", () => {
     expect(request.mock.calls.filter(([route]) => route.includes("requested_reviewers"))).toHaveLength(1);
   });
 
-  it("creates a failed policy check without requesting reviewers when nobody is eligible", async () => {
+  it("preserves a quota of two with partial assignment and explains the manual review path", async () => {
+    const request = actionRequester("unmerged-head-456");
+    const services = buildServices(message, request);
+    await services.applyDecisionActions({ action: "request_human_review", decisionId: "decision-1", expectedHeadSha: "unmerged-head-456", riskTier: "high", requiredApprovalCount: 2, selectedReviewers: ["@user-d82a5f"] });
+    const policy = request.mock.calls.find(([route, params]) => route.startsWith("POST ") && params.name === "triagepilot/human-review-policy")?.[1];
+    expect(policy).toMatchObject({ status: "in_progress", output: { summary: "Waiting for 2 more human approvals." } });
+    const comment = request.mock.calls.find(([route]) => route === "POST /repos/{owner}/{repo}/issues/{issue_number}/comments")?.[1].body;
+    expect(comment).toContain("**2 human approvals**");
+    expect(comment).toContain("Automatically selected reviewers: @user-d82a5f");
+    expect(comment).toContain("manually request any additional reviews");
+  });
+
+  it("creates a waiting policy check and manual guidance when nobody is eligible", async () => {
     const request = actionRequester("unmerged-head-456");
     const services = buildServices(message, request);
 
     await services.applyDecisionActions({
       action: "no_eligible_reviewer",
+      requiredApprovalCount: 1,
       decisionId: "decision-1",
       expectedHeadSha: "unmerged-head-456",
       riskTier: "medium" as const,
@@ -491,10 +507,10 @@ describe("worker routing GitHub reads", () => {
       "POST /repos/{owner}/{repo}/check-runs",
       expect.objectContaining({
         name: "triagepilot/human-review-policy",
-        status: "completed",
-        conclusion: "failure",
+        status: "in_progress",
       }),
     );
+    expect(request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", expect.objectContaining({ body: expect.stringContaining("manually request reviews") }));
     expect(request.mock.calls.some(([route]) => route.includes("requested_reviewers"))).toBe(false);
     expect(request.mock.calls.some(([route]) => route.endsWith("/reviews") && route.startsWith("POST "))).toBe(false);
   });
@@ -505,6 +521,7 @@ describe("worker routing GitHub reads", () => {
 
     await services.applyDecisionActions({
       action: "request_human_review",
+      requiredApprovalCount: 1,
       decisionId: "decision-1",
       expectedHeadSha: "unmerged-head-456",
       riskTier: "medium",
@@ -526,6 +543,7 @@ describe("worker routing GitHub reads", () => {
     const services = buildServices(message, request, db);
     const action = {
       action: "request_human_review",
+      requiredApprovalCount: 1,
       decisionId: "decision-1",
       expectedHeadSha: "unmerged-head-456",
       riskTier: "medium" as const,
@@ -542,6 +560,15 @@ describe("worker routing GitHub reads", () => {
       ),
     ).toHaveLength(1);
     expect(db.policyCheck()).toEqual({ checkRunId: "71", state: "in_progress" });
+  });
+
+  it("refreshes the remaining approval count on an existing waiting check", async () => {
+    const request = policyRequester();
+    const db = policyStateDatabase({ checkRunId: "71", state: "in_progress" });
+    const services = buildPolicyServices(request, db);
+    await services.updateCheck({ decision: humanReviewDecision({ requiredApprovalCount: 2 }), state: "in_progress", summary: "Waiting for 1 more human approval." });
+    expect(request).toHaveBeenCalledWith("PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}", expect.objectContaining({ check_run_id: "71", status: "in_progress", output: expect.objectContaining({ summary: "Waiting for 1 more human approval." }) }));
+    expect(request.mock.calls.filter(([route]) => route.startsWith("POST "))).toHaveLength(0);
   });
 
   it("replaces a completed success check when an approval is withdrawn on the same head", async () => {
@@ -617,6 +644,7 @@ describe("worker routing GitHub reads", () => {
 
     await expect(
       services.applyDecisionActions({
+        requiredApprovalCount: action === "policy_approval" ? 0 : 1,
         action,
         decisionId: "decision-1",
         expectedHeadSha: "unmerged-head-456",
@@ -642,6 +670,7 @@ describe("worker routing GitHub reads", () => {
     const services = buildServices(message, request, db);
     const action = {
       action: "request_human_review",
+      requiredApprovalCount: 1,
       decisionId: "decision-1",
       expectedHeadSha: "unmerged-head-456",
       riskTier: "medium" as const,
@@ -1119,6 +1148,7 @@ function humanReviewDecision(
     mode: "enforce",
     action: "request_human_review",
     selectedReviewers: ["@user-d82a5f"],
+    requiredApprovalCount: 1,
     policyCheckRunId: "71",
     policyCheckState: "in_progress",
     ...overrides,
@@ -1284,6 +1314,7 @@ function evaluationPolicyDatabase(input: {
                       mode: "enforce",
                       action: "request_human_review",
                       selectedReviewers: ["@user-d82a5f"],
+                      details: { routing: { requestedReviewerCount: 1 } },
                       policyCheckRunId: policyCheck.checkRunId,
                       policyCheckState: policyCheck.state,
                     }),
@@ -1344,7 +1375,7 @@ function buildServices(
 describe("branch exclusion GitHub actions", () => {
   const branchExclusion = { type: "target_branch" as const, branch: "main", matchingRule: "main" };
   function ignoredAction() {
-    return { workspaceId: message.workspaceId, providerConnectionId: message.providerConnectionId, repository: message.changeRequest.repository, changeRequestId: "7", changeRequestNumber: 7, expectedHeadRevision: message.changeRequest.headRevision, decisionId: "ignored-1", action: "policy_approval" as const, risk: null, branchExclusion, expectedBranches: { source: "feature", target: "main" }, expectedBaseRevision: "trusted-base-123", selectedActors: [], actorsToRequest: [], noHumanReason: 'Branch exclusion: target branch "main" matches "main". Risk not evaluated.' };
+    return { workspaceId: message.workspaceId, providerConnectionId: message.providerConnectionId, repository: message.changeRequest.repository, changeRequestId: "7", changeRequestNumber: 7, expectedHeadRevision: message.changeRequest.headRevision, decisionId: "ignored-1", action: "policy_approval" as const, risk: null, branchExclusion, expectedBranches: { source: "feature", target: "main" }, expectedBaseRevision: "trusted-base-123", selectedActors: [], actorsToRequest: [], requiredApprovalCount: 0, reviewerShortfall: 0, noHumanReason: 'Branch exclusion: target branch "main" matches "main". Risk not evaluated.' };
   }
   function rerouteDatabase() {
     const queued: Record<string, unknown>[] = [];
@@ -1451,6 +1482,7 @@ describe("branch exclusion GitHub actions", () => {
     });
     const { db, queued } = rerouteDatabase();
     await expect(buildServices(message, request, db).applyDecisionActions({
+        requiredApprovalCount: 0,
       action: "policy_approval", expectedHeadSha: message.changeRequest.headRevision, decisionId: "scored-1", riskTier: "low",
     })).rejects.toThrow("routing context changed");
     expect(queued).toHaveLength(1);
@@ -1471,6 +1503,7 @@ describe("branch exclusion GitHub actions", () => {
     await services.resolveConfiguration(legacyJob);
     changed = true;
     await expect(services.applyDecisionActions({
+        requiredApprovalCount: 0,
       action: "policy_approval", expectedHeadSha: message.changeRequest.headRevision, decisionId: "legacy-1", riskTier: "low",
     })).rejects.toThrow("routing context changed");
     expect(queued).toHaveLength(1);

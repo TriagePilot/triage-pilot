@@ -282,6 +282,7 @@ export class GitHubAdapter {
     );
     const body = `${marker}\n${input.body}`;
 
+    if (isCommentWithMarker(existing, marker) && existing.body === body) return;
     if (isCommentWithId(existing)) {
       await this.octokit.request("PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}", {
         ...toRepositoryParams(input.pullRequest),
@@ -463,13 +464,13 @@ export class GitHubAdapter {
   async updateHumanReviewPolicyCheck(input: {
     checkRun: CheckRunRef;
     checkRunId: string;
-    state: "success" | "failure";
+    state: "in_progress" | "success" | "failure";
     summary: string;
   }): Promise<void> {
     await this.octokit.request("PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}", {
       ...toRepositoryParams(input.checkRun),
       check_run_id: input.checkRunId,
-      ...completedHumanReviewPolicyCheckPayload(input),
+      ...humanReviewPolicyCheckPayload(input),
     });
   }
 
@@ -669,18 +670,6 @@ function humanReviewPolicyCheckPayload(input: {
   };
   if (input.state === "in_progress") return { ...check, status: "in_progress" as const };
   return { ...check, status: "completed" as const, conclusion: input.state };
-}
-
-function completedHumanReviewPolicyCheckPayload(input: { state: "success" | "failure"; summary: string }) {
-  return {
-    name: HUMAN_REVIEW_POLICY_CHECK_NAME,
-    status: "completed" as const,
-    conclusion: input.state,
-    output: {
-      title: "TriagePilot human review policy",
-      summary: input.summary,
-    },
-  };
 }
 
 function readPullRequestReview(value: unknown, strict: true): PullRequestReview;

@@ -446,6 +446,74 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker reviewer availabi
     });
   });
 
+  it.each(["cancel", "revise"] as const)("treats a non-mutating shortage recovery after %s as a stale no-op", async (mutation) => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedActivation(db, `stale-shortage-${mutation}`, [unavailableActor]);
+      const remote = new ReviewerRemote();
+      const first = fixture.buildServices(remote);
+      first.availability.persistReplacement = async () => { throw new Error("persistence interrupted"); };
+      const recovery = await processReviewerAbsenceActivationJob(fixture.message, first);
+      expect(recovery).toMatchObject({ phase: "persist_replacement", mutationIntentId: null, providerEffectsApplied: false });
+      await applyAdminMutation(db, fixture, mutation);
+      const calls = remote.request.mock.calls.length;
+      await expect(recoverReviewerReplacementFinalizer(recovery!, fixture.buildServices(remote))).resolves.toBeNull();
+      expect(remote.request).toHaveBeenCalledTimes(calls);
+      expect(await db.selectFrom("reviewer_replacements").select("id").execute()).toEqual([]);
+    });
+  });
+
+  it.each(["persist_replacement", "run_finalizer"] as const)("recovers legacy shortage %s without reviewer mutations", async (phase) => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedActivation(db, `legacy-shortage-${phase}`, [unavailableActor]);
+      const remote = new ReviewerRemote();
+      const first = fixture.buildServices(remote);
+      if (phase === "persist_replacement") {
+        first.availability.persistReplacement = async () => { throw new Error("persistence interrupted"); };
+      } else {
+        first.finalizers.run = async () => { throw new Error("finalizer interrupted"); };
+      }
+      const recovery = await processReviewerAbsenceActivationJob(fixture.message, first);
+      expect(recovery).toMatchObject({ phase, outcome: "no_replacement_available", finalizer: { action: "reevaluate_policy" } });
+      const legacy = { ...recovery!, finalizer: { action: "fail_policy" as const, decisionId: fixture.decisionId, summary: "No replacement is available for an absent required reviewer." } };
+      const retry = fixture.buildServices(remote);
+      retry.provider.inspectChangeRequest = vi.fn(async () => { throw new Error("must not select again"); });
+      await expect(recoverReviewerReplacementFinalizer(legacy as never, retry)).resolves.toBeNull();
+      expect(retry.provider.inspectChangeRequest).not.toHaveBeenCalled();
+      expect(remote.deleteCount + remote.postCount).toBe(0);
+      expect(remote.comments).toHaveLength(1);
+      expect(await db.selectFrom("reviewer_replacements").select(["state", "outcome"]).executeTakeFirstOrThrow()).toEqual({ state: "completed", outcome: "no_replacement_available" });
+      expect(await db.selectFrom("routing_decisions").select("policy_check_state").where("id", "=", fixture.decisionId).executeTakeFirstOrThrow()).toEqual({ policy_check_state: "in_progress" });
+    });
+  });
+
+  it("keeps absence shortages waiting, publishes idempotent guidance, and accepts manual approvals", async () => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedActivation(db, "manual-shortage", [unavailableActor]);
+      const remote = new ReviewerRemote();
+      const first = fixture.buildServices(remote);
+      const complete = first.availability.updateReplacementState;
+      first.availability.updateReplacementState = vi.fn(async () => { throw new Error("completion interrupted"); });
+      const recovery = await processReviewerAbsenceActivationJob(fixture.message, first);
+      expect(recovery).toMatchObject({ phase: "complete_replacement", outcome: "no_replacement_available" });
+      expect(remote.comments).toHaveLength(1);
+      expect(remote.comments[0]?.body).toContain("manually request any additional reviews");
+      expect(remote.comments[0]?.body).toContain("**1 human approval**");
+      expect(remote.comments[0]?.body).toContain("No available actor remains in the original ownership-eligible pool.");
+      expect(remote.deleteCount + remote.postCount).toBe(0);
+      await expect(db.selectFrom("routing_decisions").select("policy_check_state").where("id", "=", fixture.decisionId).executeTakeFirstOrThrow()).resolves.toEqual({ policy_check_state: "in_progress" });
+      // Replay the finalizer phase after a crash: same comment, no repeated requests.
+      const services = fixture.buildServices(remote);
+      services.availability.updateReplacementState = complete;
+      await expect(recoverReviewerReplacementFinalizer({ ...recovery!, phase: "run_finalizer" } as never, services)).resolves.toBeNull();
+      expect(remote.comments).toHaveLength(1);
+      expect(remote.commentWriteCount).toBe(1);
+      remote.reviews = [{ user: { login: "manual-reviewer", type: "User" }, state: "APPROVED", submitted_at: now.toISOString() }];
+      await services.finalizers.run({ workspaceId: fixture.message.workspaceId, providerConnectionId: fixture.connectionId, decisionId: fixture.decisionId, action: "reevaluate_policy", summary: null });
+      await expect(db.selectFrom("routing_decisions").select("policy_check_state").where("id", "=", fixture.decisionId).executeTakeFirstOrThrow()).resolves.toEqual({ policy_check_state: "success" });
+      expect(remote.deleteCount + remote.postCount).toBe(0);
+    });
+  });
+
   it("blocks a pending failure-check finalizer after provider revocation", async () => {
     await withPostgresTestDatabase(async (db) => {
       const fixture = await seedActivation(db, "revoked-failure-finalizer", [unavailableActor]);
@@ -458,7 +526,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker reviewer availabi
       expect(recovery).toMatchObject({
         phase: "run_finalizer",
         outcome: "no_replacement_available",
-        finalizer: { action: "fail_policy" },
+        finalizer: { action: "reevaluate_policy" },
       });
       const providerCallsBeforeRevocation = remote.request.mock.calls.length;
 
@@ -998,6 +1066,9 @@ class ReviewerRemote {
   beforeDelete: ((signal?: AbortSignal) => Promise<void>) | null = null;
   beforeRequest: (() => Promise<void>) | null = null;
 
+  comments: { id: number; body: string }[] = [];
+  commentWriteCount = 0;
+  reviews: unknown[] = [];
   readonly request = vi.fn(async (route: string, parameters: Record<string, unknown>) => {
     await this.beforeRequest?.();
     const pullNumber = Number(parameters.pull_number);
@@ -1012,7 +1083,18 @@ class ReviewerRemote {
       }
       return { data: { users: [...requested].map((actor) => ({ login: actor.slice(1) })), teams: [] } };
     }
-    if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") return { data: [] };
+    if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") return { data: this.reviews };
+    if (route === "GET /repos/{owner}/{repo}/issues/{issue_number}/comments") return { data: this.comments };
+    if (route === "POST /repos/{owner}/{repo}/issues/{issue_number}/comments") {
+      this.commentWriteCount++;
+      this.comments.push({ id: 1, body: String(parameters.body) });
+      return { data: {} };
+    }
+    if (route === "PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}") {
+      this.commentWriteCount++;
+      this.comments[0]!.body = String(parameters.body);
+      return { data: {} };
+    }
     if (route === "GET /repos/{owner}/{repo}/commits/{ref}/check-runs") {
       return { data: { check_runs: [] } };
     }

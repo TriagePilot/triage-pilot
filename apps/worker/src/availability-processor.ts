@@ -29,6 +29,7 @@ export async function recoverReviewerReplacementFinalizer(
 ): Promise<ReviewerReplacementFinalizerRecovery | null> {
   assertReviewerReplacementFinalizerRecovery(input);
   let recovery = input;
+  const legacyShortage = input.outcome === "no_replacement_available" && input.finalizer.action === "fail_policy";
   services.invalidateReviewerBacklog?.({ workspaceId: input.job.workspaceId, providerConnectionId: input.job.providerConnectionId });
 
   if (recovery.phase !== "persist_replacement") {
@@ -49,6 +50,7 @@ export async function recoverReviewerReplacementFinalizer(
         ? await services.availability.persistMutationIntentRecovery(recovery.persistence)
         : await services.availability.persistReplacement(recovery.persistence);
       if (!persisted.activationCurrent || persisted.replacement === null) {
+        if (!recovery.providerEffectsApplied && recovery.mutationIntentId === null) return null;
         const audited = await services.availability.persistMutationIntentRecovery(
           mutationIntentRecoveryAudit(recovery, "Final replacement persistence rejected stale state."),
         );
@@ -69,12 +71,20 @@ export async function recoverReviewerReplacementFinalizer(
 
   if (recovery.phase === "run_finalizer") {
     try {
+      // Legacy shortage payloads are execution hints only after durable scope and
+      // replacement provenance have been revalidated, including after persistence.
+      if (legacyShortage) {
+        await assertReplacementMatchesRecovery(recovery, services);
+        recovery = { ...recovery, finalizer: { action: "reevaluate_policy", decisionId: recovery.finalizer.decisionId, summary: null } } as ReviewerReplacementFinalizerRecovery;
+      }
+      const finalizer = recovery.finalizer;
+      if (finalizer === null) throw new PermanentJobError("Reviewer replacement finalizer is unavailable");
       await services.finalizers.run({
         workspaceId: recovery.job.workspaceId,
         providerConnectionId: recovery.job.providerConnectionId,
-        decisionId: recovery.finalizer.decisionId,
-        action: recovery.finalizer.action,
-        summary: recovery.finalizer.summary,
+        decisionId: finalizer.decisionId,
+        action: finalizer.action,
+        summary: finalizer.summary,
       });
       recovery = {
         ...recovery,
@@ -110,6 +120,7 @@ export async function markReviewerReplacementRecoveryExhausted(
 ): Promise<void> {
   assertReviewerReplacementFinalizerRecovery(recovery);
   if (recovery.replacementId === null) {
+    if (!recovery.providerEffectsApplied && recovery.mutationIntentId === null) return;
     const persisted = await services.availability.persistMutationIntentRecovery(
       mutationIntentRecoveryAudit(recovery, error),
     );

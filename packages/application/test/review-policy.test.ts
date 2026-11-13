@@ -124,3 +124,17 @@ describe("evaluateReviewPolicy", () => {
     expect(ports.provider.updatePolicyCheck).not.toHaveBeenCalled();
   });
 });
+
+it("re-evaluates shortage decisions after manual approvals and later dismissals", async () => {
+  const ports = buildPorts();
+  const shortage = { ...decision, action: "no_eligible_reviewer" as const, selectedActors: [] };
+  vi.mocked(ports.decisions.findLatest).mockResolvedValue(shortage);
+  expect(await evaluateReviewPolicy(job, ports)).toMatchObject({ state: "in_progress" });
+  const approval = { actor: "manual-one", actorType: "human", state: "approved", submittedAt: "2026-11-13T10:00:00Z" };
+  vi.mocked(ports.provider.fetchReviews).mockResolvedValue([approval]);
+  expect(await evaluateReviewPolicy(job, ports)).toMatchObject({ state: "in_progress" });
+  vi.mocked(ports.provider.fetchReviews).mockResolvedValue([approval, { ...approval, actor: "manual-two" }]);
+  expect(await evaluateReviewPolicy(job, ports)).toMatchObject({ state: "success" });
+  vi.mocked(ports.provider.fetchReviews).mockResolvedValue([approval, { ...approval, actor: "manual-two" }, { ...approval, actor: "manual-two", state: "dismissed", submittedAt: "2026-11-13T11:00:00Z" }]);
+  expect(await evaluateReviewPolicy(job, ports)).toMatchObject({ state: "in_progress" });
+});
