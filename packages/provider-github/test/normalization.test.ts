@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeGitHubWebhook } from "../src/normalization";
+import { normalizeGitHubWebhook, normalizeQueueInvalidation } from "../src/normalization";
 
 describe("normalizeGitHubWebhook", () => {
   it("maps a supported pull request into the provider-neutral event contract", () => {
@@ -168,4 +168,12 @@ describe("normalizeGitHubWebhook", () => {
       },
     });
   });
+});
+
+describe("queue invalidations", () => {
+  const payload = { installation: { id: 99 }, sender: { id: 1, login: "actor" }, repository: { id: 101, name: "api", owner: { login: "acme", type: "Organization" } }, pull_request: { id: 7, number: 7, draft: false, base: { sha: "base" }, head: { sha: "head" } }, review: { state: "approved" } };
+  it.each([...["opened", "reopened", "synchronize", "closed", "edited", "ready_for_review", "converted_to_draft", "review_requested", "review_request_removed"].map(action => ["pull_request", action]), ...["submitted", "edited", "dismissed"].map(action => ["pull_request_review", action])])("normalizes %s.%s", (event, action) => {
+    expect(normalizeQueueInvalidation(event!, { ...payload, action })).toEqual({ externalInstallationId: "99", repository: { provider: "github", externalId: "101", owner: "acme", name: "api" }, pullNumber: 7 });
+  });
+  it("ignores unrelated actions", () => expect(normalizeQueueInvalidation("pull_request", { ...payload, action: "labeled" })).toBeNull());
 });

@@ -30,6 +30,7 @@ export interface ProviderConnectionsTable {
   workspace_login: string;
   account_type: string;
   status: "active" | "suspended" | "revoked";
+  queue_selection_revision: Generated<string>;
   permissions: Json;
   created_at: Timestamp;
   updated_at: Timestamp;
@@ -78,6 +79,8 @@ export interface JobsTable {
   workspace_id: string;
   provider: ProviderKind;
   provider_connection_id: string;
+  external_installation_id: NullableString;
+  external_repository_id: NullableString;
   kind: string;
   status: Generated<"queued" | "running" | "succeeded" | "failed">;
   payload: Json;
@@ -93,6 +96,9 @@ export interface JobsTable {
 }
 
 export interface RoutingDecisionsTable {
+  origin_provider_connection_id: NullableString;
+  origin_external_installation_id: NullableString;
+  origin_external_repository_id: NullableString;
   id: Generated<string>;
   workspace_id: string;
   repository_id: string | null;
@@ -205,7 +211,61 @@ export interface WorkerHeartbeatTable {
   heartbeat_at: Timestamp;
 }
 
+export interface QueuePullWorkTable {
+  workspace_id: string;
+  provider_connection_id: string;
+  external_installation_id: string;
+  repository_id: string;
+  external_repository_id: string;
+  pull_number: number;
+  desired_generation: Generated<number>;
+  applied_generation: Generated<number>;
+  snapshot_revision: Generated<number>;
+  dispatch_epoch: Generated<number>;
+  dispatch_job_id: NullableString;
+  snapshot: Json;
+  checkpoint: Json;
+  verified_at: NullableTimestamp;
+  updated_at: Timestamp;
+}
+
+export interface QueueSyncScanMembersTable {
+  run_id: string;
+  repository_id: string;
+  external_repository_id: string;
+  pull_number: number;
+  missing: Generated<boolean>;
+}
+
+export interface QueueSyncRunsTable {
+  id: Generated<string>;
+  workspace_id: string;
+  provider_connection_id: string;
+  external_installation_id: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  checkpoint: Json;
+  checkpoint_repository_id: NullableString;
+  checkpoint_external_repository_id: NullableString;
+  selection_revision: Generated<string>;
+  membership_complete: Generated<boolean>;
+  classification_complete: Generated<boolean>;
+  verification_error: NullableString;
+  verified_at: NullableTimestamp;
+  revision: Generated<number>;
+  dispatch_epoch: Generated<number>;
+  dispatch_job_id: NullableString;
+  updated_at: Timestamp;
+}
+
+export interface DeferredPullRequestDeliveriesTable {
+  workspace_id: string; provider: import("@triagepilot/contracts").ProviderKind; delivery_id: string; provider_connection_id: string; external_installation_id: string; external_repository_id: string; input: Json; dispatch_epoch: Generated<number>; dispatch_job_id: NullableString; created_at: Generated<Date>;
+}
+
 export interface Database {
+  deferred_pull_request_deliveries: DeferredPullRequestDeliveriesTable;
+  queue_pull_work: QueuePullWorkTable;
+  queue_sync_runs: QueueSyncRunsTable;
+  queue_sync_scan_members: QueueSyncScanMembersTable;
   workspaces: WorkspacesTable;
   provider_connections: ProviderConnectionsTable;
   provider_connection_revocations: ProviderConnectionRevocationsTable;

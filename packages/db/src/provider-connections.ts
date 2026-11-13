@@ -267,17 +267,53 @@ async function cleanupRevokedProviderConnection(
   });
 }
 
+/** Materialize inventory only under the exact still-active installation identity. */
+export async function materializeQueueRepository(
+  db: DatabaseExecutor,
+  installation: import("./pull-request-projection.js").QueueInstallationKey,
+  repository: ProviderRepositoryMetadata,
+): Promise<{ repositoryId: string; externalRepositoryId: string }> {
+  if (repository.provider !== "github") throw new Error("queue provider must be github");
+  const operation = async (trx: Transaction<Database>) => {
+    await lockProviderConnectionProjection(trx, installation.workspaceId);
+    const connection = await trx.selectFrom("provider_connections").select("id")
+      .where("workspace_id", "=", installation.workspaceId).where("id", "=", installation.providerConnectionId)
+      .where("provider", "=", "github").where("external_connection_id", "=", installation.externalInstallationId)
+      .where("status", "=", "active").forUpdate().executeTakeFirst();
+    const revoked = await trx.selectFrom("provider_connection_revocations").select("revoked_connection_id")
+      .where("workspace_id", "=", installation.workspaceId).where("provider", "=", "github")
+      .where("external_connection_id", "=", installation.externalInstallationId).executeTakeFirst();
+    if (!connection || revoked) throw new Error("queue authority unavailable");
+    const repositoryId = await upsertRepository(trx, installation.workspaceId, connection.id, repository);
+    return { repositoryId, externalRepositoryId: repository.externalRepositoryId };
+  };
+  return db.isTransaction ? operation(db as Transaction<Database>) : db.transaction().execute(operation);
+}
+
 export async function upsertDeliveryRepository(
   trx: Transaction<Database>,
   workspaceId: WorkspaceId,
   connection: ProviderConnectionMetadata,
   repository: ProviderRepositoryMetadata,
-): Promise<{ providerConnectionId: ProviderConnectionId; repositoryId: string } | null> {
+): Promise<{ providerConnectionId: ProviderConnectionId; repositoryId: string } | { unavailableConnectionId: ProviderConnectionId } | null> {
   assertRepositoryProviders(connection.provider, [repository]);
-  const providerConnectionId = await upsertActiveProviderConnection(trx, workspaceId, connection);
+  await lockProviderConnectionProjection(trx, workspaceId);
+  const active = await trx.selectFrom("provider_connections").select(["id", "provider", "external_connection_id"])
+    .where("workspace_id", "=", workspaceId).where("status", "=", "active").forUpdate().executeTakeFirst();
+  if (!active || active.provider !== connection.provider || active.external_connection_id !== connection.externalConnectionId) return null;
+  const providerConnectionId = active.id;
   if (providerConnectionId === null) return null;
-  const repositoryId = await upsertRepository(trx, workspaceId, providerConnectionId, repository);
-  return { providerConnectionId, repositoryId };
+  const revoked = await trx.selectFrom("provider_connection_revocations").select("revoked_connection_id")
+    .where("workspace_id", "=", workspaceId).where("provider", "=", connection.provider)
+    .where("external_connection_id", "=", connection.externalConnectionId).executeTakeFirst();
+  if (revoked) return null;
+  const selected = await trx.selectFrom("repositories").select("id")
+    .where("workspace_id", "=", workspaceId).where("provider", "=", repository.provider)
+    .where("provider_connection_id", "=", providerConnectionId)
+    .where("external_repository_id", "=", repository.externalRepositoryId)
+    .forUpdate().executeTakeFirst();
+  if (!selected) return { unavailableConnectionId: providerConnectionId };
+  return { providerConnectionId, repositoryId: selected.id };
 }
 
 async function upsertActiveProviderConnection(

@@ -8,6 +8,11 @@ const pr = (n = 1) => ({ id: n, number: n, state: "open", title: "PR", user, cre
 const context = () => ({ signal: new AbortController().signal, assertAuthorized: vi.fn(async () => {}), githubOrganization: "acme" });
 
 describe("GitHub queue reader", () => {
+  it("preserves provider retry and primary reset deadlines", async () => {
+    const reset = Math.floor(Date.now() / 1000) + 3_600;
+    const reader = createGitHubPullRequestQueueReader({ request: async () => { throw { status: 403, response: { headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset), "retry-after": "120" } } }; } });
+    await expect(reader.listRepositoriesPage({ ...context(), page: 1 })).rejects.toMatchObject({ reason: "rate_limited", retryAt: new Date(reset * 1000) });
+  });
   it("paginates inventory and open PRs, retaining old drafts and stable actor IDs", async () => {
     const request = vi.fn(async (route: string, p: Record<string, unknown>) => ({ data: route.includes("installation") ? { total_count: 101, repositories: p.page === 1 ? Array.from({ length: 100 }, (_, i) => repo(i + 1)) : [repo(101)] } : p.page === 1 ? Array.from({ length: 100 }, (_, i) => pr(i + 1)) : [pr(101)] }));
     const reader = createGitHubPullRequestQueueReader({ request }); const ctx = context();
@@ -149,5 +154,32 @@ describe("authorization at every queue request boundary", () => {
     const pull = (await createGitHubPullRequestQueueReader({ request: async () => ({ data: [pr()] }) }).listOpenPullRequests({ ...context(), repository }))[0]!;
     const reader = createGitHubPullRequestQueueReader({ request: async (route) => ({ data: route.endsWith("/reviews") ? [] : { ...pr(), requested_reviewers: [{ ...user, login: "NewName" }] } }) });
     expect(await reader.readReviewState({ ...context(), pullRequest: pull, includeLifecycle: false })).toMatchObject({ status: "complete" });
+  });
+});
+
+describe("bounded queue reads", () => {
+  it("reads exactly one inventory or pull page with fresh authorization", async () => {
+    const request = vi.fn(async (route: string) => ({ data: route.includes("installation") ? { total_count: 101, repositories: Array.from({ length: 100 }, (_, i) => repo(i + 1)) } : [pr()] }));
+    const reader = createGitHubPullRequestQueueReader({ request }); const ctx = context();
+    expect(await reader.listRepositoriesPage({ ...ctx, page: 1 })).toMatchObject({ nextPage: 2, totalCount: 101 });
+    expect(await reader.listOpenPullRequestsPage({ ...ctx, repository, page: 1 })).toMatchObject({ nextPage: null, pulls: [{ number: 1 }] });
+    expect(request).toHaveBeenCalledTimes(2); expect(ctx.assertAuthorized).toHaveBeenCalledTimes(2);
+  });
+  it("reads review and lifecycle pages independently and preserves rate limit failures", async () => {
+    const request = vi.fn(async (route: string, params: Record<string, unknown>) => ({ data: route.endsWith("reviews") ? [{ id: 1, user, state: "APPROVED", commit_id: "head", submitted_at: "2020-01-02T00:00:00Z" }] : params.page === 1 ? Array.from({ length: 100 }, () => ({ event: "commented" })) : [{ event: "reopened", created_at: "2020-02-01T00:00:00Z" }] }));
+    const reader = createGitHubPullRequestQueueReader({ request }); const ctx = context();
+    expect(await reader.listReviewsPage({ ...ctx, repository, pullNumber: 1, page: 1 })).toMatchObject({ nextPage: null, reviews: [{ actor: { id: "12" } }] });
+    expect(await reader.listLifecyclePage({ ...ctx, repository, pullNumber: 1, page: 1 })).toEqual({ nextPage: 2, reopenedAt: [] });
+    expect(await reader.listLifecyclePage({ ...ctx, repository, pullNumber: 1, page: 2 })).toEqual({ nextPage: null, reopenedAt: ["2020-02-01T00:00:00Z"] });
+    expect(ctx.assertAuthorized).toHaveBeenCalledTimes(3);
+    const limited = createGitHubPullRequestQueueReader({ request: async () => { throw { status: 429 }; } });
+    await expect(limited.listLifecyclePage({ ...ctx, repository, pullNumber: 1, page: 2 })).rejects.toMatchObject({ reason: "rate_limited" });
+  });
+  it("reads a single missing pull separately from inaccessible scope", async () => {
+    const ctx = context();
+    const missing = createGitHubPullRequestQueueReader({ request: async () => { throw { status: 404 }; } });
+    expect(await missing.readPullRequest({ ...ctx, repository, pullNumber: 1 })).toEqual({ status: "missing" });
+    const denied = createGitHubPullRequestQueueReader({ request: async () => { throw { status: 403 }; } });
+    await expect(denied.readPullRequest({ ...ctx, repository, pullNumber: 1 })).rejects.toMatchObject({ reason: "authority" });
   });
 });

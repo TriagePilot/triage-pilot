@@ -248,7 +248,11 @@ export function createSelfHostedPullRequestQueueApi(input: {
           ...(signal ? { signal } : {}),
         });
         if (response.status === 401) throw new AdminApiError("The administrator session has expired.", 401);
-        if (!response.ok) throw new AdminApiError("Could not load pull requests.", response.status);
+        if (!response.ok) {
+          const body = await response.json().catch(() => null) as { error?: unknown } | null;
+          const messages: Record<string, string> = { workspace_scope_mismatch: "Workspace access is unavailable.", forbidden_origin: "This request is not allowed.", not_found_or_inactive: "The GitHub installation is unavailable.", pull_request_queue_unavailable: "Could not load pull requests." };
+          throw new AdminApiError(typeof body?.error === "string" ? messages[body.error] ?? "Could not load pull requests." : "Could not load pull requests.", response.status);
+        }
         return response.json();
       });
     },

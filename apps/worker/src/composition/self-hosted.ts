@@ -11,6 +11,9 @@ import {
   createDatabase,
   createPlatformOutboxRepository,
   createJobClaimer,
+  requestQueueReconciliation,
+  replayDeferredPullRequestDelivery,
+  recoverDeferredPullRequestDelivery,
   createWorkspaceRepositories,
   ensureLocalWorkspace,
   publishPlatformOutbox,
@@ -39,6 +42,7 @@ import {
   type ReviewerAvailabilityServices,
 } from "../availability-processor.js";
 import { runWorkerOnce } from "../runner.js";
+import { createWorkerPullRequestSync } from "../pull-request-sync.js";
 import {
   createNoopPlatformEventSink,
   createWorkerHumanReviewPolicyServiceFactory,
@@ -118,9 +122,17 @@ export async function createSelfHostedWorkerComposition(
     createAdapter: (requester) => new GitHubAdapter(requester),
     clock,
   });
+  const queueSync = createWorkerPullRequestSync({ db, github: env.github, githubOrganization: env.githubOrganization, createRequester });
   const maintenanceServices = {
+    async scheduleQueueSync(now: Date, reason: "startup" | "scheduled") {
+      const connections = await db.selectFrom("provider_connections").select(["id", "external_connection_id"]).where("workspace_id", "=", workspaceId).where("provider", "=", "github").where("status", "=", "active").execute();
+      for (const connection of connections) {
+        try { await requestQueueReconciliation(db, { workspaceId, providerConnectionId: connection.id, externalInstallationId: connection.external_connection_id }, reason, now); } catch { /* Retried during the next maintenance cycle. */ }
+      }
+    },
     async recoverStaleJobs(now: Date) {
       await localRepositories.recoverStaleJobs(now);
+      await recoverDeferredPullRequestDelivery(db, workspaceId, now);
     },
     async cleanupRevokedProviderConnections(now: Date) {
       await localRepositories.cleanupRevokedProviderConnections(now);
@@ -151,6 +163,19 @@ export async function createSelfHostedWorkerComposition(
         workspaceQueue: (claimedWorkspaceId) => createWorkspaceRepositories(db, claimedWorkspaceId).jobs,
         workerId: env.workerId,
         now,
+        processDeferredDelivery: (lease) => replayDeferredPullRequestDelivery(db, lease),
+        async processQueueSyncJob(job, lease) {
+          const payload = job.payload as Record<string, unknown>;
+          if (!payload || payload.workspaceId !== job.workspaceId || payload.providerConnectionId !== job.providerConnectionId || payload.externalInstallationId !== job.externalInstallationId || typeof job.externalInstallationId !== "string" || job.provider !== "github") throw new Error("invalid queue job provenance");
+          const scope = { workspaceId: job.workspaceId, providerConnectionId: job.providerConnectionId, externalInstallationId: job.externalInstallationId };
+          if (job.kind === "reconcile_queue_connection") {
+            if (typeof payload.runId !== "string") throw new Error("invalid queue run");
+            await queueSync.reconcile(scope, payload.runId, lease);
+          } else {
+            if (typeof payload.repositoryId !== "string" || typeof payload.externalRepositoryId !== "string" || payload.externalRepositoryId !== job.externalRepositoryId || typeof payload.pullNumber !== "number" || !Number.isSafeInteger(payload.pullNumber) || payload.pullNumber <= 0) throw new Error("invalid queue pull");
+            await queueSync.refresh({ ...scope, repositoryId: payload.repositoryId, externalRepositoryId: payload.externalRepositoryId, pullNumber: payload.pullNumber }, lease);
+          }
+        },
         processRoutingJob,
         buildRoutingServices,
         processHumanReviewPolicyJob,

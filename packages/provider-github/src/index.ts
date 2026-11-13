@@ -24,6 +24,7 @@ export {
 } from "./credentials.js";
 export {
   normalizeGitHubWebhook,
+  normalizeQueueInvalidation,
   type GitHubWebhookInput,
   type NormalizedGitHubWebhookEvent,
 } from "./normalization.js";

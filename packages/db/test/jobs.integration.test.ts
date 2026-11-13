@@ -613,10 +613,12 @@ async function createJobTestContext(db: Parameters<Parameters<typeof withPostgre
     status: "active",
     permissions: {},
   }).returning("id").executeTakeFirstOrThrow()).id;
+  await db.insertInto("repositories").values({ workspace_id: workspaceId, provider: "github", provider_connection_id: providerConnectionId, external_repository_id: "101", owner: "acme", name: "api", default_branch: null, config_state: "unknown" }).onConflict(oc => oc.doNothing()).execute();
+  const baseQueue = createWorkspaceJobQueue(db, workspaceId);
   return {
     workspaceId,
     providerConnectionId,
-    queue: createWorkspaceJobQueue(db, workspaceId),
+    queue: { ...baseQueue, enqueue: (input: Parameters<typeof baseQueue.enqueue>[0]) => baseQueue.enqueue({ ...input, externalInstallationId: "99", externalRepositoryId: "101" }) },
     claimer: createJobClaimer(db),
   };
 }

@@ -49,7 +49,7 @@ Provider-specific deployment adapters and private operational material are inten
 
 ## Open pull-request queue
 
-The authenticated web host reads the current installation inventory and open pull requests through the GitHub adapter, joins retained assessment evidence, and serves a read-only snapshot to the shared UI. The application service classifies attention and caches complete content for one minute while revalidating authority and repository inventory on cache hits. This queue does not change webhook handling, routing, or reviewer-selection workload. See [Open pull-request queue](operations/pull-request-queue.md) for scope and limitations.
+The authenticated web host reads an installation-scoped PostgreSQL projection and joins retained assessment evidence; it does not read GitHub on the page request. Existing pull request, review, and installation events trigger verification, and the worker reconciles inventory every 15 minutes to repair missed events. Bootstrap and partial coverage remain explicit until inventory and classifications are verified. Last verification reflects a complete scan; stale or unavailable worker states preserve known rows without asserting completeness. The queue does not change routing or reviewer-selection workload. See [Open pull-request queue](operations/pull-request-queue.md) for scope and limitations.
 
 ## Analytics and backlog
 

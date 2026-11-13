@@ -307,10 +307,21 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
       },
 
       async enqueueReviewPolicy(policy) {
+        const source = await input.db.selectFrom("jobs").select(["external_installation_id", "external_repository_id"])
+          .where("workspace_id", "=", message.workspaceId).where("provider", "=", repository.provider)
+          .where("provider_connection_id", "=", message.providerConnectionId).where("kind", "=", "process_pull_request")
+          .where("idempotency_key", "=", message.routingKey).executeTakeFirst();
+        const current = await knownRepository();
+        if (!source?.external_installation_id || source.external_installation_id !== current.externalConnectionId
+          || source.external_repository_id !== repository.externalId) {
+          throw new ProviderConnectionUnavailableError("Routing job installation provenance is unavailable or stale");
+        }
         await createWorkspaceJobQueue(input.db, message.workspaceId).enqueue({
           provider: repository.provider,
           providerConnectionId: message.providerConnectionId,
           kind: "evaluate_human_review_policy",
+          externalInstallationId: source.external_installation_id,
+          externalRepositoryId: source.external_repository_id,
           payload: policy,
           idempotencyKey: `review-policy:${policy.deliveryId}`,
         });
@@ -1325,6 +1336,8 @@ async function findKnownRepository(
     workspaceId: string;
     providerConnectionId: string;
     changeRequest: { repository: RepositoryRef };
+    externalInstallationId?: string | null;
+    externalRepositoryId?: string | null;
   },
   githubOrganization?: string,
 ): Promise<KnownRepository> {
@@ -1356,7 +1369,7 @@ async function findKnownRepository(
       .whereRef("provider_connection_revocations.external_connection_id", "=", "provider_connections.external_connection_id"))),
     ]))
     .executeTakeFirst();
-  if (!repository || (githubOrganization !== undefined && (
+  if (!repository || (message.externalInstallationId !== undefined && (message.externalInstallationId !== repository.externalConnectionId || message.externalRepositoryId !== message.changeRequest.repository.externalId)) || (githubOrganization !== undefined && (
     message.changeRequest.repository.owner.toLowerCase() !== githubOrganization.toLowerCase()
     || repository.workspaceLogin.toLowerCase() !== githubOrganization.toLowerCase()
     || repository.accountType?.toLowerCase() !== "organization"

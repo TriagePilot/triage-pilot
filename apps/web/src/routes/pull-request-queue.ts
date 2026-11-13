@@ -23,7 +23,7 @@ export function pullRequestQueueRoutes(services: PullRequestQueueServices) {
     const phase = query.get("phase");
     if ([...query.keys()].some(key => key !== "refresh" && key !== "phase") || query.getAll("refresh").length > 1 || query.getAll("phase").length > 1 || (query.has("refresh") && query.get("refresh") !== "true" && query.get("refresh") !== "false") || (phase !== null && phase !== "initial" && phase !== "details")) return c.json({ error: "invalid_query" }, 400);
     const snapshot = await services.readPullRequestQueue({ forceRefresh: query.get("refresh") === "true", ...(phase ? { phase } : {}), signal: c.req.raw.signal });
-    return c.json(snapshot, snapshot.status === "unavailable" ? 503 : 200);
+    return c.json(snapshot, 200);
   });
   return app;
 }

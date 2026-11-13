@@ -68,6 +68,10 @@ export {
 export {
   acceptHumanReviewPolicyDelivery,
   acceptRoutingDelivery,
+  acceptPullRequestDelivery,
+  replayDeferredPullRequestDelivery,
+  recoverDeferredPullRequestDelivery,
+  type PullRequestDeliveryInput,
   type HumanReviewPolicyDeliveryInput,
   type RoutingDeliveryInput,
 } from "./deliveries.js";
@@ -96,6 +100,7 @@ export {
 } from "./operations.js";
 export {
   activateConfiguredProviderConnection,
+  materializeQueueRepository,
   cleanupRevokedProviderConnections,
   replaceProviderConnectionRepositories,
   revokeConfiguredProviderConnection,
@@ -130,3 +135,11 @@ export { readAnalyticsFacts } from "./analytics.js";
 export { normalizeAnalyticsDecision, readOriginalReviewerActors, type AnalyticsDecisionRow } from "./analytics-records.js";
 
 export { resolvePullRequestQueueScope, assertPullRequestQueueScopeActive, readQueueAssessments } from "./pull-request-queue.js";
+export { claimQueueRead, commitQueuePull, completeQueueWork, invalidateQueuePull, invalidateQueuePullTransaction, readQueueProjection, type QueueInstallationKey, type QueueProjectionKey, type QueueReadToken, type QueueSnapshotInput, type QueueProjection } from "./pull-request-projection.js";
+export { startQueueSyncRun, claimQueueSyncCheckpoint, commitQueueSyncCheckpoint, completeQueueSyncChunk, readQueueSyncRun, type QueueSyncRun, type QueueSyncToken, type QueueSyncRepository } from "./queue-sync-runs.js";
+
+export { claimQueuePullChunk, continueQueuePullChunk } from "./pull-request-projection.js";
+
+export { commitQueueSyncPage } from "./queue-sync-runs.js";
+
+export { requestQueueReconciliation } from "./queue-sync-runs.js";

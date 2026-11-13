@@ -203,6 +203,9 @@ async function persistDecisionRecord(
       repository_id: input.repositoryId,
       delivery_id: input.deliveryId,
       routing_key: routingKey,
+      origin_provider_connection_id: sql<string | null>`(select j.provider_connection_id from jobs j where j.workspace_id = ${workspaceId} and j.kind = 'process_pull_request' and j.idempotency_key = ${routingKey} and j.external_installation_id is not null and j.external_repository_id is not null)`,
+      origin_external_installation_id: sql<string | null>`(select j.external_installation_id from jobs j where j.workspace_id = ${workspaceId} and j.kind = 'process_pull_request' and j.idempotency_key = ${routingKey} and j.external_installation_id is not null and j.external_repository_id is not null)`,
+      origin_external_repository_id: sql<string | null>`(select j.external_repository_id from jobs j where j.workspace_id = ${workspaceId} and j.kind = 'process_pull_request' and j.idempotency_key = ${routingKey} and j.external_installation_id is not null and j.external_repository_id is not null)`,
       change_request_id: input.changeRequestId,
       pull_number: input.pullNumber,
       head_sha: input.headSha,
@@ -645,6 +648,9 @@ export async function findSucceededRoutingDecision(db: Kysely<Database>, workspa
     .where("repositories.owner", "=", job.changeRequest.repository.owner)
     .where("repositories.name", "=", job.changeRequest.repository.name)
     .where("provider_connections.id", "=", job.providerConnectionId)
+    .whereRef("routing_decisions.origin_provider_connection_id", "=", "provider_connections.id")
+    .whereRef("routing_decisions.origin_external_installation_id", "=", "provider_connections.external_connection_id")
+    .whereRef("routing_decisions.origin_external_repository_id", "=", "repositories.external_repository_id")
     .where("provider_connections.status", "=", "active")
     .where(eb => eb.not(eb.exists(eb.selectFrom("provider_connection_revocations").select("revoked_connection_id")
       .whereRef("provider_connection_revocations.workspace_id", "=", "provider_connections.workspace_id")

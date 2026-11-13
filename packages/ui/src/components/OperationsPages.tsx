@@ -596,15 +596,12 @@ function DecisionTable({
             decisions.map((d) => (
               <Fragment key={d.id}>
                 <tr>
-                  <th scope="row">
-                    <ProviderLink link={d.repository} />
-                    <span className="cell-detail">
-                      {d.changeRequest ? (
-                        <ProviderLink link={d.changeRequest} />
-                      ) : (
-                        "—"
-                      )}
-                    </span>
+                  <th scope="row" className="decision-change-request">
+                    {d.changeRequest ? (
+                      <ProviderLink link={{ ...d.changeRequest, label: `${d.repository.label}${d.changeRequest.label}` }} />
+                    ) : (
+                      <><ProviderLink link={d.repository} /><span className="cell-detail">—</span></>
+                    )}
                   </th>
                   <td>
                     <Chip value={d.riskBreakdown?.tier ?? "Unknown"} />

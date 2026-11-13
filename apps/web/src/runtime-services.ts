@@ -83,6 +83,11 @@ export function createWebRuntimeServices(input: WebRuntimeServicesInput): WebSer
       return input.github.webhookSecret;
     },
 
+    async acceptPullRequestDelivery(delivery) {
+      const { installation, repository, ...inputDelivery } = delivery;
+      return repositories.acceptPullRequestDelivery({ ...inputDelivery, connection: toProviderConnection(installation), repository: toProviderRepository(repository) });
+    },
+
     async acceptRoutingDelivery(delivery) {
       const { installation, repository, ...inputDelivery } = delivery;
       return await repositories.acceptRoutingDelivery({

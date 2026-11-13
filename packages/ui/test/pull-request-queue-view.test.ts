@@ -34,3 +34,10 @@ it("deduplicates identity and excludes historical reviewers and team-only target
   expect(buildPullRequestQueueView(snapshot, { ...filters, personId: "team" }).filteredCount).toBe(0);
   expect(buildPullRequestQueueView(snapshot, filters).persons.map((person) => person.id)).toEqual(["1"]);
 });
+it("excludes draft and bot-authored pulls from people and counts", () => {
+  const draft = item(2, { pullRequest: queuePull({ number: 2, isDraft: true, author: { id: "draft", login: "draft", type: "human" } }) });
+  const bot = item(3, { pullRequest: queuePull({ number: 3, author: { id: "bot", login: "bot", type: "bot" }, requestedUsers: [{ id: "reviewer", login: "reviewer", type: "human" }] }) });
+  const view = buildPullRequestQueueView(queueSnapshot({ items: [item(1), draft, bot] }), filters);
+  expect(view.filteredCount).toBe(1);
+  expect(view.persons.map(person => person.id)).toEqual(["1"]);
+});

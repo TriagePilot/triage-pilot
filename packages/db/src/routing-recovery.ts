@@ -180,7 +180,7 @@ export async function enqueueRoutingRecovery(
         .onRef("provider_connections.id", "=", "repositories.provider_connection_id")
         .onRef("provider_connections.workspace_id", "=", "repositories.workspace_id")
         .onRef("provider_connections.provider", "=", "repositories.provider"))
-      .select("repositories.id")
+      .select(["repositories.id", "provider_connections.external_connection_id"])
       .where("repositories.workspace_id", "=", workspaceId)
       .where("repositories.provider", "=", input.provider)
       .where("repositories.provider_connection_id", "=", input.providerConnectionId)
@@ -195,6 +195,8 @@ export async function enqueueRoutingRecovery(
       workspace_id: workspaceId,
       provider: input.provider,
       provider_connection_id: input.providerConnectionId,
+      external_installation_id: repository.external_connection_id,
+      external_repository_id: input.payload.changeRequest.repository.externalId,
       kind: "process_pull_request",
       payload: input.payload,
       idempotency_key: input.idempotencyKey,

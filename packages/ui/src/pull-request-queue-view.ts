@@ -21,9 +21,9 @@ function tie(a: QueueItem, b: QueueItem): number {
 }
 export function buildPullRequestQueueView(snapshot: PullRequestQueueSnapshot, filters: PullRequestQueueFilters): { groups: Array<{ group: QueueGroup; items: QueueItem[] }>; persons: QueueActor[]; filteredCount: number } {
   const persons = new Map<string, QueueActor>();
-  for (const { pullRequest: pull } of snapshot.items) for (const person of [pull.author, ...pull.requestedUsers]) if (person.type === "human") persons.set(person.id, person);
+  for (const { pullRequest: pull } of snapshot.items.filter(({ pullRequest }) => !pullRequest.isDraft && pullRequest.author.type !== "bot")) for (const person of [pull.author, ...pull.requestedUsers]) if (person.type === "human") persons.set(person.id, person);
   const unique = new Map<string, QueueItem>();
-  for (const item of snapshot.items) unique.set(queuePullRequestKey(item.pullRequest.repository, item.pullRequest.number), item);
+  for (const item of snapshot.items.filter(({ pullRequest }) => !pullRequest.isDraft && pullRequest.author.type !== "bot")) unique.set(queuePullRequestKey(item.pullRequest.repository, item.pullRequest.number), item);
   const query = filters.query.trim().toLocaleLowerCase();
   const items = [...unique.values()].filter(({ pullRequest: pull, attention }) => (!filters.personId || matchedQueueRoles(pull, filters.personId).length > 0) && (!filters.repositoryIds.length || filters.repositoryIds.includes(pull.repository.externalId)) && (!filters.group || filters.group === attention.group) && (!query || `${pull.title} ${pull.number} ${pull.repository.owner}/${pull.repository.name}`.toLocaleLowerCase().includes(query)));
   const risk = { high: 3, medium: 2, low: 1 };

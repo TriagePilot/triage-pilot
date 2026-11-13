@@ -14,9 +14,9 @@ async function seed(db: Db, key: string) {
   return { workspaceId: workspace.id, connectionId: connection.id, repo };
 }
 async function decision(db: Db, workspaceId: string, repositoryId: string, key: string, date: string, status: "succeeded" | "failed", number = 7) {
-  const repository = await db.selectFrom("repositories").select("provider_connection_id").where("id", "=", repositoryId).executeTakeFirstOrThrow();
+  const repository = await db.selectFrom("repositories").innerJoin("provider_connections", "provider_connections.id", "repositories.provider_connection_id").select(["repositories.provider_connection_id", "repositories.external_repository_id", "provider_connections.external_connection_id"]).where("repositories.id", "=", repositoryId).executeTakeFirstOrThrow();
   await db.insertInto("jobs").values({ workspace_id: workspaceId, provider: "github", provider_connection_id: repository.provider_connection_id, kind: "process_pull_request", payload: {}, idempotency_key: key, created_at: new Date(date) }).execute();
-  await db.insertInto("routing_decisions").values({ workspace_id: workspaceId, repository_id: repositoryId, delivery_id: key, routing_key: key, action: "request_human_review", risk_score: 1, selected_reviewer: "alice", selected_reviewers: JSON.stringify(["alice"]), no_human_reason: null, pull_number: number, change_request_id: String(number), head_sha: key, mode: "shadow", action_status: status, action_error: status === "failed" ? "secret error" : null, details: { risk: { tier: "medium" }, routing: { requestedReviewerCount: 1, selectedReviewers: ["alice"] } }, effective_config_hash: key, inheritance_mode: "legacy", created_at: new Date(date) }).execute();
+  await db.insertInto("routing_decisions").values({ workspace_id: workspaceId, repository_id: repositoryId, origin_provider_connection_id: repository.provider_connection_id, origin_external_installation_id: repository.external_connection_id, origin_external_repository_id: repository.external_repository_id, delivery_id: key, routing_key: key, action: "request_human_review", risk_score: 1, selected_reviewer: "alice", selected_reviewers: JSON.stringify(["alice"]), no_human_reason: null, pull_number: number, change_request_id: String(number), head_sha: key, mode: "shadow", action_status: status, action_error: status === "failed" ? "secret error" : null, details: { risk: { tier: "medium" }, routing: { requestedReviewerCount: 1, selectedReviewers: ["alice"] } }, effective_config_hash: key, inheritance_mode: "legacy", created_at: new Date(date) }).execute();
 }
 const ref = (externalId: string) => ({ provider: "github" as const, externalId, owner: "acme", name: externalId });
 const counts = async (db: Db) => Promise.all(["repositories", "routing_decisions", "jobs"].map(async table => (await db.selectFrom(table as "repositories").select(db.fn.countAll().as("count")).executeTakeFirstOrThrow()).count));
@@ -90,6 +90,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("pull request queue scope
     await decision(db, local.workspaceId, api.id, "proved", "2026-01-01", "succeeded");
     await decision(db, local.workspaceId, api.id, "unproved", "2026-01-02", "failed");
     await db.deleteFrom("jobs").where("idempotency_key", "=", "unproved").execute();
+    await db.updateTable("routing_decisions").set({ origin_provider_connection_id: null, origin_external_installation_id: null, origin_external_repository_id: null }).where("routing_key", "=", "unproved").execute();
     const scope = await resolvePullRequestQueueScope(db, local.workspaceId, { githubOrganization: "acme" });
     expect(await readQueueAssessments(db, scope, [queuePull({ repository: ref("api"), number: 7 })])).toEqual(new Map());
   }));
