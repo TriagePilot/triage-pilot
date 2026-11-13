@@ -73,7 +73,7 @@ describe("mounted admin application", () => {
     const pullRequestLink = container.querySelector<HTMLAnchorElement>(
       'a[href="https://github.com/acme/api/pull/7"]',
     );
-    expect(pullRequestLink?.textContent).toBe("#7");
+    expect(pullRequestLink?.textContent).toBe("acme/api#7");
     expect(pullRequestLink?.target).toBe("_blank");
     await act(async () => buttonNamed(container, "View details")!.click());
     const rerunButton = buttonNamed(container, "Re-run routing");

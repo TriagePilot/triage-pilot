@@ -266,6 +266,39 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("platform outbox", () => 
     });
   });
 
+  it.each(["missing", "type", "branch", "rule", "unexpected"] as const)(
+    "rolls back mismatched branch-exclusion event metadata: %s",
+    async mismatch => {
+      await withPostgresTestDatabase(async db => {
+        const workspaceId = await ensureLocalWorkspace(db);
+        const repositoryId = await seedRepository(db, workspaceId, "101");
+        const branchExclusion = { type: "target_branch" as const, branch: "main", matchingRule: "main" };
+        const eventExclusion = mismatch === "missing" ? undefined : {
+          ...branchExclusion,
+          ...(mismatch === "type" ? { type: "source_branch" as const } : {}),
+          ...(mismatch === "branch" ? { branch: "release" } : {}),
+          ...(mismatch === "rule" ? { matchingRule: "release" } : {}),
+        };
+        await expect(persistDecisionWithEvent(db, workspaceId, {
+          decision: {
+            ...decisionInput(repositoryId, "delivery-1"),
+            riskScore: 0,
+            selectedReviewers: [],
+            details: mismatch === "unexpected" ? {} : { risk: null, branchExclusion },
+          },
+          event: ({ decisionId, occurredAt }) => ({
+            ...decisionEvent({ workspaceId, decisionId, repositoryId: "101", occurredAt: occurredAt.toISOString() }),
+            riskScore: 0,
+            selectedActors: [],
+            ...(eventExclusion === undefined ? {} : { branchExclusion: eventExclusion }),
+          }),
+        })).rejects.toThrow("routing decision event does not match persisted decision");
+        expect(await db.selectFrom("routing_decisions").select("id").execute()).toEqual([]);
+        expect(await db.selectFrom("decision_outbox").select("id").execute()).toEqual([]);
+      });
+    },
+  );
+
   it("validates a terminal retry event against the preserved persisted decision identity", async () => {
     await withPostgresTestDatabase(async (db) => {
       const workspaceId = await ensureLocalWorkspace(db);

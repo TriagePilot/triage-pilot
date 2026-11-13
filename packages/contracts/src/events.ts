@@ -62,6 +62,13 @@ export interface ReviewerAbsenceActivationJobPayload {
   absenceRevision: number;
 }
 
+/** A trusted routing exclusion; risk was not evaluated. */
+export interface BranchExclusion {
+  type: "target_branch" | "source_branch";
+  branch: string;
+  matchingRule: string;
+}
+
 export interface DecisionEventV1 {
   schemaVersion: 1;
   eventType: "routing_decision";
@@ -75,7 +82,9 @@ export interface DecisionEventV1 {
   routingKey: string;
   mode: RepositoryMode;
   action: RoutingAction;
+  /** Compatibility score of 0 when branchExclusion is present; risk was not evaluated. */
   riskScore: number;
+  branchExclusion?: BranchExclusion;
   selectedActors: ExternalActorId[];
   effectiveConfigurationHash: string;
 }

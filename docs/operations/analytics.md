@@ -48,3 +48,5 @@ History accepts `periodDays=7|30|90` (default 30), `mode=auto|shadow|enforce` (d
 History returns `query`, resolved `mode`, `start`, `end`, repository options, `counts`, `shortages`, `noHumanSharePercent`, `savings`, `assignments`, and `coverage`. Workload returns `status`, `observedAt`, `trackedSince`, `scope`, repository coverage IDs, `averageReviewMinutes`, `totalPending`, `totalEstimatedHours`, and reviewer `rows`. Unknown workload totals are null. Invalid queries return 400; inactive or inaccessible scope returns 404; other acquisition failures may return 503.
 
 See [repository configuration](../github-app/repository-configuration.md), [reviewer availability](reviewer-availability.md), and [retention](retention.md).
+
+Branch-excluded PRs are recorded as policy approvals with risk unevaluated. They count as unassessed and are excluded from scored-risk and review-savings calculations in both enforce and shadow views; the numeric storage placeholder is not a low-risk assessment.

@@ -10,7 +10,8 @@ import type {
 
 const PAGE_SIZE = 100;
 const HUMAN_REVIEW_POLICY_CHECK_NAME = "triagepilot/human-review-policy";
-const RISK_LABELS: Record<RiskTier, { name: string; color: string; description: string }> = {
+const RISK_LABELS: Record<RiskTier | "ignored", { name: string; color: string; description: string }> = {
+  ignored: { name: "triagepilot:ignored", color: "ededed", description: "TriagePilot review bypassed by branch exclusion." },
   low: { name: "triagepilot:risk-low", color: "0e8a16", description: "TriagePilot risk: low" },
   medium: { name: "triagepilot:risk-medium", color: "fbca04", description: "TriagePilot risk: medium" },
   high: { name: "triagepilot:risk-high", color: "b60205", description: "TriagePilot risk: high" },
@@ -310,7 +311,7 @@ export class GitHubAdapter {
     });
   }
 
-  async syncRiskLabel(input: { pullRequest: PullRequestRef; tier: RiskTier }) {
+  async syncRiskLabel(input: { pullRequest: PullRequestRef; tier: RiskTier | "ignored" }) {
     const target = RISK_LABELS[input.tier];
     try {
       await this.octokit.request("POST /repos/{owner}/{repo}/labels", {

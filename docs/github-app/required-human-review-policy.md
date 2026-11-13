@@ -24,7 +24,7 @@ Reviewer availability is centrally administered. It may change future selected c
 
 ## Check lifecycle
 
-- A no-human route completes the check successfully.
+- A no-human route completes the check successfully. A branch exclusion is a no-human route: it approves the validated head without risk scoring or reviewer selection and records zero required human approvals.
 - Existing active approvals by individual users count toward the required approval total, including approvals that predate TriagePilot or the current head. Bot reviews do not count.
 - TriagePilot requests reviewers to guide human attention, but any individual reviewers can satisfy the required approval count.
 - A human-review route immediately evaluates GitHub's active review state, then re-evaluates after each later review event. A later request for changes or dismissal from an approving reviewer removes that approval from the total.
@@ -36,3 +36,7 @@ Reviewer availability is centrally administered. It may change future selected c
 In enforce mode, replacing an outstanding reviewer request uses **Pull requests: Read and write**. Re-evaluating or failing this policy check uses **Commit statuses: Read and write** (`statuses:write`). Shadow-mode replacement simulations call neither write path. Approve both permissions on an existing App installation before relying on availability replacement under a required ruleset.
 
 The policy check is distinct from the informational `triagepilot/routing` check and from TriagePilot's routing action outcome. The dashboard exposes its state and the selected reviewers without exposing raw review bodies or credentials.
+
+Branch exclusions (`exclude_target_branches` exact names and `exclude_source_branch_patterns` globs) use `triagepilot:ignored`, created in neutral gray with the description “TriagePilot review bypassed by branch exclusion.” This replaces any TriagePilot risk label; a subsequent scored route removes the ignored label. The informational routing check explains the exclusion, and this path adds no routing comment. Shadow mode records the decision without approvals, checks, comments, or label writes. Drafts are still skipped by default, and invalid configuration or a stale head cannot trigger an exclusion approval. Branch names and the trusted base revision are revalidated before exclusion writes; a changed context is rerouted using the current base configuration. A later base-branch edit also triggers routing, including when both branches point at the same commit.
+
+After upgrading, existing enforce-mode exclusions automatically approve matching PRs. Previously skipped PRs require routing recovery or a later routing event; upgrades do not bulk replay them.

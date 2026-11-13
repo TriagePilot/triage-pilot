@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useRef, useState, type FormEvent } from "react";
+import { describeBranchExclusion, IGNORED_RISK_DESCRIPTION } from "../decision-presentation.js";
 import type {
   DecisionOverview,
   OperationsOverview,
@@ -604,8 +605,14 @@ function DecisionTable({
                     )}
                   </th>
                   <td>
-                    <Chip value={d.riskBreakdown?.tier ?? "Unknown"} />
-                    <span className="cell-detail">Score {d.riskScore}</span>
+                    {d.branchExclusion ? (
+                      <span>{IGNORED_RISK_DESCRIPTION}</span>
+                    ) : (
+                      <>
+                        <Chip value={d.riskBreakdown?.tier ?? "Unknown"} />
+                        <span className="cell-detail">Score {d.riskScore ?? "—"}</span>
+                      </>
+                    )}
                   </td>
                   <td>
                     <Chip value={d.mode} />
@@ -686,6 +693,9 @@ function DecisionTable({
                             </dd>
                           </div>
                         </dl>
+                        {d.branchExclusion ? (
+                          <p>Branch exclusion: {describeBranchExclusion(d.branchExclusion)} Risk not evaluated.</p>
+                        ) : null}
                         <h3>Score breakdown</h3>
                         {d.riskBreakdown ? (
                           <>

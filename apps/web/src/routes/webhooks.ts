@@ -120,7 +120,7 @@ export function githubWebhookRoutes(services: WebhookServices) {
       let policyPayload: Omit<HumanReviewPolicyJobPayload, "workspaceId" | "providerConnectionId"> | undefined;
       if (normalized?.eventName === "change_request") {
         routingPayload = { kind: "process_change_request", deliveryId, eventName: `${normalized.eventName}.${normalized.eventAction}`, changeRequest: normalized.changeRequest, isDraft: normalized.isDraft,
-          routingKey: buildRoutingKey({ workspaceId: services.workspaceId, provider: normalized.provider, repositoryId: normalized.changeRequest.repository.externalId, changeRequestId: normalized.changeRequest.externalId, trustedConfigRevision: normalized.changeRequest.baseRevision, headRevision: normalized.changeRequest.headRevision, isDraft: normalized.isDraft }) };
+          routingKey: buildRoutingKey({ workspaceId: services.workspaceId, provider: normalized.provider, repositoryId: normalized.changeRequest.repository.externalId, changeRequestId: normalized.changeRequest.externalId, trustedConfigRevision: normalized.changeRequest.baseRevision, headRevision: normalized.changeRequest.headRevision, isDraft: normalized.isDraft }) + (normalized.eventAction === "edited" ? `:retarget:${deliveryId}` : "") };
       } else if (normalized?.eventName === "change_request_review") {
         policyPayload = { kind: "evaluate_human_review_policy", deliveryId, changeRequest: { repository: normalized.changeRequest.repository, externalId: normalized.changeRequest.externalId, number: normalized.changeRequest.number } };
       }
@@ -129,6 +129,7 @@ export function githubWebhookRoutes(services: WebhookServices) {
         repository: { githubRepositoryId: invalidation.repository.externalId, owner: invalidation.repository.owner, name: invalidation.repository.name }, invalidation, ...(routingPayload ? { routingPayload } : {}), ...(policyPayload ? { policyPayload } : {}) });
       if (accepted.deferred) return c.json({ ok: true, deferred: true as const }, 202);
       return accepted.inserted ? c.json({ ok: true }, 202) : c.json({ ok: true, duplicate: true as const }, 202);
+
     }
 
     if (eventName === "installation") {

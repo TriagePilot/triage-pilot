@@ -15,6 +15,7 @@ import {
 
 import type { Database } from "./kysely.js";
 import { stagePlatformEvent } from "./outbox.js";
+import { readBranchExclusion } from "./decision-details.js";
 
 export interface DecisionInput {
   repositoryId: string;
@@ -120,6 +121,7 @@ export async function persistDecisionWithEvent(
         "routing_decisions.mode",
         "routing_decisions.action",
         "routing_decisions.risk_score",
+        "routing_decisions.details",
         "routing_decisions.selected_reviewers",
         "routing_decisions.effective_config_hash",
         "routing_decisions.created_at",
@@ -286,6 +288,7 @@ interface EffectiveDecisionEventSource {
   mode: RepositoryMode;
   action: string;
   risk_score: number;
+  details: unknown;
   selected_reviewers: unknown;
   effective_config_hash: string;
   created_at: Date;
@@ -311,6 +314,7 @@ function assertDecisionEventMatches(
     || event.mode !== decision.mode
     || event.action !== decision.action
     || event.riskScore !== decision.risk_score
+    || !isDeepStrictEqual(event.branchExclusion, readBranchExclusion(decision.details))
     || selectedActors === null
     || !isDeepStrictEqual(event.selectedActors, selectedActors)
     || event.effectiveConfigurationHash !== decision.effective_config_hash

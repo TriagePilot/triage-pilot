@@ -935,3 +935,14 @@ describe("GitHubAdapter", () => {
     });
   });
 });
+
+it.each(["ignored", "high"] as const)("synchronizes %s and removes only stale managed labels", async tier => {
+  const labels = [{ name: "triagepilot:risk-low" }, { name: "triagepilot:risk-high" }, { name: "triagepilot:ignored" }, { name: "team:release" }];
+  const request = vi.fn(async (route: string, _parameters: Record<string, unknown>) => ({ data: route.startsWith("GET ") ? labels : {} }));
+  const adapter = new GitHubAdapter({ request });
+  await adapter.syncRiskLabel({ pullRequest: { owner: "acme", repo: "app", pullNumber: 7 }, tier });
+  const deleted = request.mock.calls.filter(([route]) => route.startsWith("DELETE "));
+  expect(deleted.map(call => call[1].name)).toEqual(tier === "ignored" ? ["triagepilot:risk-low", "triagepilot:risk-high"] : ["triagepilot:risk-low", "triagepilot:ignored"]);
+  expect(request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/labels", expect.objectContaining({ labels: [tier === "ignored" ? "triagepilot:ignored" : "triagepilot:risk-high"] }));
+  if (tier === "ignored") expect(request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/labels", expect.objectContaining({ name: "triagepilot:ignored", color: "ededed", description: "TriagePilot review bypassed by branch exclusion." }));
+});

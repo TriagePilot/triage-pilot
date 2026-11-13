@@ -1,6 +1,7 @@
 import type { EffectiveConfigurationProvenance, EffectiveConfigurationResult } from "@triagepilot/config";
 import {
   type ActionStatus,
+  type BranchExclusion,
   type ChangeRequestId,
   type Clock,
   type DecisionEventV1,
@@ -25,6 +26,7 @@ import {
   type ChangedFileMetadata,
   type ReviewerAbsenceWindow,
   type RiskScoringResult,
+  type RoutingDecision,
 } from "@triagepilot/core";
 
 export interface DecisionInput {
@@ -64,6 +66,29 @@ export interface PersistedDecisionEventContext extends PersistedDecision {
 
 export type DecisionEventFactory = (persisted: PersistedDecisionEventContext) => DecisionEventV1;
 
+type BranchExclusionAssessment = {
+  risk: null;
+  branchExclusion: BranchExclusion;
+  expectedBranches: { source: string; target: string };
+  expectedBaseRevision: string;
+};
+
+export type RoutingActionInput = {
+  workspaceId: WorkspaceId;
+  providerConnectionId: ProviderConnectionId;
+  repository: RepositoryRef;
+  changeRequestId: ChangeRequestId;
+  changeRequestNumber: number;
+  expectedHeadRevision: string;
+  decisionId: string;
+  selectedActors: ExternalActorId[];
+  actorsToRequest: ExternalActorId[];
+  noHumanReason?: string;
+} & (
+  | { action: RoutingAction; risk: RiskScoringResult; branchExclusion?: never }
+  | ({ action: "policy_approval" } & BranchExclusionAssessment)
+);
+
 export interface RoutingApplicationPorts {
   resolveConfiguration(job: RoutingJobPayload): Promise<EffectiveConfigurationResult>;
   provider: {
@@ -76,20 +101,7 @@ export interface RoutingApplicationPorts {
     fetchChangedFiles(job: RoutingJobPayload): Promise<ChangedFileMetadata[]>;
     fetchCommitMessages(job: RoutingJobPayload): Promise<string[]>;
     fetchCurrentRevisionApprovals(job: RoutingJobPayload): Promise<ExternalActorId[]>;
-    applyActions(input: {
-      workspaceId: WorkspaceId;
-      providerConnectionId: ProviderConnectionId;
-      repository: RepositoryRef;
-      changeRequestId: ChangeRequestId;
-      changeRequestNumber: number;
-      expectedHeadRevision: string;
-      decisionId: string;
-      action: RoutingAction;
-      risk: RiskScoringResult;
-      selectedActors: ExternalActorId[];
-      actorsToRequest: ExternalActorId[];
-      noHumanReason?: string;
-    }): Promise<void>;
+    applyActions(input: RoutingActionInput): Promise<void>;
   };
   resolveTrackedPullRequest?(job: RoutingJobPayload): Promise<TrackedPullRequest>;
   reviewerBacklog?(input: ReviewerLoadRequest): Promise<ReviewerLoadObservation>;
@@ -113,7 +125,7 @@ export interface RoutingApplicationPorts {
 }
 
 export type RoutingOutcome =
-  | { status: "skipped"; reason: "draft" | "target_branch" | "source_branch" | "stale_revision" }
+  | { status: "skipped"; reason: "draft" | "stale_revision" }
   | { status: "configuration_failure"; decisionId: string }
   | { status: "decided"; decisionId: string; mode: RepositoryMode; actionStatus: ActionStatus };
 
@@ -158,11 +170,44 @@ export async function processChangeRequest(
   if (metadata.currentHeadRevision !== job.changeRequest.headRevision) {
     return { status: "skipped", reason: "stale_revision" };
   }
+  let branchExclusion: BranchExclusion | undefined;
   if (config.routing.excludeTargetBranches.includes(metadata.targetBranch)) {
-    return { status: "skipped", reason: "target_branch" };
+    branchExclusion = { type: "target_branch", branch: metadata.targetBranch, matchingRule: metadata.targetBranch };
+  } else {
+    const sourceRule = config.routing.excludeSourceBranchPatterns.find(pattern => isBranchExcluded(metadata.sourceBranch, [pattern]));
+    if (sourceRule !== undefined) {
+      branchExclusion = { type: "source_branch", branch: metadata.sourceBranch, matchingRule: sourceRule };
+    }
   }
-  if (isBranchExcluded(metadata.sourceBranch, config.routing.excludeSourceBranchPatterns)) {
-    return { status: "skipped", reason: "source_branch" };
+  if (branchExclusion) {
+    const noHumanReason = `Branch exclusion: ${branchExclusion.type === "target_branch" ? "target" : "source"} branch "${branchExclusion.branch}" matches "${branchExclusion.matchingRule}". Risk not evaluated.`;
+    const routing: RoutingDecision = {
+      action: "policy_approval",
+      candidates: [],
+      requestedReviewerCount: 0,
+      selectedReviewers: [],
+      reviewersToRequest: [],
+      reviewerShortfall: 0,
+      noHumanReason,
+      loadSnapshot: {},
+    };
+    return persistAndApply(job, ports, {
+      ...decisionIdentity(job),
+      mode: config.mode,
+      action: routing.action,
+      actionStatus: config.mode === "enforce" ? "pending" : "not_applied",
+      // Numeric storage/event compatibility only; this route has no risk assessment.
+      riskScore: 0,
+      selectedActors: [],
+      noHumanReason,
+      details: { changeRequestNumber: job.changeRequest.number, risk: null, branchExclusion, routing },
+      ...persistenceProvenance(provenance, []),
+    }, routing, {
+      risk: null,
+      branchExclusion,
+      expectedBranches: { source: metadata.sourceBranch, target: metadata.targetBranch },
+      expectedBaseRevision: provenance.repositoryRevision ?? job.changeRequest.baseRevision,
+    });
   }
 
   const [changedFiles, commitMessages] = await Promise.all([
@@ -261,25 +306,37 @@ export async function processChangeRequest(
   if (routing.selectedReviewers.length > 0) decision.selectedActors = routing.selectedReviewers;
   if (routing.noHumanReason !== undefined) decision.noHumanReason = routing.noHumanReason;
 
+  return persistAndApply(job, ports, decision, routing, { risk });
+}
+
+async function persistAndApply(
+  job: RoutingJobPayload,
+  ports: RoutingApplicationPorts,
+  decision: DecisionInput,
+  routing: RoutingDecision,
+  assessment: { risk: RiskScoringResult; branchExclusion?: never } | BranchExclusionAssessment,
+): Promise<RoutingOutcome> {
+  const { mode } = decision;
   const persisted = await ports.decisions.persistWithEvent(
     decision,
     ({ decisionId, occurredAt }) => decisionEvent({
       job,
       decisionId,
-      mode: config.mode,
+      mode,
       action: routing.action,
-      riskScore: risk.score,
+      riskScore: decision.riskScore,
       selectedActors: routing.selectedReviewers,
-      effectiveConfigurationHash: provenance.effectiveHash ?? "invalid",
+      effectiveConfigurationHash: decision.effectiveConfigHash ?? "invalid",
+      ...(assessment.branchExclusion ? { branchExclusion: assessment.branchExclusion } : {}),
       occurredAt,
     }),
   );
   if (persisted.actionStatus === "succeeded") {
-    return { status: "decided", decisionId: persisted.decisionId, mode: config.mode, actionStatus: "succeeded" };
+    return { status: "decided", decisionId: persisted.decisionId, mode, actionStatus: "succeeded" };
   }
 
   let actionStatus: ActionStatus = persisted.actionStatus;
-  if (config.mode === "enforce") {
+  if (mode === "enforce") {
     try {
       await ports.provider.applyActions({
         workspaceId: job.workspaceId,
@@ -289,8 +346,9 @@ export async function processChangeRequest(
         changeRequestNumber: job.changeRequest.number,
         expectedHeadRevision: job.changeRequest.headRevision,
         decisionId: persisted.decisionId,
-        action: routing.action,
-        risk,
+        ...(assessment.risk === null
+          ? { action: "policy_approval" as const, ...assessment }
+          : { action: routing.action, risk: assessment.risk }),
         selectedActors: routing.selectedReviewers,
         actorsToRequest: routing.reviewersToRequest,
         ...(routing.noHumanReason === undefined ? {} : { noHumanReason: routing.noHumanReason }),
@@ -322,7 +380,7 @@ export async function processChangeRequest(
     }
   }
 
-  return { status: "decided", decisionId: persisted.decisionId, mode: config.mode, actionStatus };
+  return { status: "decided", decisionId: persisted.decisionId, mode, actionStatus };
 }
 
 function decisionIdentity(job: RoutingJobPayload): Pick<
@@ -376,6 +434,7 @@ function decisionEvent(input: {
   mode: RepositoryMode;
   action: RoutingAction;
   riskScore: number;
+  branchExclusion?: BranchExclusion;
   selectedActors: ExternalActorId[];
   effectiveConfigurationHash: string;
   occurredAt: Date;
@@ -394,6 +453,7 @@ function decisionEvent(input: {
     mode: input.mode,
     action: input.action,
     riskScore: input.riskScore,
+    ...(input.branchExclusion ? { branchExclusion: input.branchExclusion } : {}),
     selectedActors: input.selectedActors,
     effectiveConfigurationHash: input.effectiveConfigurationHash,
   };

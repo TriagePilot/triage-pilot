@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { withPostgresTestDatabase } from "../../../packages/db/test/postgres";
-import { createJobClaimer, createWorkspaceReviewerAvailability, ensureLocalWorkspace } from "@triagepilot/db";
+import { createJobClaimer, createWorkspaceReviewerAvailability, ensureLocalWorkspace, readOperationsOverview } from "@triagepilot/db";
 import {
   createWorkerHumanReviewPolicyServiceFactory,
   createWorkerRoutingServiceFactory,
 } from "../src/runtime-services";
+import { resolveAnalyticsScope } from "../../../packages/db/src/reviewer-backlog";
+import { readAnalyticsFacts } from "../../../packages/db/src/analytics";
 import { processRoutingJob, type RoutingJobMessage } from "../src/processor";
 
 const message: RoutingJobMessage = {
@@ -409,7 +411,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
 
 const policyCheckRequester = async (route: string, parameters: Record<string, unknown>) => {
   if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
-    return { data: { state: "open", head: { sha: "abc123" } } };
+    return { data: { state: "open", draft: false, base: { sha: "base-123", ref: "main" }, head: { sha: "abc123", ref: "feature" } } };
   }
   if (route === "POST /repos/{owner}/{repo}/check-runs" && parameters.name === "triagepilot/human-review-policy") {
     return { data: { id: 71 } };
@@ -425,3 +427,235 @@ const policyCheckRequester = async (route: string, parameters: Record<string, un
   if (route.startsWith("POST ")) return { data: {} };
   throw new Error(`unexpected GitHub route: ${route}`);
 };
+
+it.runIf(Boolean(process.env.TEST_DATABASE_URL)).each([
+  { mode: "enforce", target: true },
+  { mode: "enforce", target: false },
+  { mode: "shadow", target: true },
+  { mode: "shadow", target: false },
+] as const)("persists $mode branch exclusions atomically with unscored operations/analytics (target: $target)", async ({ mode, target }) => {
+  await withPostgresTestDatabase(async db => {
+    const workspaceId = await ensureLocalWorkspace(db);
+    const connection = await db.insertInto("provider_connections").values({ workspace_id: workspaceId, provider: "github", external_connection_id: "99", workspace_login: "acme", account_type: "Organization", status: "active", permissions: {} }).returning("id").executeTakeFirstOrThrow();
+    await db.insertInto("repositories").values({ workspace_id: workspaceId, provider: "github", provider_connection_id: connection.id, external_repository_id: "101", owner: "acme", name: "api", default_branch: "main", config_state: "unknown" }).execute();
+    const scopedMessage = { ...message, workspaceId, providerConnectionId: connection.id };
+    const request = vi.fn(async (route: string, params: Record<string, unknown>) => {
+      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") return { data: { state: "open", draft: false, head: { sha: "abc123", ref: "dependabot/npm" }, base: { sha: "base-123", ref: "main" }, user: { login: "author" } } };
+      if (route === "GET /repos/{owner}/{repo}/commits/{ref}/check-runs") return { data: { check_runs: [] } };
+      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews" || route === "GET /repos/{owner}/{repo}/issues/{issue_number}/labels") return { data: [] };
+      if (route === "POST /repos/{owner}/{repo}/check-runs") return { data: { id: params.name === "triagepilot/human-review-policy" ? 71 : 72 } };
+      if (route.startsWith("POST ")) return { data: {} };
+      throw new Error(`Excluded PR must not read ${route}`);
+    });
+    const services = createWorkerRoutingServiceFactory({ db, github: { appId: "123", privateKey: "test-key" }, createRequester: async () => ({ request }), createConfigurationSource: () => ({
+      async loadOrganization() { return null; },
+      async loadRepository(input) {
+        expect(input.trustedRevision).toBe("base-123");
+        return { content: `mode: ${mode}\nrouting:\n  exclude_target_branches: [${target ? "main" : "other"}]\n  exclude_source_branch_patterns: [dependabot/**]\n`, path: ".triagepilot.yml", revision: "base-123" };
+      },
+    }) })(scopedMessage);
+    services.reviewerBacklog = vi.fn(async () => { throw new Error("Excluded PR must not read workloads"); });
+    services.availability.findActive = vi.fn(async () => { throw new Error("Excluded PR must not read availability"); });
+    await processRoutingJob(scopedMessage, services);
+    await processRoutingJob(scopedMessage, services);
+    const rows = await db.selectFrom("routing_decisions").selectAll().execute();
+    expect(rows).toHaveLength(1);
+    const decision = rows[0]!;
+    const branchExclusion = target ? { type: "target_branch", branch: "main", matchingRule: "main" } : { type: "source_branch", branch: "dependabot/npm", matchingRule: "dependabot/**" };
+    expect(decision).toMatchObject({ mode, action: "policy_approval", risk_score: 0, selected_reviewers: [], action_status: mode === "enforce" ? "succeeded" : "not_applied", policy_check_state: mode === "enforce" ? "success" : "not_started", repository_config_revision: "base-123", details: { risk: null, branchExclusion, routing: { requestedReviewerCount: 0, selectedReviewers: [] } } });
+    const events = await db.selectFrom("decision_outbox").selectAll().execute();
+    expect(events).toHaveLength(1);
+    expect(events[0]?.payload).toMatchObject({ decisionId: decision.id, action: "policy_approval", riskScore: 0, selectedActors: [], branchExclusion, effectiveConfigurationHash: decision.effective_config_hash });
+    const overview = await readOperationsOverview(db, workspaceId, { githubOrganization: "acme", githubAppId: "123", now: new Date(), heartbeatStaleAfterMs: 30_000 });
+    expect(overview.decisions[0]).toMatchObject({ riskScore: null, riskBreakdown: null, branchExclusion, requestedReviewerCount: 0 });
+    const scope = await resolveAnalyticsScope(db, workspaceId, { githubOrganization: "acme", repositoryIds: [] });
+    const facts = await readAnalyticsFacts(db, scope, { start: new Date(decision.created_at.getTime() - 1), end: new Date(Date.now() + 1000) });
+    expect(facts.latestDecisions).toHaveLength(1);
+    expect(facts.latestDecisions[0]).toMatchObject({ riskScore: null, riskTier: null, requiredReviews: 0 });
+    expect(facts.assignments).toEqual([]);
+    expect(request.mock.calls.filter(([route]) => route === "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews")).toHaveLength(mode === "enforce" ? 1 : 0);
+    if (mode === "shadow") expect(request.mock.calls.every(([route]) => route.startsWith("GET "))).toBe(true);
+  });
+});
+
+it.runIf(Boolean(process.env.TEST_DATABASE_URL)).each([403, 500].flatMap(status => [
+  { status, persistent: false },
+  { status, persistent: true },
+]))(
+  "persists the policy outcome after a raw pre-write read failure: status $status, persistent $persistent",
+  async ({ status, persistent }) => {
+    await withPostgresTestDatabase(async db => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const connection = await db.insertInto("provider_connections").values({
+        workspace_id: workspaceId, provider: "github", external_connection_id: "99",
+        workspace_login: "acme", account_type: "Organization", status: "active", permissions: {},
+      }).returning("id").executeTakeFirstOrThrow();
+      await db.insertInto("repositories").values({
+        workspace_id: workspaceId, provider: "github", provider_connection_id: connection.id,
+        external_repository_id: "101", owner: "acme", name: "api", default_branch: "main", config_state: "unknown",
+      }).execute();
+      const scopedMessage = { ...message, workspaceId, providerConnectionId: connection.id };
+      const failure = Object.assign(new Error("pre-write read failed"), { status });
+      const repeatedFailure = Object.assign(new Error("repeated pre-write read failed"), { status });
+      let policyPublished = false;
+      let failedReads = 0;
+      let remotePolicyState: string | undefined;
+      const request = vi.fn(async (route: string, params: Record<string, unknown>) => {
+        if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
+          if (policyPublished && (persistent || failedReads === 0)) {
+            failedReads++;
+            throw failedReads === 1 ? failure : repeatedFailure;
+          }
+          return { data: { state: "open", draft: false, head: { sha: "abc123", ref: "feature" },
+            base: { sha: "base-123", ref: "main" }, user: { login: "author" } } };
+        }
+        if (route === "POST /repos/{owner}/{repo}/check-runs" && params.name === "triagepilot/human-review-policy") {
+          policyPublished = true;
+          remotePolicyState = String(params.conclusion);
+        }
+        if (route === "PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}") {
+          remotePolicyState = String(params.conclusion);
+          return { data: {} };
+        }
+        return policyCheckRequester(route, params);
+      });
+      const services = createWorkerRoutingServiceFactory({
+        db, github: { appId: "123", privateKey: "test-key" }, createRequester: async () => ({ request }),
+        createConfigurationSource: () => ({
+          async loadOrganization() { return null; },
+          async loadRepository() {
+            return { content: "mode: enforce\nrouting:\n  exclude_target_branches: [main]\n", path: ".triagepilot.yml", revision: "base-123" };
+          },
+        }),
+      })(scopedMessage);
+
+      await expect(processRoutingJob(scopedMessage, services)).rejects.toBe(failure);
+
+      const expectedState = status === 403 ? "failure" : "success";
+      expect(failedReads).toBe(1);
+      expect(remotePolicyState).toBe(expectedState);
+      expect(await db.selectFrom("routing_decisions").select(["action_status", "action_error", "policy_check_state"]).executeTakeFirstOrThrow())
+        .toEqual({ action_status: "failed", action_error: "pre-write read failed", policy_check_state: expectedState });
+      expect(request.mock.calls.some(([route]) => route === "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews")).toBe(false);
+    });
+  },
+);
+
+it.runIf(Boolean(process.env.TEST_DATABASE_URL)).each(["draft", "closed", "retarget"] as const)(
+  "persists an aborted exclusion when the live PR changes to %s, then honors fresh routing",
+  async change => {
+    await withPostgresTestDatabase(async db => {
+      const workspaceId = await ensureLocalWorkspace(db);
+      const connection = await db.insertInto("provider_connections").values({ workspace_id: workspaceId, provider: "github", external_connection_id: "99", workspace_login: "acme", account_type: "Organization", status: "active", permissions: {} }).returning("id").executeTakeFirstOrThrow();
+      await db.insertInto("repositories").values({ workspace_id: workspaceId, provider: "github", provider_connection_id: connection.id, external_repository_id: "101", owner: "acme", name: "api", default_branch: "main", config_state: "unknown" }).execute();
+      const scopedMessage = { ...message, workspaceId, providerConnectionId: connection.id,
+        changeRequest: { ...message.changeRequest, sourceBranch: "feature", targetBranch: "main" } };
+      let reads = 0;
+      let changed = false;
+      let checkId = 70;
+      const request = vi.fn(async (route: string, params: Record<string, unknown>) => {
+        if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
+          if (++reads >= 2 && change !== "retarget") changed = true;
+          return { data: { state: changed && change === "closed" ? "closed" : "open", draft: changed && change === "draft",
+            head: { sha: "abc123", ref: "feature" }, base: { sha: "base-123", ref: changed && change === "retarget" ? "release" : "main" }, user: { login: "author" } } };
+        }
+        if (route === "POST /repos/{owner}/{repo}/check-runs") {
+          if (change === "retarget") changed = true;
+          return { data: { id: ++checkId } };
+        }
+        if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/files") return { data: [{ filename: "README.md", additions: 1, deletions: 0 }] };
+        if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/commits") return { data: [] };
+        return policyCheckRequester(route, params);
+      });
+      const factory = createWorkerRoutingServiceFactory({ db, github: { appId: "123", privateKey: "test-key" }, createRequester: async () => ({ request }), createConfigurationSource: () => ({
+        async loadOrganization() { return null; },
+        async loadRepository() {
+          return { content: 'mode: enforce\nrouting:\n  exclude_target_branches: [main]\nrisk:\n  paths:\n    - pattern: README.md\n      weight: 50\n      tag: docs\nownership:\n  fallback_reviewers: ["@reviewer"]\n', path: ".triagepilot.yml", revision: "base-123" };
+        },
+      }) });
+      await expect(processRoutingJob(scopedMessage, factory(scopedMessage))).rejects.toThrow(change === "closed" ? "not open" : "routing context changed");
+      expect(await db.selectFrom("routing_decisions").select(["action_status", "policy_check_state"]).executeTakeFirstOrThrow())
+        .toEqual({ action_status: "failed", policy_check_state: change === "retarget" ? "success" : "not_started" });
+      const writes = request.mock.calls.filter(([route]) => !route.startsWith("GET "));
+      expect(writes).toHaveLength(change === "retarget" ? 1 : 0);
+      const jobs = await db.selectFrom("jobs").selectAll().execute();
+      expect(jobs).toHaveLength(change === "closed" ? 0 : 1);
+      if (change === "closed") return;
+      const reroute = jobs[0]!.payload as RoutingJobMessage;
+      await processRoutingJob(reroute, factory(reroute));
+      const decisions = await db.selectFrom("routing_decisions").select(["action", "action_status", "policy_check_state"]).execute();
+      expect(decisions).toHaveLength(change === "draft" ? 1 : 2);
+      if (change === "retarget") {
+        expect(decisions).toContainEqual({ action: "request_human_review", action_status: "succeeded", policy_check_state: "in_progress" });
+        expect(request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", expect.objectContaining({ reviewers: ["reviewer"] }));
+      }
+      expect(request.mock.calls.some(([route]) => route === "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews")).toBe(false);
+    });
+  },
+);
+
+it.runIf(Boolean(process.env.TEST_DATABASE_URL)).each([
+  { name: "target retarget on identical commits", sourceRule: false, liveTarget: "release", liveSource: "feature", liveBase: "base-123" },
+  { name: "target retarget with different configuration", sourceRule: false, liveTarget: "release", liveSource: "feature", liveBase: "release-base" },
+  { name: "changed source branch", sourceRule: true, liveTarget: "main", liveSource: "feature", liveBase: "base-123" },
+  { name: "source exclusion under a new target policy", sourceRule: true, liveTarget: "release", liveSource: "automation/pkg", liveBase: "release-base" },
+])("reroutes $name before approving, then applies the current policy", async ({ sourceRule, liveTarget, liveSource, liveBase }) => {
+  await withPostgresTestDatabase(async db => {
+    const workspaceId = await ensureLocalWorkspace(db);
+    const connection = await db.insertInto("provider_connections").values({ workspace_id: workspaceId, provider: "github", external_connection_id: "99", workspace_login: "acme", account_type: "Organization", status: "active", permissions: {} }).returning("id").executeTakeFirstOrThrow();
+    await db.insertInto("repositories").values({ workspace_id: workspaceId, provider: "github", provider_connection_id: connection.id, external_repository_id: "101", owner: "acme", name: "api", default_branch: "main", config_state: "unknown" }).execute();
+    const initialSource = sourceRule ? "automation/pkg" : "feature";
+    const scopedMessage = { ...message, workspaceId, providerConnectionId: connection.id, changeRequest: { ...message.changeRequest, sourceBranch: initialSource, targetBranch: "main" } };
+    let reads = 0;
+    let currentBase = liveBase;
+    const request = vi.fn(async (route: string, params: Record<string, unknown>) => {
+      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") {
+        reads++;
+        return { data: { state: "open", draft: false, head: { sha: "abc123", ref: reads === 1 ? initialSource : liveSource }, base: { sha: reads === 1 ? "base-123" : currentBase, ref: reads === 1 ? "main" : liveTarget }, user: { login: "author" } } };
+      }
+      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/files") return { data: [{ filename: "README.md", additions: 1, deletions: 0 }] };
+      if (route === "GET /repos/{owner}/{repo}/commits/{ref}/check-runs") return { data: { check_runs: [] } };
+      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/commits" || route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews" || route === "GET /repos/{owner}/{repo}/issues/{issue_number}/comments" || route === "GET /repos/{owner}/{repo}/issues/{issue_number}/labels") return { data: [] };
+      if (route === "POST /repos/{owner}/{repo}/check-runs") return { data: { id: params.name === "triagepilot/human-review-policy" ? 71 : 72 } };
+      if (route.startsWith("POST ")) return { data: {} };
+      throw new Error(`Unexpected provider read: ${route}`);
+    });
+    const revisions: string[] = [];
+    const factory = createWorkerRoutingServiceFactory({ db, github: { appId: "123", privateKey: "test-key" }, createRequester: async () => ({ request }), createConfigurationSource: () => ({
+      async loadOrganization() { return null; },
+      async loadRepository(input) {
+        revisions.push(input.trustedRevision);
+        const exclusion = input.trustedRevision === "base-123" ? `routing:\n  ${sourceRule ? "exclude_source_branch_patterns: [automation/**]" : "exclude_target_branches: [main]"}\n` : "";
+        return { content: `mode: enforce\n${exclusion}risk:\n  paths:\n    - pattern: README.md\n      weight: 50\n      tag: docs\nownership:\n  fallback_reviewers: [\"@reviewer\"]\n`, path: ".triagepilot.yml", revision: input.trustedRevision };
+      },
+    }) });
+    await expect(processRoutingJob(scopedMessage, factory(scopedMessage))).rejects.toThrow("routing context changed");
+    expect(request.mock.calls.every(([route]) => route.startsWith("GET "))).toBe(true);
+    expect(await db.selectFrom("routing_decisions").select(["action_status", "policy_check_state"]).executeTakeFirstOrThrow()).toEqual({ action_status: "failed", policy_check_state: "not_started" });
+    // Retry the old job in a fresh worker context: it must deduplicate the same replacement.
+    await expect(processRoutingJob(scopedMessage, factory(scopedMessage))).rejects.toThrow("routing context changed");
+    const jobs = await db.selectFrom("jobs").selectAll().execute();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toMatchObject({ external_installation_id: "99", external_repository_id: "101" });
+    const reroute = jobs[0]!.payload as RoutingJobMessage;
+    expect(reroute.changeRequest).toMatchObject({ baseRevision: liveBase, headRevision: "abc123", sourceBranch: liveSource, targetBranch: liveTarget });
+    expect(reroute.routingKey).not.toBe(message.routingKey);
+    await processRoutingJob(reroute, factory(reroute));
+    const current = await db.selectFrom("routing_decisions").selectAll().where("routing_key", "=", reroute.routingKey).executeTakeFirstOrThrow();
+    expect(current).toMatchObject({ action: "request_human_review", action_status: "succeeded", policy_check_state: "in_progress", repository_config_revision: liveBase });
+    expect(current.details).not.toHaveProperty("branchExclusion");
+    expect(revisions.at(-1)).toBe(liveBase);
+    expect(request.mock.calls.some(([route]) => route === "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews")).toBe(false);
+    expect(request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/labels", expect.objectContaining({ labels: ["triagepilot:risk-medium"] }));
+    expect(request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", expect.objectContaining({ reviewers: ["reviewer"] }));
+    // A replay can observe a second context after the first replacement persisted.
+    currentBase = "another-base";
+    await expect(processRoutingJob(scopedMessage, factory(scopedMessage))).rejects.toThrow("routing context changed");
+    const nextJobs = await db.selectFrom("jobs").selectAll().where("id", "!=", jobs[0]!.id).where("kind", "=", "process_pull_request").execute();
+    expect(nextJobs).toHaveLength(1);
+    const next = nextJobs[0]!.payload as RoutingJobMessage;
+    expect(next.deliveryId).not.toBe(reroute.deliveryId);
+    await processRoutingJob(next, factory(next));
+    expect(await db.selectFrom("routing_decisions").select("action_status").where("routing_key", "=", next.routingKey).executeTakeFirstOrThrow()).toEqual({ action_status: "succeeded" });
+  });
+});

@@ -1,6 +1,7 @@
 import { sql, type Kysely } from "kysely";
 import type {
   ActionStatus,
+  BranchExclusion,
   ProviderConnectionId,
   RepositoryMode,
   RepositoryRef,
@@ -10,6 +11,7 @@ import type {
   WorkspaceId,
 } from "@triagepilot/contracts";
 
+import { readBranchExclusion } from "./decision-details.js";
 import type { Database } from "./kysely.js";
 
 type PolicyCheckState = "not_started" | "in_progress" | "success" | "failure";
@@ -31,7 +33,8 @@ export interface DecisionOverview {
   actionStatus: ActionStatus;
   actionError: string | null;
   policyCheckState: PolicyCheckState;
-  riskScore: number;
+  riskScore: number | null;
+  branchExclusion?: BranchExclusion;
   riskBreakdown: RiskBreakdown | null;
   requestedReviewerCount: number | null;
   reviewerShortfall: number | null;
@@ -252,6 +255,7 @@ export async function readOperationsOverview(
     })),
     decisions: decisions.map((decision) => {
       const selectedReviewers = readSelectedReviewers(decision.selected_reviewers, decision.selected_reviewer);
+      const branchExclusion = readBranchExclusion(decision.details);
       const reviewerQuota = readReviewerQuota(decision.details, selectedReviewers);
       return {
         id: decision.id,
@@ -262,8 +266,9 @@ export async function readOperationsOverview(
         actionStatus: decision.action_status,
         actionError: decision.action_error,
         policyCheckState: normalizePolicyCheckState(decision.policy_check_state),
-        riskScore: decision.risk_score,
-        riskBreakdown: readRiskBreakdown(decision.details),
+        riskScore: branchExclusion ? null : decision.risk_score,
+        riskBreakdown: branchExclusion ? null : readRiskBreakdown(decision.details),
+        ...(branchExclusion ? { branchExclusion } : {}),
         ...reviewerQuota,
         selectedReviewer: decision.selected_reviewer,
         selectedReviewers,

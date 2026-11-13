@@ -223,15 +223,24 @@ describe("processChangeRequest", () => {
       metadata: { author: "@user-c91e46", sourceBranch: "automated-updates/pkg", targetBranch: "main", currentHeadRevision: "head-sha" },
       reason: "source_branch" as const,
     },
-  ])("skips an excluded $name before diff reads", async ({ source, metadata, reason }) => {
+  ])("approves an excluded $name without scoring or selecting reviewers", async ({ source, metadata, reason }) => {
     const ports = buildPorts(effectiveConfiguration(source));
     vi.mocked(ports.provider.fetchChangeRequestMetadata).mockResolvedValueOnce(metadata);
 
     const outcome = await processChangeRequest(job, ports);
 
-    expect(outcome).toEqual({ status: "skipped", reason });
+    expect(outcome).toMatchObject({ status: "decided", actionStatus: "succeeded" });
     expect(ports.provider.fetchChangedFiles).not.toHaveBeenCalled();
-    expect(ports.decisions.persistWithEvent).not.toHaveBeenCalled();
+    expect(ports.provider.fetchCommitMessages).not.toHaveBeenCalled();
+    expect(ports.provider.fetchCurrentRevisionApprovals).not.toHaveBeenCalled();
+    expect(ports.availability.findActive).not.toHaveBeenCalled();
+    expect(ports.reviewerLoad).not.toHaveBeenCalled();
+    const [decision, event] = vi.mocked(ports.decisions.persistWithEvent).mock.calls[0]!;
+    const branchExclusion = { type: reason, branch: reason === "target_branch" ? "main" : "automated-updates/pkg", matchingRule: reason === "target_branch" ? "main" : "automated-updates/**" };
+    expect(decision).toMatchObject({ action: "policy_approval", riskScore: 0, selectedActors: [], effectiveConfigHash: "effective-hash", repositoryConfigRevision: "base-sha", details: { risk: null, branchExclusion, routing: { requestedReviewerCount: 0, selectedReviewers: [], reviewerShortfall: 0 } } });
+    expect(event({ decisionId: "decision-1", actionStatus: "pending", actionError: null, actionAppliedAt: null, occurredAt: new Date("2026-08-27T09:59:00Z") })).toMatchObject({ action: "policy_approval", riskScore: 0, selectedActors: [], branchExclusion, effectiveConfigurationHash: "effective-hash" });
+    expect(ports.provider.applyActions).toHaveBeenCalledWith(expect.objectContaining({ action: "policy_approval", risk: null, branchExclusion, expectedBranches: { source: metadata.sourceBranch, target: metadata.targetBranch }, expectedBaseRevision: "base-sha", selectedActors: [], actorsToRequest: [] }));
+    expect(ports.enqueueReviewPolicy).not.toHaveBeenCalled();
   });
 
   it("skips a stale revision before scoring or applying actions", async () => {
@@ -592,4 +601,49 @@ ownership:
     expect(ports.provider.applyActions).toHaveBeenCalledWith(expect.objectContaining({ risk: expect.objectContaining({ score, tier: "medium" }) }));
     expect(ports.enqueueReviewPolicy).toHaveBeenCalledOnce();
   }
+});
+
+
+describe("branch exclusion safeguards", () => {
+  const source = "mode: enforce\nrouting:\n  exclude_target_branches: [main]\n  exclude_source_branch_patterns: [feature/**]\n";
+  it("records target first when both exclusions match, and keeps shadow write-free", async () => {
+    const ports = buildPorts(effectiveConfiguration(source.replace("enforce", "shadow")));
+    ports.reviewerBacklog = vi.fn();
+    await expect(processChangeRequest(job, ports)).resolves.toMatchObject({ status: "decided", actionStatus: "not_applied" });
+    expect(vi.mocked(ports.decisions.persistWithEvent).mock.calls[0]![0].details).toMatchObject({ branchExclusion: { type: "target_branch", branch: "main", matchingRule: "main" } });
+    expect(ports.provider.applyActions).not.toHaveBeenCalled();
+    expect(ports.reviewerBacklog).not.toHaveBeenCalled();
+  });
+  it.each([
+    { source: "mode: enforce\nrouting: { exclude_target_branches: [ma*] }\n" },
+    { source: "mode: enforce\nrouting: { exclude_source_branch_patterns: [other/**] }\n" },
+  ])("scores nonmatching rules with the existing exact target and source glob semantics: $source", async ({ source }) => {
+    const ports = buildPorts(effectiveConfiguration(source));
+    await processChangeRequest(job, ports);
+    expect(ports.provider.fetchChangedFiles).toHaveBeenCalledOnce();
+    expect(vi.mocked(ports.decisions.persistWithEvent).mock.calls[0]![0].details).not.toHaveProperty("branchExclusion");
+  });
+  it.each(["draft", "stale", "invalid"])("checks %s before branch approval", async guard => {
+    const ports = buildPorts(effectiveConfiguration(guard === "invalid" ? source + "mode: invalid\n" : source));
+    if (guard === "stale") vi.mocked(ports.provider.fetchChangeRequestMetadata).mockResolvedValueOnce({ author: "author", sourceBranch: "feature/change", targetBranch: "main", currentHeadRevision: "changed" });
+    const outcome = await processChangeRequest({ ...job, isDraft: guard === "draft" }, ports);
+    expect(outcome.status).toBe(guard === "invalid" ? "configuration_failure" : "skipped");
+    expect(ports.provider.applyActions).not.toHaveBeenCalled();
+    expect(ports.provider.fetchChangedFiles).not.toHaveBeenCalled();
+  });
+  it("records failure and retries an excluded decision with the same approval identity", async () => {
+    const ports = buildPorts(effectiveConfiguration(source));
+    vi.mocked(ports.provider.applyActions).mockRejectedValueOnce(new Error("temporary failure"));
+    await expect(processChangeRequest(job, ports)).rejects.toThrow("temporary failure");
+    expect(ports.decisions.markActionFailed).toHaveBeenCalledWith("decision-1", "temporary failure", expect.any(Date));
+    await expect(processChangeRequest(job, ports)).resolves.toMatchObject({ actionStatus: "succeeded" });
+    expect(vi.mocked(ports.provider.applyActions).mock.calls.map(([action]) => action.decisionId)).toEqual(["decision-1", "decision-1"]);
+    expect(ports.decisions.markActionSucceeded).toHaveBeenCalledOnce();
+  });
+  it("does not reapply an already successful exclusion approval", async () => {
+    const ports = buildPorts(effectiveConfiguration(source));
+    vi.mocked(ports.decisions.persistWithEvent).mockResolvedValueOnce({ decisionId: "decision-1", actionStatus: "succeeded", actionError: null, actionAppliedAt: new Date() });
+    await processChangeRequest(job, ports);
+    expect(ports.provider.applyActions).not.toHaveBeenCalled();
+  });
 });

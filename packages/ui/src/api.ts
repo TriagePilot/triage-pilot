@@ -1,5 +1,6 @@
 import type {
   ActionStatus,
+  BranchExclusion,
   RepositoryMode,
   ReviewerReplacementOutcome,
   RiskTier,
@@ -131,7 +132,8 @@ export interface DecisionOverview {
   actionStatus: ActionStatus;
   actionError: string | null;
   policyCheckState: "not_started" | "in_progress" | "success" | "failure";
-  riskScore: number;
+  riskScore: number | null;
+  branchExclusion?: BranchExclusion;
   riskBreakdown: RiskBreakdown | null;
   requestedReviewerCount: number | null;
   reviewerShortfall: number | null;
