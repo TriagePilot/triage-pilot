@@ -1,5 +1,6 @@
 import type {
   AnalyticsApiClient,
+  PullRequestQueueApiClient,
   AvailabilitySettingsOverview,
   EffectiveConfigurationOverview,
   OperationsApiClient,
@@ -227,6 +228,33 @@ export function createSelfHostedAnalyticsApi(input: {
       for (const id of query.repositoryIds) params.append("repositoryId", id);
       if (query.forceRefresh !== undefined) params.set("forceRefresh", String(query.forceRefresh));
       return read(workspace, "/workload", params, "Could not load the current reviewer workload.", signal);
+    },
+  };
+}
+
+export function createSelfHostedPullRequestQueueApi(input: {
+  onUnauthorized?(message: string): void;
+} = {}): PullRequestQueueApiClient {
+  return {
+    readPullRequestQueue(workspace, query, signal) {
+      return withUnauthorized(input.onUnauthorized, async () => {
+        const params = new URLSearchParams();
+        if (query.forceRefresh) params.set("refresh", "true");
+        if (query.phase) params.set("phase", query.phase);
+        const suffix = params.toString();
+        const response = await fetch(`/api/operations/pull-requests${suffix ? `?${suffix}` : ""}`, {
+          credentials: "same-origin",
+          headers: workspaceHeaders(workspace),
+          ...(signal ? { signal } : {}),
+        });
+        if (response.status === 401) throw new AdminApiError("The administrator session has expired.", 401);
+        if (!response.ok) {
+          const body = await response.json().catch(() => null) as { error?: unknown } | null;
+          const messages: Record<string, string> = { workspace_scope_mismatch: "Workspace access is unavailable.", forbidden_origin: "This request is not allowed.", not_found_or_inactive: "The GitHub installation is unavailable.", pull_request_queue_unavailable: "Could not load pull requests." };
+          throw new AdminApiError(typeof body?.error === "string" ? messages[body.error] ?? "Could not load pull requests." : "Could not load pull requests.", response.status);
+        }
+        return response.json();
+      });
     },
   };
 }

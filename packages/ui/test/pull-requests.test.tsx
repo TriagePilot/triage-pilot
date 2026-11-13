@@ -1,0 +1,164 @@
+// @vitest-environment happy-dom
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, expect, it, vi } from "vitest";
+import type { QueueItem } from "@triagepilot/contracts";
+import { queueAssessment, queuePull, queueReviewState, queueSnapshot } from "../../../test/pull-request-queue-fixtures.js";
+import { PullRequests } from "../src/index.js";
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+const workspace = { id: "1", displayName: "Test" };
+const authorization = { canViewOperations: true, canManageConfiguration: false, canManageReviewerAvailability: false, canRunRoutingRecovery: false };
+const item: QueueItem = { pullRequest: queuePull({ requestedUsers: [{ id: "2", login: "bob", type: "human" }], requestedTeams: [{ id: "t", name: "team" }] }), reviewState: queueReviewState(), assessment: queueAssessment(), attention: { group: "reviewers", badge: "reviewers_move", reason: "Waiting", actorIds: ["2"], teamIds: ["t"], secondaryReasons: ["Concurrent request"], approvedCount: null, requiredCount: 1, assessmentStatus: "current", checkUpdatePending: false }, links: { provider: "https://example.com/pr", decision: "https://example.com/decisions" } };
+let root: Root; let container: HTMLDivElement;
+afterEach(async () => { if (root) await act(async () => root.unmount()); document.body.replaceChildren(); });
+it("renders owners and evidence, traps dialog focus, restores focus, and refreshes only on demand", async () => {
+  const api = { readPullRequestQueue: vi.fn().mockResolvedValue(queueSnapshot({ items: [item], totalOpen: 1 })) };
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
+  expect(container.textContent).toContain("bob, team"); expect(container.textContent).toContain("Last updated:"); expect(api.readPullRequestQueue).toHaveBeenCalledTimes(1);
+  const trigger = [...container.querySelectorAll("button")].find((b) => b.textContent === "Change")!;
+  await act(async () => trigger.click()); expect(container.textContent).toContain("Concurrent request"); expect(container.textContent).toContain("Approvals: Unknown"); expect(container.textContent).toContain("Projected risk"); expect(container.textContent).toContain("Decision: 1");
+  const dialog = container.querySelector('[role="dialog"]')!; const close = dialog.querySelector("button")!; expect(document.activeElement).toBe(close);
+  await act(async () => close.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true }))); expect(document.activeElement?.textContent).toBe("View routing decisions");
+  await act(async () => dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))); expect(document.activeElement).toBe(trigger);
+  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Refresh")!.click()); expect(api.readPullRequestQueue).toHaveBeenCalledTimes(2); expect(api.readPullRequestQueue).toHaveBeenLastCalledWith(workspace, { forceRefresh: true, phase: "initial" }, expect.any(AbortSignal));
+});
+it("renders empty and partial snapshots accurately", async () => {
+  const api = { readPullRequestQueue: vi.fn().mockResolvedValue(queueSnapshot({ status: "partial", membershipComplete: false, totalOpen: null })) };
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
+  expect(container.textContent).toContain("Partial coverage"); expect(container.textContent).not.toContain("No open pull requests.");
+});
+it("keeps rows while updating and displays only server-revalidated stale snapshots", async () => {
+  let resolve!: (value: ReturnType<typeof queueSnapshot>) => void;
+  const pending = new Promise<ReturnType<typeof queueSnapshot>>((yes) => { resolve = yes; });
+  const snapshot = queueSnapshot({ items: [item], totalOpen: 1 });
+  const api = { readPullRequestQueue: vi.fn().mockResolvedValueOnce(snapshot).mockReturnValueOnce(pending) };
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
+  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Refresh")!.click());
+  expect(container.textContent).toContain("Updating pull requests"); expect(container.textContent).toContain("Change");
+  await act(async () => resolve({ ...snapshot, stale: true, refreshError: "Refresh unavailable" }));
+  expect(container.textContent).toContain("Stale snapshot"); expect(container.textContent).toContain("Change");
+  expect(container.querySelector("time")?.dateTime).toBe(snapshot.observedAt);
+});
+it.each([401, 403, 404])("clears protected rows and details when refresh loses authority (%s)", async (status) => {
+  const reason = Object.assign(new Error("Authority could not be verified"), status === null ? {} : { status });
+  const api = { readPullRequestQueue: vi.fn().mockResolvedValueOnce(queueSnapshot({ items: [item], totalOpen: 1 })).mockRejectedValueOnce(reason) };
+  const onUnauthorized = vi.fn(); container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} onUnauthorized={onUnauthorized} />));
+  await act(async () => container.querySelector<HTMLButtonElement>(".queue-title")!.click());
+  expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Refresh")!.click());
+  expect(container.textContent).toContain("Pull requests unavailable");
+  expect(container.textContent).not.toContain("Change");
+  expect(container.querySelector('[role="dialog"]')).toBeNull();
+  expect(container.querySelector('a[href="https://example.com/pr"]')).toBeNull();
+  if (status === 401) expect(onUnauthorized).toHaveBeenCalledWith(reason.message);
+  else expect(onUnauthorized).not.toHaveBeenCalled();
+});
+it("refreshes an open panel from the current scoped PR and closes it when that PR disappears", async () => {
+  vi.useFakeTimers();
+  const updated = { ...item, pullRequest: { ...item.pullRequest, title: "Updated change", requestedUsers: [{ id: "3", login: "charlie", type: "human" as const }], requestedTeams: [] }, attention: { ...item.attention, actorIds: ["3"], teamIds: [] } };
+  const otherRepo = { ...item, pullRequest: { ...item.pullRequest, repository: { ...item.pullRequest.repository, externalId: "other" }, title: "Other repository change" } };
+  const api = { readPullRequestQueue: vi.fn().mockResolvedValueOnce(queueSnapshot({ items: [item, otherRepo], totalOpen: 2 })).mockResolvedValueOnce(queueSnapshot({ items: [updated, otherRepo], totalOpen: 2 })).mockResolvedValueOnce(queueSnapshot({ items: [otherRepo], totalOpen: 1 })).mockResolvedValueOnce(queueSnapshot({ items: [updated], totalOpen: 1 })) };
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
+  await act(async () => container.querySelector<HTMLButtonElement>(".queue-title")!.click());
+  expect(container.querySelector('[role="dialog"]')?.textContent).toContain("bob");
+  const refresh = () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Refresh")!.click();
+  await act(async () => refresh());
+  expect(container.querySelector('[role="dialog"]')?.textContent).toContain("Updated change");
+  expect(container.querySelector('[role="dialog"]')?.textContent).toContain("Next action: charlie");
+  expect(container.querySelector('[role="dialog"]')?.textContent).not.toContain("bob");
+  vi.setSystemTime(Date.now() + 60_000);
+  await act(async () => refresh());
+  expect(container.querySelector('[role="dialog"]')).toBeNull();
+  expect(container.textContent).toContain("Other repository change");
+  vi.setSystemTime(Date.now() + 60_000);
+  await act(async () => refresh());
+  expect(container.querySelector('[role="dialog"]')).toBeNull();
+  vi.useRealTimers();
+});
+it("limits each group to 50 and changes local filters without another request", async () => {
+  const items = Array.from({ length: 51 }, (_, index) => ({ ...item, pullRequest: { ...item.pullRequest, number: index + 1, title: `Change ${index + 1}` } }));
+  const api = { readPullRequestQueue: vi.fn().mockResolvedValue(queueSnapshot({ items, totalOpen: 51 })) };
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
+  expect(container.querySelectorAll(".queue-row")).toHaveLength(50);
+  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Show more")!.click()); expect(container.querySelectorAll(".queue-row")).toHaveLength(51);
+  const person = [...container.querySelectorAll("select")].find((element) => element.parentElement?.textContent?.startsWith("Person"))!;
+  await act(async () => { person.value = "2"; person.dispatchEvent(new Event("change", { bubbles: true })); }); expect(container.textContent).toContain("reviewer"); expect(api.readPullRequestQueue).toHaveBeenCalledTimes(1);
+  const search = container.querySelector("input")!;
+  await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(search, "not found"); search.dispatchEvent(new Event("input", { bubbles: true })); }); expect(container.textContent).toContain("Clear filters");
+  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Clear filters")!.click()); expect(container.querySelectorAll(".queue-row").length).toBeGreaterThan(0);
+});
+it("ignores a late response after a workspace switch", async () => {
+  let resolve!: (value: ReturnType<typeof queueSnapshot>) => void; const pending = new Promise<ReturnType<typeof queueSnapshot>>((yes) => { resolve = yes; });
+  const api = { readPullRequestQueue: vi.fn().mockReturnValueOnce(pending).mockResolvedValueOnce(queueSnapshot({ workspaceId: "2" })) };
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />)); expect(container.textContent).toContain("Loading pull requests");
+  await act(async () => root.render(<PullRequests api={api} workspace={{ id: "2", displayName: "Other" }} authorization={authorization} />));
+  await act(async () => resolve(queueSnapshot({ items: [item], totalOpen: 1 }))); expect(container.textContent).not.toContain("Change"); expect(container.textContent).toContain("No open pull requests");
+});
+it("shows classification, risk and approvals with named unavailable repositories", async () => {
+  const items = [item, ...(["draft", "status_unknown", "policy_unknown"] as const).map((badge, index) => ({ ...item, pullRequest: { ...item.pullRequest, number: index + 2 }, attention: { ...item.attention, group: "other" as const, badge } }))];
+  const api = { readPullRequestQueue: vi.fn().mockResolvedValue(queueSnapshot({ status: "partial", items, unavailableRepositoryIds: ["1", "missing"], repositories: [{ recordId: null, repository: item.pullRequest.repository }], totalOpen: null })) };
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
+  const rows = [...container.querySelectorAll(".queue-row")]; expect(rows[0]?.textContent).toContain("Projected risk: medium"); expect(rows[0]?.textContent).toContain("Human approvals: Unknown / 1");
+  expect(container.textContent).toContain("Draft"); expect(container.textContent).toContain("Status unknown"); expect(container.textContent).toContain("Policy unknown"); expect(container.textContent).toContain("Unavailable: acme/api, missing");
+});
+it("searches people and displays both author and reviewer badges", async () => {
+  const both = { ...item, pullRequest: { ...item.pullRequest, requestedUsers: [item.pullRequest.author, ...item.pullRequest.requestedUsers] } };
+  const api = { readPullRequestQueue: vi.fn().mockResolvedValue(queueSnapshot({ items: [both], totalOpen: 1 })) };
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
+  const input = [...container.querySelectorAll("input")][1]!;
+  await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "ali"); input.dispatchEvent(new Event("input", { bubbles: true })); });
+  const person = [...container.querySelectorAll("select")].find((element) => element.parentElement?.textContent?.startsWith("Person"))!;
+  expect(person.textContent).toContain("alice"); expect(person.textContent).not.toContain("bob");
+  await act(async () => { person.value = "1"; person.dispatchEvent(new Event("change", { bubbles: true })); });
+  expect([...container.querySelectorAll(".queue-role")].map((node) => node.textContent)).toEqual(["author", "reviewer"]); expect(api.readPullRequestQueue).toHaveBeenCalledTimes(1);
+});
+it("does not poll as time advances or apply a response after unmount", async () => {
+  vi.useFakeTimers();
+  try {
+    let resolve!: (value: ReturnType<typeof queueSnapshot>) => void; const pending = new Promise<ReturnType<typeof queueSnapshot>>((yes) => { resolve = yes; });
+    const api = { readPullRequestQueue: vi.fn().mockReturnValue(pending) };
+    container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+    await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
+    await act(async () => { vi.advanceTimersByTime(300000); }); expect(api.readPullRequestQueue).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount()); await act(async () => resolve(queueSnapshot({ items: [item], totalOpen: 1 }))); expect(container.textContent).toBe("");
+    root = createRoot(container);
+  } finally { vi.useRealTimers(); }
+});
+it("shows open PRs while review details are still loading", async () => {
+  vi.useFakeTimers();
+  let resolve!: (value: ReturnType<typeof queueSnapshot>) => void;
+  const pending = new Promise<ReturnType<typeof queueSnapshot>>(yes => { resolve = yes; });
+  const checking = { ...item, reviewState: { ...item.reviewState, status: "checking" as const }, attention: { ...item.attention, group: "other" as const, badge: "checking" as const, reason: "Checking review status." } };
+  const api = { readPullRequestQueue: vi.fn().mockResolvedValueOnce(queueSnapshot({ status: "partial", syncState: "syncing", syncProgress: { runId: "r", phase: "running", updatedAt: null, completedRepositories: 0, totalRepositories: 1, retryAt: null }, classificationComplete: false, items: [checking], totalOpen: 1, enrichmentPending: true })).mockReturnValueOnce(pending) };
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
+  expect(container.textContent).toContain("Change"); expect(container.textContent).toContain("Checking"); expect(api.readPullRequestQueue).toHaveBeenCalledTimes(1);
+  await act(async () => vi.advanceTimersByTimeAsync(2000));
+  expect(api.readPullRequestQueue).toHaveBeenCalledTimes(2);
+  await act(async () => resolve(queueSnapshot({ items: [item], totalOpen: 1 })));
+  expect(container.textContent).toContain("Waiting for reviewers");
+  vi.useRealTimers();
+});
+it("clears the initial list if background enrichment loses authority", async () => {
+  vi.useFakeTimers();
+  const checking = { ...item, reviewState: { ...item.reviewState, status: "checking" as const }, attention: { ...item.attention, group: "other" as const, badge: "checking" as const, reason: "Checking review status." } };
+  let reject!: (reason: Error) => void;
+  const pending = new Promise<ReturnType<typeof queueSnapshot>>((_resolve, fail) => { reject = fail; });
+  const api = { readPullRequestQueue: vi.fn().mockResolvedValueOnce(queueSnapshot({ status: "partial", syncState: "syncing", syncProgress: { runId: "r", phase: "running", updatedAt: null, completedRepositories: 0, totalRepositories: 1, retryAt: null }, classificationComplete: false, items: [checking], totalOpen: 1, enrichmentPending: true })).mockReturnValueOnce(pending) };
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
+  expect(container.textContent).toContain("Change");
+  await act(async () => vi.advanceTimersByTimeAsync(2000));
+  await act(async () => reject(Object.assign(new Error("Not authorized"), { status: 404 })));
+  expect(container.textContent).not.toContain("Change"); expect(container.textContent).toContain("Pull requests unavailable");
+  vi.useRealTimers();
+});

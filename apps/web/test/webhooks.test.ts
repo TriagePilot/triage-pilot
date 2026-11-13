@@ -8,17 +8,17 @@ describe("GitHub webhook route", () => {
     [{ login: "someone", type: "User" }, "account_scope"],
     [{ login: "other-org", type: "Organization" }, "account_scope"],
   ])("acknowledges but ignores an out-of-scope repository owner %#", async (owner, ignored) => {
-    const acceptRoutingDelivery = vi.fn();
+    const acceptPullRequestDelivery = vi.fn();
     const logIgnoredWebhook = vi.fn();
     const app = createWebApp(
-      buildServices({ githubOrganization: "acme", acceptRoutingDelivery, logIgnoredWebhook }),
+      buildServices({ githubOrganization: "acme", acceptPullRequestDelivery, logIgnoredWebhook }),
     );
 
     const response = await signedWebhook(app, pullRequestBody({ owner }));
 
     expect(response.status).toBe(202);
     expect(await response.json()).toEqual({ ok: true, ignored });
-    expect(acceptRoutingDelivery).not.toHaveBeenCalled();
+    expect(acceptPullRequestDelivery).not.toHaveBeenCalled();
     expect(logIgnoredWebhook).toHaveBeenCalledWith({
       eventName: "pull_request",
       deliveryId: "delivery-1",
@@ -29,10 +29,10 @@ describe("GitHub webhook route", () => {
   });
 
   it("rejects a personal account whose login matches the configured organization before enqueue", async () => {
-    const acceptRoutingDelivery = vi.fn();
+    const acceptPullRequestDelivery = vi.fn();
     const logIgnoredWebhook = vi.fn();
     const app = createWebApp(
-      buildServices({ githubOrganization: "acme", acceptRoutingDelivery, logIgnoredWebhook }),
+      buildServices({ githubOrganization: "acme", acceptPullRequestDelivery, logIgnoredWebhook }),
     );
 
     const response = await signedWebhook(
@@ -42,7 +42,7 @@ describe("GitHub webhook route", () => {
 
     expect(response.status).toBe(202);
     expect(await response.json()).toEqual({ ok: true, ignored: "account_scope" });
-    expect(acceptRoutingDelivery).not.toHaveBeenCalled();
+    expect(acceptPullRequestDelivery).not.toHaveBeenCalled();
     expect(logIgnoredWebhook).toHaveBeenCalledWith({
       eventName: "pull_request",
       deliveryId: "delivery-1",
@@ -52,22 +52,22 @@ describe("GitHub webhook route", () => {
   });
 
   it("accepts a matching organization pull request with metadata only", async () => {
-    const acceptRoutingDelivery = vi.fn(async () => ({ inserted: true, jobId: "job-1" }));
+    const acceptPullRequestDelivery = vi.fn(async () => ({ inserted: true, routingJobId: "job-1", policyJobId: null }));
     const body = pullRequestBody({ owner: { login: "AcMe", type: "Organization" } });
-    const app = createWebApp(buildServices({ githubOrganization: "acme", acceptRoutingDelivery }));
+    const app = createWebApp(buildServices({ githubOrganization: "acme", acceptPullRequestDelivery }));
 
     const response = await signedWebhook(app, body);
 
     expect(response.status).toBe(202);
     expect(await response.json()).toEqual({ ok: true });
-    expect(acceptRoutingDelivery).toHaveBeenCalledWith({
+    expect(acceptPullRequestDelivery).toHaveBeenCalledWith(expect.objectContaining({
       deliveryId: "delivery-1",
       eventName: "pull_request",
       eventAction: "opened",
       hookId: "hook-1",
       installation: { githubInstallationId: "99", accountLogin: "AcMe" },
       repository: { githubRepositoryId: "101", owner: "AcMe", name: "api" },
-      payload: {
+      routingPayload: {
         kind: "process_change_request",
         deliveryId: "delivery-1",
         eventName: "change_request.opened",
@@ -81,75 +81,12 @@ describe("GitHub webhook route", () => {
         isDraft: false,
         routingKey: "routing:00000000-0000-4000-8000-000000000001:github:101:7:trusted-base-123:abc123:ready",
       },
-    });
-  });
-
-  it("builds the routing job from the provider normalizer output", async () => {
-    const acceptRoutingDelivery = vi.fn(async () => ({ inserted: true, jobId: "job-1" }));
-    const normalizeGitHubWebhook = vi.fn(() => ({
-      deliveryId: "delivery-1",
-      eventName: "change_request" as const,
-      eventAction: "synchronize",
-      provider: "github" as const,
-      externalConnectionId: "provider-connection-9",
-      providerAccount: { login: "AcMe", type: "Organization" },
-      changeRequest: {
-        repository: {
-          provider: "github" as const,
-          externalId: "repository-77",
-          owner: "AcMe",
-          name: "normalized-api",
-        },
-        externalId: "42",
-        number: 42,
-        baseRevision: "normalized-base",
-        headRevision: "normalized-head",
-      },
-      actor: { externalId: "actor-5", displayName: "event-sender-71c9ab" },
-      isDraft: true,
-    }));
-    const app = createWebApp(buildServices({ acceptRoutingDelivery, normalizeGitHubWebhook }));
-
-    const response = await signedWebhook(
-      app,
-      pullRequestBody({ owner: { login: "raw-owner-must-be-ignored", type: "User" } }),
-    );
-
-    expect(response.status).toBe(202);
-    expect(await response.json()).toEqual({ ok: true });
-    expect(normalizeGitHubWebhook).toHaveBeenCalledWith(expect.objectContaining({
-      eventName: "pull_request",
-      deliveryId: "delivery-1",
-    }));
-    expect(acceptRoutingDelivery).toHaveBeenCalledWith(expect.objectContaining({
-      eventAction: "synchronize",
-      installation: { githubInstallationId: "provider-connection-9", accountLogin: "AcMe" },
-      repository: { githubRepositoryId: "repository-77", owner: "AcMe", name: "normalized-api" },
-      payload: {
-        kind: "process_change_request",
-        deliveryId: "delivery-1",
-        eventName: "change_request.synchronize",
-        changeRequest: {
-          repository: {
-            provider: "github",
-            externalId: "repository-77",
-            owner: "AcMe",
-            name: "normalized-api",
-          },
-          externalId: "42",
-          number: 42,
-          baseRevision: "normalized-base",
-          headRevision: "normalized-head",
-        },
-        isDraft: true,
-        routingKey: "routing:00000000-0000-4000-8000-000000000001:github:repository-77:42:normalized-base:normalized-head:draft",
-      },
     }));
   });
 
   it("passes an opened draft pull request to the worker for configuration-aware routing", async () => {
-    const acceptRoutingDelivery = vi.fn(async () => ({ inserted: true, jobId: "job-1" }));
-    const app = createWebApp(buildServices({ githubOrganization: "acme", acceptRoutingDelivery }));
+    const acceptPullRequestDelivery = vi.fn(async () => ({ inserted: true, routingJobId: "job-1", policyJobId: null }));
+    const app = createWebApp(buildServices({ githubOrganization: "acme", acceptPullRequestDelivery }));
 
     const response = await signedWebhook(
       app,
@@ -158,16 +95,16 @@ describe("GitHub webhook route", () => {
 
     expect(response.status).toBe(202);
     expect(await response.json()).toEqual({ ok: true });
-    expect(acceptRoutingDelivery).toHaveBeenCalledWith(
+    expect(acceptPullRequestDelivery).toHaveBeenCalledWith(
       expect.objectContaining({
-        payload: expect.objectContaining({ isDraft: true }),
+        routingPayload: expect.objectContaining({ isDraft: true }),
       }),
     );
   });
 
   it("creates a distinct ready routing delivery after a draft delivery with unchanged revisions", async () => {
-    const acceptRoutingDelivery = vi.fn(async () => ({ inserted: true, jobId: "job-1" }));
-    const app = createWebApp(buildServices({ githubOrganization: "acme", acceptRoutingDelivery }));
+    const acceptPullRequestDelivery = vi.fn(async () => ({ inserted: true, routingJobId: "job-1", policyJobId: null }));
+    const app = createWebApp(buildServices({ githubOrganization: "acme", acceptPullRequestDelivery }));
 
     const draftResponse = await signedWebhook(
       app,
@@ -186,29 +123,29 @@ describe("GitHub webhook route", () => {
 
     expect(draftResponse.status).toBe(202);
     expect(readyResponse.status).toBe(202);
-    expect(acceptRoutingDelivery).toHaveBeenNthCalledWith(1, expect.objectContaining({
+    expect(acceptPullRequestDelivery).toHaveBeenNthCalledWith(1, expect.objectContaining({
       deliveryId: "delivery-draft",
       eventAction: "opened",
-      payload: expect.objectContaining({
+      routingPayload: expect.objectContaining({
         isDraft: true,
         routingKey: "routing:00000000-0000-4000-8000-000000000001:github:101:7:trusted-base-123:abc123:draft",
       }),
     }));
-    expect(acceptRoutingDelivery).toHaveBeenNthCalledWith(2, expect.objectContaining({
+    expect(acceptPullRequestDelivery).toHaveBeenNthCalledWith(2, expect.objectContaining({
       deliveryId: "delivery-ready",
       eventAction: "ready_for_review",
-      payload: expect.objectContaining({
+      routingPayload: expect.objectContaining({
         isDraft: false,
         routingKey: "routing:00000000-0000-4000-8000-000000000001:github:101:7:trusted-base-123:abc123:ready",
       }),
     }));
   });
 
-  it.each(["edited", "labeled", "review_requested", "converted_to_draft"])(
+  it.each(["labeled"])(
     "acknowledges but does not route an irrelevant pull-request action: %s",
     async (action) => {
-      const acceptRoutingDelivery = vi.fn();
-      const app = createWebApp(buildServices({ githubOrganization: "acme", acceptRoutingDelivery }));
+      const acceptPullRequestDelivery = vi.fn();
+      const app = createWebApp(buildServices({ githubOrganization: "acme", acceptPullRequestDelivery }));
 
       const response = await signedWebhook(
         app,
@@ -217,13 +154,32 @@ describe("GitHub webhook route", () => {
 
       expect(response.status).toBe(202);
       expect(await response.json()).toEqual({ ok: true, ignored: "action" });
-      expect(acceptRoutingDelivery).not.toHaveBeenCalled();
+      expect(acceptPullRequestDelivery).not.toHaveBeenCalled();
     },
   );
 
+  it.each(["closed", "edited", "converted_to_draft", "review_requested", "review_request_removed"])("invalidates projection without routing for %s", async action => {
+    const acceptPullRequestDelivery = vi.fn(async (_input: Parameters<NonNullable<NonNullable<Parameters<typeof buildServices>[0]>["acceptPullRequestDelivery"]>>[0]) => ({ inserted: true, routingJobId: null, policyJobId: null }));
+    const app = createWebApp(buildServices({ githubOrganization: "acme", acceptPullRequestDelivery }));
+    const response = await signedWebhook(app, pullRequestBody({ owner: { login: "acme", type: "Organization" }, action }));
+    expect(response.status).toBe(202);
+    expect(acceptPullRequestDelivery).toHaveBeenCalledWith(expect.objectContaining({ invalidation: expect.objectContaining({ pullNumber: 7, externalInstallationId: "99" }) }));
+    expect(acceptPullRequestDelivery.mock.calls[0]?.[0]).not.toHaveProperty("routingPayload");
+    expect(acceptPullRequestDelivery.mock.calls[0]?.[0]).not.toHaveProperty("policyPayload");
+  });
+
+  it.each(["pull_request", "pull_request_review"])("acknowledges durable deferral when repository selection is unavailable for %s", async eventName => {
+    const acceptPullRequestDelivery = vi.fn(async () => ({ inserted: false, routingJobId: null, policyJobId: null, deferred: true }));
+    const app = createWebApp(buildServices({ githubOrganization: "acme", acceptPullRequestDelivery }));
+    const body = eventName === "pull_request" ? pullRequestBody({ owner: { login: "acme", type: "Organization" } }) : pullRequestReviewBody({ owner: { login: "acme", type: "Organization" } });
+    const response = await signedWebhook(app, body, { eventName });
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ ok: true, deferred: true });
+  });
+
   it("acknowledges a duplicate pull-request delivery", async () => {
-    const acceptRoutingDelivery = vi.fn(async () => ({ inserted: false, jobId: null }));
-    const app = createWebApp(buildServices({ githubOrganization: "acme", acceptRoutingDelivery }));
+    const acceptPullRequestDelivery = vi.fn(async () => ({ inserted: false, routingJobId: null, policyJobId: null }));
+    const app = createWebApp(buildServices({ githubOrganization: "acme", acceptPullRequestDelivery }));
 
     const response = await signedWebhook(
       app,
@@ -235,12 +191,12 @@ describe("GitHub webhook route", () => {
   });
 
   it("enqueues a matching organization review with only policy-evaluation metadata", async () => {
-    const acceptHumanReviewPolicyDelivery = vi.fn(async (_delivery) => ({
+    const acceptPullRequestDelivery = vi.fn(async (_delivery) => ({
       inserted: true,
-      jobId: "job-review-1",
+      routingJobId: null, policyJobId: "job-review-1",
     }));
     const app = createWebApp(
-      buildServices({ githubOrganization: "acme", acceptHumanReviewPolicyDelivery }),
+      buildServices({ githubOrganization: "acme", acceptPullRequestDelivery }),
     );
 
     const response = await signedWebhook(
@@ -251,17 +207,17 @@ describe("GitHub webhook route", () => {
 
     expect(response.status).toBe(202);
     expect(await response.json()).toEqual({ ok: true });
-    expect(acceptHumanReviewPolicyDelivery).toHaveBeenCalledWith(
+    expect(acceptPullRequestDelivery).toHaveBeenCalledWith(
       expect.objectContaining({
         deliveryId: "delivery-review-1",
         eventName: "pull_request_review",
-        payload: expect.objectContaining({
+        policyPayload: expect.objectContaining({
           kind: "evaluate_human_review_policy",
           changeRequest: expect.objectContaining({ number: 7 }),
         }),
       }),
     );
-    expect(acceptHumanReviewPolicyDelivery.mock.calls[0]?.[0]?.payload).toEqual({
+    expect(acceptPullRequestDelivery.mock.calls[0]?.[0]?.policyPayload).toEqual({
       kind: "evaluate_human_review_policy",
       deliveryId: "delivery-review-1",
       changeRequest: {
@@ -273,10 +229,10 @@ describe("GitHub webhook route", () => {
   });
 
   it("rejects a personal account pull request review whose login matches the configured organization before enqueue", async () => {
-    const acceptHumanReviewPolicyDelivery = vi.fn();
+    const acceptPullRequestDelivery = vi.fn();
     const logIgnoredWebhook = vi.fn();
     const app = createWebApp(
-      buildServices({ githubOrganization: "acme", acceptHumanReviewPolicyDelivery, logIgnoredWebhook }),
+      buildServices({ githubOrganization: "acme", acceptPullRequestDelivery, logIgnoredWebhook }),
     );
 
     const response = await signedWebhook(
@@ -287,7 +243,7 @@ describe("GitHub webhook route", () => {
 
     expect(response.status).toBe(202);
     expect(await response.json()).toEqual({ ok: true, ignored: "account_scope" });
-    expect(acceptHumanReviewPolicyDelivery).not.toHaveBeenCalled();
+    expect(acceptPullRequestDelivery).not.toHaveBeenCalled();
     expect(logIgnoredWebhook).toHaveBeenCalledWith({
       eventName: "pull_request_review",
       deliveryId: "delivery-review-personal",
@@ -297,8 +253,8 @@ describe("GitHub webhook route", () => {
   });
 
   it("acknowledges a duplicate review delivery", async () => {
-    const acceptHumanReviewPolicyDelivery = vi.fn(async () => ({ inserted: false, jobId: null }));
-    const app = createWebApp(buildServices({ acceptHumanReviewPolicyDelivery }));
+    const acceptPullRequestDelivery = vi.fn(async () => ({ inserted: false, routingJobId: null, policyJobId: null }));
+    const app = createWebApp(buildServices({ acceptPullRequestDelivery }));
 
     const response = await signedWebhook(
       app,
@@ -311,10 +267,10 @@ describe("GitHub webhook route", () => {
   });
 
   it("acknowledges but ignores an out-of-scope review", async () => {
-    const acceptHumanReviewPolicyDelivery = vi.fn();
+    const acceptPullRequestDelivery = vi.fn();
     const logIgnoredWebhook = vi.fn();
     const app = createWebApp(
-      buildServices({ githubOrganization: "acme", acceptHumanReviewPolicyDelivery, logIgnoredWebhook }),
+      buildServices({ githubOrganization: "acme", acceptPullRequestDelivery, logIgnoredWebhook }),
     );
 
     const response = await signedWebhook(
@@ -325,7 +281,7 @@ describe("GitHub webhook route", () => {
 
     expect(response.status).toBe(202);
     expect(await response.json()).toEqual({ ok: true, ignored: "account_scope" });
-    expect(acceptHumanReviewPolicyDelivery).not.toHaveBeenCalled();
+    expect(acceptPullRequestDelivery).not.toHaveBeenCalled();
     expect(logIgnoredWebhook).toHaveBeenCalledWith({
       eventName: "pull_request_review",
       deliveryId: "delivery-review-out-of-scope",
@@ -465,10 +421,10 @@ describe("GitHub webhook route", () => {
   });
 
   it("acknowledges a signed unsupported event without parsing its payload", async () => {
-    const acceptRoutingDelivery = vi.fn();
+    const acceptPullRequestDelivery = vi.fn();
     const logIgnoredWebhook = vi.fn();
     const verifySignature = vi.fn(async () => {});
-    const app = createWebApp(buildServices({ acceptRoutingDelivery, logIgnoredWebhook, verifySignature }));
+    const app = createWebApp(buildServices({ acceptPullRequestDelivery, logIgnoredWebhook, verifySignature }));
 
     const response = await signedWebhook(app, "not-json", { eventName: "push" });
 
@@ -479,7 +435,7 @@ describe("GitHub webhook route", () => {
       secret: "hook-secret",
       signature: "sha256=test",
     });
-    expect(acceptRoutingDelivery).not.toHaveBeenCalled();
+    expect(acceptPullRequestDelivery).not.toHaveBeenCalled();
     expect(logIgnoredWebhook).not.toHaveBeenCalled();
   });
 });
@@ -567,8 +523,8 @@ const signedWebhook = (
   });
 
 it("queues repeated retargets on identical commits without reusing a completed routing identity", async () => {
-  const acceptRoutingDelivery = vi.fn(async () => ({ inserted: true, jobId: "job" }));
-  const app = createWebApp(buildServices({ acceptRoutingDelivery }));
+  const acceptPullRequestDelivery = vi.fn(async () => ({ inserted: true, routingJobId: "job", policyJobId: null }));
+  const app = createWebApp(buildServices({ acceptPullRequestDelivery }));
   for (const [deliveryId, from, to] of [["retarget-1", "main", "release"], ["retarget-2", "release", "main"], ["retarget-1", "main", "release"]] as const) {
     const body = JSON.parse(pullRequestBody({ owner: { login: "acme", type: "Organization" } }));
     body.action = "edited";
@@ -576,8 +532,8 @@ it("queues repeated retargets on identical commits without reusing a completed r
     body.pull_request.base.ref = to;
     expect((await signedWebhook(app, JSON.stringify(body), { deliveryId })).status).toBe(202);
   }
-  expect(acceptRoutingDelivery).toHaveBeenCalledTimes(3);
-  const keys = acceptRoutingDelivery.mock.calls.map(call => (call as unknown as [{ payload: { routingKey: string } }])[0].payload.routingKey);
+  expect(acceptPullRequestDelivery).toHaveBeenCalledTimes(3);
+  const keys = acceptPullRequestDelivery.mock.calls.map(call => (call as unknown as [{ routingPayload: { routingKey: string } }])[0].routingPayload.routingKey);
   expect(keys[0]).not.toBe(keys[1]);
   expect(keys[0]).toBe(keys[2]);
   expect(keys[0]).not.toBe("routing:00000000-0000-4000-8000-000000000001:github:101:7:trusted-base-123:abc123:ready");

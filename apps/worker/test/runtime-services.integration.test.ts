@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { withPostgresTestDatabase } from "../../../packages/db/test/postgres";
-import { createWorkspaceReviewerAvailability, ensureLocalWorkspace, readOperationsOverview } from "@triagepilot/db";
+import { createJobClaimer, createWorkspaceReviewerAvailability, ensureLocalWorkspace, readOperationsOverview } from "@triagepilot/db";
 import {
   createWorkerHumanReviewPolicyServiceFactory,
   createWorkerRoutingServiceFactory,
@@ -28,6 +28,23 @@ const message: RoutingJobMessage = {
 };
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime services", () => {
+  it("copies the routing job installation into generated policy work", async () => withPostgresTestDatabase(async db => {
+    const workspaceId = await ensureLocalWorkspace(db);
+    const connection = await db.insertInto("provider_connections").values({ workspace_id: workspaceId, provider: "github", external_connection_id: "99", workspace_login: "acme", account_type: "Organization", status: "active", permissions: {} }).returning("id").executeTakeFirstOrThrow();
+    await db.insertInto("repositories").values({ workspace_id: workspaceId, provider: "github", provider_connection_id: connection.id, external_repository_id: "101", owner: "acme", name: "api", default_branch: null, config_state: "unknown" }).execute();
+    const scoped = { ...message, workspaceId, providerConnectionId: connection.id };
+    await db.insertInto("jobs").values({ workspace_id: workspaceId, provider: "github", provider_connection_id: connection.id, external_installation_id: "99", external_repository_id: "101", kind: "process_pull_request", payload: scoped, idempotency_key: scoped.routingKey }).execute();
+    const service = createWorkerRoutingServiceFactory({ db, github: { appId: "123", privateKey: "key" } })(scoped);
+    await service.enqueueReviewPolicy({ kind: "evaluate_human_review_policy", workspaceId, providerConnectionId: connection.id, deliveryId: "followup", changeRequest: { repository: scoped.changeRequest.repository, externalId: "7", number: 7 } });
+    const job = await db.selectFrom("jobs").select(["external_installation_id", "external_repository_id"]).where("kind", "=", "evaluate_human_review_policy").executeTakeFirstOrThrow();
+    expect(job).toEqual({ external_installation_id: "99", external_repository_id: "101" });
+    await db.updateTable("jobs").set({ status: "succeeded" }).where("kind", "=", "process_pull_request").execute();
+    expect((await createJobClaimer(db).claimNext("policy-worker", new Date()))?.kind).toBe("evaluate_human_review_policy");
+    await db.updateTable("jobs").set({ status: "queued", locked_at: null, locked_by: null }).where("kind", "=", "evaluate_human_review_policy").execute();
+    await db.updateTable("provider_connections").set({ external_connection_id: "replacement" }).where("id", "=", connection.id).execute();
+    expect(await createJobClaimer(db).claimNext("policy-worker", new Date())).toBeNull();
+  }));
+
   it("wires routing availability to the workspace and provider connection repository", async () => {
     await withPostgresTestDatabase(async (db) => {
       const workspaceId = await ensureLocalWorkspace(db);
@@ -619,6 +636,7 @@ it.runIf(Boolean(process.env.TEST_DATABASE_URL)).each([
     await expect(processRoutingJob(scopedMessage, factory(scopedMessage))).rejects.toThrow("routing context changed");
     const jobs = await db.selectFrom("jobs").selectAll().execute();
     expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toMatchObject({ external_installation_id: "99", external_repository_id: "101" });
     const reroute = jobs[0]!.payload as RoutingJobMessage;
     expect(reroute.changeRequest).toMatchObject({ baseRevision: liveBase, headRevision: "abc123", sourceBranch: liveSource, targetBranch: liveTarget });
     expect(reroute.routingKey).not.toBe(message.routingKey);

@@ -47,6 +47,10 @@ Routing decisions, action outcomes, and reviewer replacement history are the pro
 
 Provider-specific deployment adapters and private operational material are intentionally outside this repository.
 
+## Open pull-request queue
+
+The authenticated web host reads an installation-scoped PostgreSQL projection and joins retained assessment evidence; it does not read GitHub on the page request. Existing pull request, review, and installation events trigger verification, and the worker reconciles inventory every 15 minutes to repair missed events. Bootstrap and partial coverage remain explicit until inventory and classifications are verified. Last verification reflects a complete scan; stale or unavailable worker states preserve known rows without asserting completeness. The queue does not change routing or reviewer-selection workload. See [Open pull-request queue](operations/pull-request-queue.md) for scope and limitations.
+
 ## Analytics and backlog
 
 Authenticated history reads existing routing and replacement records; current workload reads actual GitHub pending requests on the tracked 90-day population. Shared contracts and UI keep historical cohorts separate from current workload. Initial and replacement routing use ownership-first backlog comparisons with bounded live acquisition and stable fallback provenance; durable intents retain the chosen selection context for replay. There is no separate analytics fact store or retention extension. See [analytics and reviewer backlog](operations/analytics.md) for formulas, coverage, freshness, and API scope.
