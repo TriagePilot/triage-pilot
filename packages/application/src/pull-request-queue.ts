@@ -48,7 +48,7 @@ export function createPullRequestQueueService(ports: PullRequestQueuePorts) {
     const healthy = Boolean(active && workerAvailable && !stalled);
     const pending = Boolean(projection.pendingClassification || projection.snapshots.some(row => row.desiredGeneration > row.appliedGeneration));
     const membershipComplete = Boolean(run?.membershipComplete || verified) && !pending;
-    const classificationComplete = Boolean(run?.classificationComplete || verified) && !pending && items.every(item => item.reviewState.status === "complete" && (item.assessment === null || item.reviewState.lifecycle.status === "complete"));
+    const classificationComplete = Boolean(run ? run.classificationComplete : verified) && !pending && items.every(item => item.reviewState.status === "complete" && item.reviewState.lifecycle.status === "complete");
     const coveredRepositoryIds = membershipComplete ? scope.knownRepositories.map(r => r.repository.externalId) : (run?.coveredRepositoryIds ?? []).filter(id => scope.knownRepositories.some(r => r.repository.externalId === id));
     const status = membershipComplete && classificationComplete ? "complete" : items.length || membershipComplete || verified || (run?.completedRepositories ?? 0) > 0 ? "partial" : "unavailable";
     const syncState = healthy ? "syncing" : status === "unavailable" ? "unavailable" : status === "partial" ? "partial" : stale ? "stale" : "current";

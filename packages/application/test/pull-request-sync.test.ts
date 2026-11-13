@@ -74,4 +74,10 @@ describe("pull request synchronization chunks", () => {
     f.ports.listRepositories = async () => { throw new PullRequestQueueUnavailableError("provider_unavailable"); };
     await expect(service.reconcileConnectionChunk("scope", "run", "lease")).rejects.toThrow(); expect(f.effects).toHaveLength(1);
   });
+  it("rejects a truncated final inventory page before reconciling removals", async () => {
+    const f = fixture(); f.ports.listRepositories = async () => ({ repositories: [], totalCount: 1, nextPage: null });
+    await expect(createPullRequestSyncService(f.ports).reconcileConnectionChunk("scope", "run", "lease")).rejects.toMatchObject({ reason: "invalid_response" });
+    expect(f.effects).toEqual([]);
+  });
+
 });

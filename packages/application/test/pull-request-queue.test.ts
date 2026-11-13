@@ -81,3 +81,11 @@ it.each(["running", "failed"] as const)("does not identify unscanned repositorie
   expect(result).toMatchObject({ coveredRepositoryIds: ["covered"], unavailableRepositoryIds: [], membershipComplete: false, totalOpen: null, syncProgress: { completedRepositories: 1, totalRepositories: 3 } });
   if (status === "failed") expect(result.refreshError).toBeTruthy();
 });
+
+it("does not report current classification after lifecycle verification fails without an assessment", async () => {
+  const { queuePull, queueReviewState } = await import("../../../test/pull-request-queue-fixtures.js");
+  const pull = queuePull();
+  const scope = { workspaceId: "w", providerConnectionId: "c", externalConnectionId: "99", githubOrganization: "acme", knownRepositories: [{ recordId: "r", repository: pull.repository }] } as any;
+  const service = createPullRequestQueueService({ now: () => new Date("2026-01-01T00:01:00Z"), createSnapshotId: () => "s", resolveScope: async () => scope, assertActive: async () => {}, requestRefresh: async () => {}, workerAvailable: async () => true, readAssessments: async () => new Map(), linksFor: () => ({ provider: "", decision: null }), readProjection: async () => ({ lastVerifiedAt: new Date("2026-01-01T00:00:00Z"), syncRun: { runId: "run", status: "failed" as const, updatedAt: new Date("2026-01-01T00:00:59Z"), membershipComplete: true, classificationComplete: false, verificationError: "classification failed" }, snapshots: [{ snapshot: { pull, reviewState: queueReviewState({ lifecycle: { status: "unavailable", openedSince: null } }), isOpen: true }, desiredGeneration: 1, appliedGeneration: 1 }] }) });
+  expect(await service.read({ workspaceId: scope.workspaceId })).toMatchObject({ classificationComplete: false, status: "partial", syncState: "partial" });
+});

@@ -99,6 +99,7 @@ export function createPullRequestSyncService<L, Scope, RunToken>(ports: PullRequ
       const ids = new Set(state.repositories.map(repo => repo.externalId));
       for (const repo of page.repositories) { if (ids.has(repo.externalId)) throw new PullRequestQueueUnavailableError("invalid_response"); ids.add(repo.externalId); }
       const repositories = [...state.repositories, ...page.repositories];
+      if (page.nextPage === null && repositories.length !== page.totalCount) throw new PullRequestQueueUnavailableError("invalid_response");
       const next: RunCheckpoint = page.nextPage === null ? { stage: "pulls", page: 1, repositories, index: 0 } : { stage: "inventory", page: page.nextPage, totalCount: page.totalCount, repositories };
       await ports.commitRunPage(scope, runId, token, next, { type: "inventory", repositories: page.repositories });
       return { done: false };

@@ -137,6 +137,9 @@ export async function commitQueueSyncPage(
           if (pull.repository.externalId !== repository.externalRepositoryId || !Number.isSafeInteger(pull.number) || pull.number <= 0) throw new Error("invalid queue scan member");
           await trx.insertInto("queue_sync_scan_members").values({ run_id: runId, repository_id: repository.repositoryId, external_repository_id: repository.externalRepositoryId, pull_number: pull.number }).execute();
           await invalidateQueuePullTransaction(trx, { ...scope, ...repository, pullNumber: pull.number });
+          const observedAt = new Date();
+          await trx.updateTable("queue_pull_work").set({ snapshot: JSON.stringify({ pull, isOpen: true, reviewState: { status: "unavailable", reviews: [], observedAt: null, lifecycle: { status: "unavailable", openedSince: null } }, verifiedAt: observedAt }), verified_at: observedAt, snapshot_revision: sql`snapshot_revision + 1` })
+            .where("workspace_id", "=", scope.workspaceId).where("provider_connection_id", "=", scope.providerConnectionId).where("external_installation_id", "=", scope.externalInstallationId).where("repository_id", "=", repository.repositoryId).where("external_repository_id", "=", repository.externalRepositoryId).where("pull_number", "=", pull.number).where("snapshot", "is", null).execute();
         }
       } else if (effect.type === "missing") {
         const selected = await trx.selectFrom("repositories").select("id").where("workspace_id", "=", scope.workspaceId).where("provider_connection_id", "=", scope.providerConnectionId).where("provider", "=", "github").where("external_repository_id", "=", effect.repository.externalId).forUpdate().executeTakeFirst();
@@ -155,6 +158,15 @@ export async function commitQueueSyncPage(
       }
       const run = await runs(trx, scope, runId).forUpdate().executeTakeFirst();
       if (!run || run.selection_revision !== token.selectionRevision || run.status !== "running" || run.revision !== token.revision || !await leaseValid(trx, scope, token.lease, run.dispatch_job_id)) throw new Stale();
+      if (effect.type === "inventory" && typeof checkpoint === "object" && checkpoint !== null && "stage" in checkpoint && checkpoint.stage === "pulls") {
+        await sql`select set_config('triage.queue_scan_materialization', '1', true)`.execute(trx);
+        const removed = await sql`delete from repositories r where r.workspace_id = ${scope.workspaceId} and r.provider_connection_id = ${scope.providerConnectionId} and r.provider = 'github' and not exists (select 1 from queue_sync_scan_members m where m.run_id = ${runId} and m.repository_id = r.id and m.external_repository_id = r.external_repository_id and m.pull_number = 0)`.execute(trx);
+        await sql`select set_config('triage.queue_scan_materialization', '0', true)`.execute(trx);
+        if (Number(removed.numAffectedRows ?? 0) > 0) {
+          const updated = await sql<{ queue_selection_revision: string }>`update provider_connections set queue_selection_revision = queue_selection_revision + 1 where id = ${scope.providerConnectionId} and workspace_id = ${scope.workspaceId} returning queue_selection_revision`.execute(trx);
+          await trx.updateTable("queue_sync_runs").set({ selection_revision: updated.rows[0]!.queue_selection_revision }).where("id", "=", runId).execute();
+        }
+      }
       let membershipComplete = run.membership_complete, classificationComplete = run.classification_complete;
       let verificationError: string | null = null; let verifiedAt: Date | null = null; let accepted = true;
       if (effect.type === "finish") {

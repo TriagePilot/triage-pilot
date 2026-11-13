@@ -112,4 +112,40 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("queue page persistence",
     }
   }));
 
+  it("removes repositories omitted from a completed authoritative inventory", async () => withPostgresTestDatabase(async db => {
+    const w = await db.insertInto("workspaces").values({ external_key: "inventory-removal" }).returning("id").executeTakeFirstOrThrow();
+    const c = await db.insertInto("provider_connections").values({ workspace_id: w.id, provider: "github", external_connection_id: "i", workspace_login: "acme", account_type: "Organization", status: "active", permissions: {} }).returning("id").executeTakeFirstOrThrow();
+    const repo = await db.insertInto("repositories").values({ workspace_id: w.id, provider: "github", provider_connection_id: c.id, external_repository_id: "1", owner: "acme", name: "repo", default_branch: null, config_state: "unknown" }).returning("id").executeTakeFirstOrThrow();
+    const scope = { workspaceId: w.id, providerConnectionId: c.id, externalInstallationId: "i" };
+    await invalidateQueuePull(db, { ...scope, repositoryId: repo.id, externalRepositoryId: "1", pullNumber: 1 });
+    const { queuePull, queueReviewState } = await import("../../../test/pull-request-queue-fixtures.js");
+    await db.updateTable("queue_pull_work").set({ snapshot: JSON.stringify({ pull: queuePull({ repository: ref }), reviewState: queueReviewState(), isOpen: true, verifiedAt: new Date() }), applied_generation: 1 }).where("repository_id", "=", repo.id).execute();
+    const { readQueueProjection } = await import("../src/pull-request-projection");
+    expect((await readQueueProjection(db, scope)).snapshots).toHaveLength(1);
+    const run = await startQueueSyncRun(db, scope), at = new Date();
+    await db.updateTable("jobs").set({ status: "running", locked_by: "worker", locked_at: at, attempt_count: 1 }).where("id", "=", run.jobId).execute();
+    const lease = { jobId: run.jobId, workspaceId: w.id, provider: "github" as const, providerConnectionId: c.id, lockedBy: "worker", lockedAt: at, attemptCount: 1, maxAttempts: 5 };
+    const token = await claimQueueSyncCheckpoint(db, scope, run.runId, lease);
+    expect(await commitQueueSyncPage(db, scope, run.runId, token, { stage: "pulls", repositories: [], index: 0, page: 1 }, { type: "inventory", repositories: [] })).toBe(true);
+    expect(await db.selectFrom("repositories").select("id").where("workspace_id", "=", w.id).execute()).toHaveLength(0);
+    expect((await readQueueProjection(db, scope)).snapshots).toHaveLength(0);
+  }));
+
+  it("exposes discovered metadata while review enrichment is pending", async () => withPostgresTestDatabase(async db => {
+    const { queuePull } = await import("../../../test/pull-request-queue-fixtures.js");
+    const w = await db.insertInto("workspaces").values({ external_key: "early-pull" }).returning("id").executeTakeFirstOrThrow();
+    const c = await db.insertInto("provider_connections").values({ workspace_id: w.id, provider: "github", external_connection_id: "i", workspace_login: "acme", account_type: "Organization", status: "active", permissions: {} }).returning("id").executeTakeFirstOrThrow();
+    const scope = { workspaceId: w.id, providerConnectionId: c.id, externalInstallationId: "i" }, run = await startQueueSyncRun(db, scope), at = new Date();
+    await db.updateTable("jobs").set({ status: "running", locked_by: "worker", locked_at: at, attempt_count: 1 }).where("id", "=", run.jobId).execute();
+    const lease = { jobId: run.jobId, workspaceId: w.id, provider: "github" as const, providerConnectionId: c.id, lockedBy: "worker", lockedAt: at, attemptCount: 1, maxAttempts: 5 };
+    let token = await claimQueueSyncCheckpoint(db, scope, run.runId, lease);
+    await commitQueueSyncPage(db, scope, run.runId, token, { stage: "pulls", repositories: [ref], index: 0, page: 1 }, { type: "inventory", repositories: [ref] });
+    token = await claimQueueSyncCheckpoint(db, scope, run.runId, lease);
+    await commitQueueSyncPage(db, scope, run.runId, token, { stage: "missing", repositories: [ref], index: 0 }, { type: "pulls", repository: ref, pulls: [queuePull({ repository: ref })], complete: true });
+    const { readQueueProjection } = await import("../src/pull-request-projection");
+    const result = await readQueueProjection(db, scope);
+    expect(result.snapshots).toHaveLength(1);
+    expect(result.snapshots[0]).toMatchObject({ snapshot: { isOpen: true, reviewState: { status: "unavailable" } }, desiredGeneration: 1, appliedGeneration: 0 });
+  }));
+
 });
