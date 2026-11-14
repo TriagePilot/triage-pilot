@@ -918,6 +918,10 @@ export function createWorkerReviewerAvailabilityServiceFactory(input: WorkerServ
               if (decision.requiredApprovalCount !== 1 && decision.requiredApprovalCount !== 2) return;
               const current = await policyServices.provider.fetchChangeRequestState(policyMessage);
               if (current.state !== "open" || current.currentHeadRevision !== decision.headRevision) return;
+              const snapshot = await input.db.selectFrom("routing_decisions").select("details")
+                .where("workspace_id", "=", message.workspaceId)
+                .where("id", "=", decision.decisionId).executeTakeFirstOrThrow();
+              const risk = readRoutingCommentRisk(snapshot.details);
               const credentials = await credentialProvider.getCredential({ workspaceId: message.workspaceId,
                 providerConnectionId: message.providerConnectionId });
               const requester = authorizedRequester(await baseRequester({ appId: credentials.appId,
@@ -927,8 +931,14 @@ export function createWorkerReviewerAvailabilityServiceFactory(input: WorkerServ
               await createAdapter(requester).upsertRoutingComment({
                 pullRequest: { owner: decision.repository.owner, repo: decision.repository.name,
                   pullNumber: decision.changeRequestNumber }, decisionId: decision.decisionId,
-                body: manualReviewGuidance({ requiredApprovalCount: decision.requiredApprovalCount,
-                  selectedActors: decision.selectedActors, reason: shortage.reason || "no_replacement_available" }),
+                body: [
+                  formatRoutingComment({ action: decision.action, riskTier: risk?.tier ?? "",
+                    ...(risk ? { risk } : {}) }),
+                  "",
+                  manualReviewGuidance({ requiredApprovalCount: decision.requiredApprovalCount,
+                    selectedActors: decision.selectedActors, reason: shortage.reason || "no_replacement_available",
+                    ...(risk ? { riskTier: risk.tier } : {}) }),
+                ].join("\n"),
               });
             }, input.providerMutationTimeoutMs === undefined
               ? {}
@@ -954,6 +964,26 @@ export function createWorkerReviewerAvailabilityServiceFactory(input: WorkerServ
     };
     return services;
   };
+}
+
+function readRoutingCommentRisk(details: unknown): {
+  tier: string;
+  score: number;
+  classifierVersion: string;
+  components: ScoreComponent[];
+} | undefined {
+  if (typeof details !== "object" || details === null || !("risk" in details)) return undefined;
+  const risk = details.risk;
+  if (typeof risk !== "object" || risk === null
+    || !("tier" in risk) || (risk.tier !== "low" && risk.tier !== "medium" && risk.tier !== "high")
+    || !("score" in risk) || typeof risk.score !== "number" || !Number.isFinite(risk.score)
+    || !("classifierVersion" in risk) || typeof risk.classifierVersion !== "string"
+    || !("components" in risk) || !Array.isArray(risk.components)
+    || !risk.components.every((component): component is ScoreComponent =>
+      typeof component === "object" && component !== null
+      && typeof component.reason === "string" && typeof component.detail === "string"
+      && typeof component.score === "number" && Number.isFinite(component.score))) return undefined;
+  return { tier: risk.tier, score: risk.score, classifierVersion: risk.classifierVersion, components: risk.components };
 }
 
 function formatRoutingComment(input: {

@@ -481,6 +481,9 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker reviewer availabi
       expect(retry.provider.inspectChangeRequest).not.toHaveBeenCalled();
       expect(remote.deleteCount + remote.postCount).toBe(0);
       expect(remote.comments).toHaveLength(1);
+      expect(remote.comments[0]?.body).toContain("TriagePilot decision: request_human_review");
+      expect(remote.comments[0]?.body).toContain("manually request any additional reviews");
+      expect(remote.comments[0]?.body).not.toContain("**Risk score:**");
       expect(await db.selectFrom("reviewer_replacements").select(["state", "outcome"]).executeTakeFirstOrThrow()).toEqual({ state: "completed", outcome: "no_replacement_available" });
       expect(await db.selectFrom("routing_decisions").select("policy_check_state").where("id", "=", fixture.decisionId).executeTakeFirstOrThrow()).toEqual({ policy_check_state: "in_progress" });
     });
@@ -489,7 +492,23 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker reviewer availabi
   it("keeps absence shortages waiting, publishes idempotent guidance, and accepts manual approvals", async () => {
     await withPostgresTestDatabase(async (db) => {
       const fixture = await seedActivation(db, "manual-shortage", [unavailableActor]);
+      const decision = await db.selectFrom("routing_decisions").select("details")
+        .where("id", "=", fixture.decisionId).executeTakeFirstOrThrow();
+      await db.updateTable("routing_decisions").set({ details: {
+        ...decision.details as Record<string, unknown>,
+        risk: { tier: "medium", score: 50, classifierVersion: "risk-v3",
+          components: [{ reason: "high_risk_path:src/**", score: 50, detail: "src/runtime.ts matched src/**" }] },
+      } }).where("id", "=", fixture.decisionId).execute();
       const remote = new ReviewerRemote();
+      const originalAssessment = [
+        "TriagePilot decision: request_human_review", "",
+        "**Risk score:** 50/100 · **Tier:** medium",
+        "**Classifier:** risk-v3", "",
+        "<details>", "<summary>Score breakdown</summary>", "",
+        "- **+50 High-risk path: src/**** — src/runtime.ts matched src/**",
+        "</details>",
+      ].join("\n");
+      remote.comments.push({ id: 17, body: `<!-- triagepilot:decision:${fixture.decisionId} -->\n${originalAssessment}` });
       const first = fixture.buildServices(remote);
       const complete = first.availability.updateReplacementState;
       first.availability.updateReplacementState = vi.fn(async () => { throw new Error("completion interrupted"); });
@@ -499,6 +518,9 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker reviewer availabi
       expect(remote.comments[0]?.body).toContain("manually request any additional reviews");
       expect(remote.comments[0]?.body).toContain("**1 human approval**");
       expect(remote.comments[0]?.body).toContain("No available actor remains in the original ownership-eligible pool.");
+      expect(remote.comments[0]?.id).toBe(17);
+      expect(remote.comments[0]?.body).toContain(originalAssessment);
+      const commentBody = remote.comments[0]?.body;
       expect(remote.deleteCount + remote.postCount).toBe(0);
       await expect(db.selectFrom("routing_decisions").select("policy_check_state").where("id", "=", fixture.decisionId).executeTakeFirstOrThrow()).resolves.toEqual({ policy_check_state: "in_progress" });
       // Replay the finalizer phase after a crash: same comment, no repeated requests.
@@ -507,6 +529,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker reviewer availabi
       await expect(recoverReviewerReplacementFinalizer({ ...recovery!, phase: "run_finalizer" } as never, services)).resolves.toBeNull();
       expect(remote.comments).toHaveLength(1);
       expect(remote.commentWriteCount).toBe(1);
+      expect(remote.comments[0]?.body).toBe(commentBody);
       remote.reviews = [{ user: { login: "manual-reviewer", type: "User" }, state: "APPROVED", submitted_at: now.toISOString() }];
       await services.finalizers.run({ workspaceId: fixture.message.workspaceId, providerConnectionId: fixture.connectionId, decisionId: fixture.decisionId, action: "reevaluate_policy", summary: null });
       await expect(db.selectFrom("routing_decisions").select("policy_check_state").where("id", "=", fixture.decisionId).executeTakeFirstOrThrow()).resolves.toEqual({ policy_check_state: "success" });
