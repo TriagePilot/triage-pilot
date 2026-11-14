@@ -100,3 +100,7 @@ expectTypeOf<ReplacedPersistence["selectionContext"]>()
 expectTypeOf<PrepareReviewerMutationIntentInput["selectionContext"]>()
   .toEqualTypeOf<ReviewerLoadObservation | null | undefined>();
 expectTypeOf<Omit<ReplacedPersistence, "selectionContext">>().toMatchTypeOf<ReplacedPersistence>();
+
+type ShortageRecovery = Extract<ReviewerReplacementFinalizerRecovery, { outcome: "no_replacement_available" }>;
+expectTypeOf<ShortageRecovery["finalizer"]["action"]>().toEqualTypeOf<"reevaluate_policy" | "fail_policy">();
+expectTypeOf<ReplacedRecovery["finalizer"]["action"]>().toEqualTypeOf<"reevaluate_policy">();

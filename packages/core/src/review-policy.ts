@@ -10,7 +10,7 @@ export interface ReviewMetadata {
 export interface HumanReviewPolicyEvaluationInput {
   route: "no_human" | "human_review" | "no_eligible_reviewer";
   selectedReviewers: string[];
-  requiredApprovalCount?: number;
+  requiredApprovalCount: number | undefined;
   reviews: ReviewMetadata[];
 }
 
@@ -30,16 +30,16 @@ export function evaluateHumanReviewPolicy(
       missingReviewers: [],
     };
   }
-  if (input.route === "no_eligible_reviewer") {
+  if (input.requiredApprovalCount !== 1 && input.requiredApprovalCount !== 2) {
     return {
       state: "failure",
-      summary: "No eligible human reviewer is available for this required review.",
+      summary: "Invalid required human approval count; use routing recovery to evaluate this pull request again.",
       missingReviewers: [],
     };
   }
 
   const approvedReviewers = new Set(activeApprovedReviewers(input.reviews).map(normalizeReviewer));
-  const requiredApprovalCount = input.requiredApprovalCount ?? input.selectedReviewers.length;
+  const requiredApprovalCount = input.requiredApprovalCount;
   const missingApprovalCount = Math.max(requiredApprovalCount - approvedReviewers.size, 0);
   const missingReviewers = input.selectedReviewers
     .filter((reviewer) => !approvedReviewers.has(normalizeReviewer(reviewer)))

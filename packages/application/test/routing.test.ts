@@ -647,3 +647,28 @@ describe("branch exclusion safeguards", () => {
     expect(ports.provider.applyActions).not.toHaveBeenCalled();
   });
 });
+
+ it.each(["missing ownership", "unmatched paths", "author exclusion", "absence", "already approved"])("queues policy evaluation for an empty pool from %s", async (reason) => {
+  const ownership = reason === "missing ownership" ? "" : reason === "unmatched paths" ? 'ownership:\n  rules:\n    - paths: ["src/**"]\n      reviewers: ["@someone"]' : 'ownership:\n  fallback_reviewers: ["@user-c91e46"]';
+  const ports = buildPorts(effectiveConfiguration(`version: 1
+mode: enforce
+routing: { high_risk_reviewers: 2 }
+risk:
+  paths:
+    - pattern: README.md
+      weight: 100
+      tag: docs
+${ownership}
+`));
+  if (reason === "absence") {
+    vi.mocked(ports.provider.fetchChangeRequestMetadata).mockResolvedValueOnce({ author: "@another", sourceBranch: "feature/change", targetBranch: "main", currentHeadRevision: "head-sha" });
+    vi.mocked(ports.availability.findActive).mockResolvedValueOnce([{ externalActorId: "user-c91e46", startAt: new Date("2026-08-26"), endAt: new Date("2026-08-28") }]);
+  }
+  if (reason === "already approved") {
+    vi.mocked(ports.provider.fetchChangeRequestMetadata).mockResolvedValueOnce({ author: "@another", sourceBranch: "feature/change", targetBranch: "main", currentHeadRevision: "head-sha" });
+    vi.mocked(ports.provider.fetchCurrentRevisionApprovals).mockResolvedValueOnce(["@user-c91e46"]);
+  }
+  await processChangeRequest(job, ports);
+  expect(ports.provider.applyActions).toHaveBeenCalledWith(expect.objectContaining({ action: "no_eligible_reviewer", requiredApprovalCount: 2, reviewerShortfall: 2 }));
+  expect(ports.enqueueReviewPolicy).toHaveBeenCalledOnce();
+ });

@@ -12,7 +12,7 @@ export type { HumanReviewPolicyState };
 export interface HumanReviewPolicyEvaluationInput {
   route: "no_human" | "human_review" | "no_eligible_reviewer";
   selectedReviewers: string[];
-  requiredApprovalCount?: number;
+  requiredApprovalCount: number | undefined;
   headSha: string;
   reviews: PullRequestReview[];
 }
@@ -23,7 +23,7 @@ export function evaluateHumanReviewPolicy(
   return evaluatePolicy({
     route: input.route,
     selectedReviewers: input.selectedReviewers,
-    ...(input.requiredApprovalCount === undefined ? {} : { requiredApprovalCount: input.requiredApprovalCount }),
+    requiredApprovalCount: input.requiredApprovalCount,
     reviews: input.reviews.map(toReviewMetadata),
   });
 }

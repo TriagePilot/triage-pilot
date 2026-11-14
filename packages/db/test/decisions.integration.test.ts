@@ -417,10 +417,18 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
         mode: "enforce",
         action: "no_eligible_reviewer",
         selectedReviewers: [],
-        requiredApprovalCount: 0,
+        requiredApprovalCount: undefined,
         policyCheckRunId: null,
         policyCheckState: "failure",
       });
+    });
+  });
+
+  it.each([{}, { routing: {} }, { routing: { requestedReviewerCount: 0 } }, { routing: { requestedReviewerCount: 3 } }, { routing: { requestedReviewerCount: "2" } }])("does not infer quota from selected reviewers for malformed evidence %j", async (details) => {
+    await withPostgresTestDatabase(async (db) => {
+      const repositoryId = await seedRepository(db);
+      await persistDecision(db, await ensureLocalWorkspace(db), { repositoryId, deliveryId: "invalid-quota", changeRequestId: "7", pullNumber: 7, headSha: "head-1", mode: "enforce", action: "request_human_review", actionStatus: "succeeded", riskScore: 50, selectedReviewers: ["@one", "@two"], details });
+      expect(await findLatestHumanReviewPolicyDecision(db, await ensureLocalWorkspace(db), { repositoryId, pullNumber: 7 })).toMatchObject({ requiredApprovalCount: undefined });
     });
   });
 

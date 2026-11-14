@@ -313,6 +313,50 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace reviewer avail
   );
 
   it.each([
+    { committed: false, forged: false, legacy: false },
+    { committed: true, forged: false, legacy: false },
+    { committed: false, forged: false, legacy: true },
+    { committed: true, forged: false, legacy: true },
+    { committed: true, forged: true, legacy: false },
+  ])("binds null-intent shortage exhaustion to durable provenance: %j", async ({ committed, forged, legacy }) => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, `shortage-null-intent-${committed}-${forged}-${legacy}`);
+      await db.deleteFrom("reviewer_mutation_intents").where("id", "=", fixture.mutationIntentId).execute();
+      const input = { ...nonMutatingReplacementInput(fixture, "no_replacement_available"), mutationIntentId: null };
+      const persisted = committed ? await fixture.availability.persistReplacement(input) : null;
+      const persistence = JSON.parse(JSON.stringify(input));
+      if (forged) persistence.expectedHeadRevision = "forged-head";
+      const recovery = replacementRecovery(fixture, {
+        phase: "persist_replacement", replacementId: null, outcome: "no_replacement_available", replacementActorId: null,
+        mutationIntentId: null, providerEffectsApplied: false, persistence,
+        finalizer: { action: legacy ? "fail_policy" : "reevaluate_policy", decisionId: fixture.decisionId, summary: legacy ? "No replacement available" : null },
+      });
+      const lease = await claimRecovery(db, fixture, recovery, "shortage-null-intent");
+      await createWorkspaceJobQueue(db, fixture.scope.workspaceId).exhaustReviewerAbsenceActivation(lease, "finalizer exhausted", now);
+      expect(await db.selectFrom("jobs").select("last_error").where("id", "=", lease.jobId).executeTakeFirstOrThrow()).toEqual({ last_error: forged ? "finalizer exhausted: reviewer activation recovery source is invalid" : "finalizer exhausted" });
+      if (persisted?.replacement) {
+        expect(await db.selectFrom("reviewer_replacements").select(["state", "last_error"]).where("id", "=", persisted.replacement.id).executeTakeFirstOrThrow()).toEqual(forged ? { state: "finalizer_pending", last_error: null } : { state: "permanent_failure", last_error: "finalizer exhausted" });
+      } else {
+        expect(await db.selectFrom("reviewer_replacements").select("id").execute()).toEqual([]);
+      }
+    });
+  });
+
+  it.each(["reevaluate_policy", "fail_policy"] as const)("accepts scoped shortage recovery using %s during exhaustion", async (action) => {
+    await withPostgresTestDatabase(async (db) => {
+      const fixture = await seedReplacementFixture(db, `shortage-finalizer-${action}`);
+      const persisted = await fixture.availability.persistReplacement(nonMutatingReplacementInput(fixture, "no_replacement_available"));
+      const recovery = replacementRecovery(fixture, {
+        replacementId: persisted.replacement!.id, outcome: "no_replacement_available", replacementActorId: null, providerEffectsApplied: false,
+        finalizer: { action, decisionId: fixture.decisionId, summary: action === "fail_policy" ? "No replacement is available for an absent required reviewer." : null },
+      });
+      const lease = await claimRecovery(db, fixture, recovery, `shortage-${action}`);
+      await expect(createWorkspaceJobQueue(db, fixture.scope.workspaceId).exhaustReviewerAbsenceActivation(lease, "finalizer exhausted", now)).resolves.toEqual({ updated: true });
+      expect(await db.selectFrom("reviewer_replacements").select(["state", "last_error"]).where("id", "=", persisted.replacement!.id).executeTakeFirstOrThrow()).toEqual({ state: "permanent_failure", last_error: "finalizer exhausted" });
+    });
+  });
+
+  it.each([
     ["phase", { phase: "unknown_phase" }],
     ["finalizer", { finalizer: { action: "fail_policy", decisionId: "will-be-replaced", summary: "bad" } }],
     ["provider effects", { providerEffectsApplied: false }],
