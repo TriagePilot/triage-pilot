@@ -21,6 +21,7 @@ Read `README.md` and `docs/self-hosting/quickstart.md` for the supported self-ho
 - Keep external code and documentation contributions closed unless a separate contributor-rights model is approved later.
 - Preserve shadow mode as the default. Only trusted repository configuration may permit GitHub writes.
 - Add or update tests for behavior changes.
+- Update `CHANGELOG.md` in the same change as each notable user-facing feature, fix, or behavior change. Add a concise entry under `Unreleased` using an appropriate category (such as `Added`, `Changed`, or `Fixed`); do not rewrite released entries. When preparing a release, move the unreleased entries into a dated version section and leave a new `Unreleased` section.
 - Use migrations for schema changes; never mutate an existing released migration.
 - Keep secrets out of source control. Administrator and GitHub App credentials are supplied through environment or mounted-file configuration and are not stored in PostgreSQL.
 
