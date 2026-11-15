@@ -6,6 +6,27 @@ Tagged releases must start from an annotated `vX.Y.Z` tag whose target commit al
 
 Original TriagePilot code is released under `FSL-1.1-Apache-2.0` with the notice `Copyright 2026 Miroslav Babjak`. Each version becomes available under Apache License 2.0 on the second anniversary of the date that version is made available. Public Git commits, package publication, image publication, and release publication can each establish availability; artifact metadata records artifact publication provenance and does not redefine or delay an earlier source-availability date recorded in public Git history. Third-party components keep their own licenses, and required third-party notices must be preserved.
 
+## Publish Version 1.2.0
+
+1. Review and commit the release preparation changes, then merge them into `main` through the normal review process. Confirm `1.2.0` is synchronized in the root manifest, all seven public package manifests and their internal dependency pins, `pnpm-lock.yaml`, the Dockerfile, and the release Compose overlay. The highest migration must be `0016_deferred_pull_request_deliveries.sql`.
+2. Run the automated gate below on the final commit from a clean detached checkout. Record the live test-organization flow separately; if it has not been run, live acceptance remains incomplete. Require successful CI on the exact commit to be tagged.
+3. Confirm GitHub's `public-release` environment has the intended reviewers and tag deployment rules, GitHub Actions can write packages/releases and request OIDC tokens, and npm trusted publishing is configured for each of the seven public packages with this repository, `.github/workflows/release.yml`, and the `public-release` environment. Confirm `1.2.0` is unused in npm and GHCR and `v1.2.0` is unused in GitHub.
+4. After review and explicit release approval, update a clean local checkout and push only the annotated release tag:
+
+   ```bash
+   git switch main
+   git pull --ff-only origin main
+   test -z "$(git status --porcelain)"
+   test "$(node -p 'JSON.parse(require("fs").readFileSync("package.json", "utf8")).version')" = 1.2.0
+   git tag -a v1.2.0 -m "TriagePilot 1.2.0"
+   git push origin refs/tags/v1.2.0
+   ```
+
+   Verify `HEAD` is the reviewed CI-green commit before creating the tag. Pushing it starts the **Public release** workflow; do not create the GitHub release or publish packages/images manually.
+5. Wait for **Build and verify release artifacts** to pass. Review its `public-release-artifacts` bundle, then approve **Publish verified artifacts** in the protected environment. The workflow publishes the verified image and seven npm packages, creates the GitHub release, and attests the bundle.
+6. Confirm both workflow jobs succeeded. Check the GitHub release's manifest and checksums, all seven npm versions, the GHCR digest, and both `linux/amd64` and `linux/arm64` images. Use the manifest's actual commit, migration, digests, and timestamps for the release record. Do not substitute dry-run metadata. On failure, rerun the existing workflow only after resolving the cause; do not move the tag or overwrite immutable artifacts.
+7. For deployment, back up PostgreSQL and configuration first, pin both services to `ghcr.io/triagepilot/triage-pilot:1.2.0@<container.digest>` using the complete `sha256:...` value from the manifest, then follow the [upgrade procedure](upgrades.md), including migration, health, and worker checks. Keep the backup and previous image reference for recovery.
+
 ## Automated Evidence
 
 Run from a clean clone with a disposable PostgreSQL 16 database:
@@ -23,14 +44,17 @@ docker build --tag triagepilot-release-check:production .
 node scripts/verify-production-image.mjs triagepilot-release-check:production
 bash scripts/test-previous-release-upgrade.sh
 pnpm check:public-boundary
+pnpm audit --prod
 pnpm smoke:compose
-gitleaks detect --source . --no-banner
+gitleaks git --no-banner --redact .
 test -f LICENSE -a -f SECURITY.md -a -f CONTRIBUTING.md -a -f CODE_OF_CONDUCT.md
 ```
 
-Record the command outputs and identify the authentication, installation-token, organization/workspace scope, delivery deduplication, routing recovery, reviewer availability and replacement finalizer, status-first connection revocation, shadow and enforce processing, dashboard, and retention tests. Confirm the image verifier reported a non-root compiled runtime without source or development tooling, the migration used an empty database, the previous-release upgrade reached `0011_reviewer_selection_context.sql` and recorded both `0005_reviewer_availability.sql` and `0005_workspace_scope.sql`, the Compose smoke endpoint returned HTTP 200, the secret and public-boundary scans reported no findings, and pull-request CI did not publish an image.
+`pnpm test:integration` runs the complete suite with `TEST_DATABASE_URL` set, including database-gated tests in web and worker runtime files as well as the database package. It intentionally repeats unit tests so newly added database-gated files cannot be omitted from a manually maintained file list.
 
-Use a fresh disposable PostgreSQL server for release evidence; do not point the integration gate at a persistent deployment database. On a constrained local Docker runtime, database-backed Vitest files may exhaust the shared server when run in parallel. In that environment, retain the unconstrained result as diagnostic evidence and rerun the database-backed batch against a fresh disposable server with `--maxWorkers=1 --minWorkers=1`. This is local runner guidance, not permission to replace or weaken the canonical `pnpm test` command in CI or the final release record.
+Record the command outputs and identify the authentication, installation-token, organization/workspace scope, delivery deduplication, routing recovery, reviewer availability and replacement finalizer, status-first connection revocation, shadow and enforce processing, dashboard, and retention tests. Confirm the image verifier reported a non-root compiled runtime without source or development tooling, the migration used an empty database, the previous-release upgrade reached `0016_deferred_pull_request_deliveries.sql` and recorded both `0005_reviewer_availability.sql` and `0005_workspace_scope.sql`, the Compose smoke endpoint returned HTTP 200, the secret and public-boundary scans reported no findings, and pull-request CI did not publish an image.
+
+Use a fresh disposable PostgreSQL server for release evidence; do not point the integration gate at a persistent deployment database. On a constrained local Docker runtime, database-backed Vitest files may exhaust the shared server when run in parallel. In that environment, retain the unconstrained result as diagnostic evidence and rerun the database-backed batch against a fresh disposable server with `--maxWorkers=1`. This is local runner guidance, not permission to replace or weaken the canonical `pnpm test` command in CI or the final release record.
 
 The tag workflow also produces `artifacts/release-manifest.json`, `artifacts/release-notes.md`, `artifacts/container/triagepilot-X.Y.Z.oci.tar`, and `artifacts/checksums.txt`. The manifest is the release contract for consumers and must contain:
 
@@ -56,7 +80,7 @@ Before tagging, run the automated gate from a clean detached checkout: frozen in
 
 After review and explicit approval, the protected tag workflow is authoritative. It takes the tag target as `gitCommit`, synchronizes `version` with the tag, chooses `publishedAt` once, derives the future-license timestamp, identifies the highest shipped public migration, and produces `release-manifest.json`, release notes, OCI archive, and checksums. Record the resulting version, commit, migration, package SHA-256 values, OCI digest, license identifier, and timestamps from those workflow outputs; their byte-level annotations and checksums must agree.
 
-For the current candidate, the expected highest migration is `0011_reviewer_selection_context.sql`. The manifest generator also checks that both historical `0005` filenames are present before it writes evidence. Pass the same `0011` filename to manifest creation, artifact verification, publication verification, and the protected workflow; a stale value must fail before publication.
+For the current candidate, the expected highest migration is `0016_deferred_pull_request_deliveries.sql`. The manifest generator also checks that both historical `0005` filenames are present before it writes evidence. Pass the same `0016` filename to manifest creation, artifact verification, publication verification, and the protected workflow; a stale value must fail before publication.
 
 The exact parallel `pnpm test` gate packages in a disposable source workspace, so it does not mutate root `dist` entries used by concurrent suites. Do not tag until the clean-checkout gate passes, review is complete, and explicit release approval is granted.
 

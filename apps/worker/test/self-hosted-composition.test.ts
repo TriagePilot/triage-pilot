@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildRoutingKey } from "@triagepilot/contracts";
-import { createWorkspaceReviewerAvailability, persistDecision, runMigrations } from "@triagepilot/db";
+import { createWorkspaceJobQueue, createWorkspaceReviewerAvailability, persistDecision, runMigrations } from "@triagepilot/db";
 
 import { createSelfHostedWorkerComposition } from "../src/composition/self-hosted";
 import { processRoutingJob } from "../src/processor";
@@ -154,7 +154,11 @@ ownership:
         if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") return { data: [] };
         return base(route);
       });
-      const composition = await createSelfHostedWorkerComposition(workerEnv(databaseUrl), { createRequester: async () => ({ request: requester }) });
+      let now = new Date();
+      const composition = await createSelfHostedWorkerComposition(workerEnv(databaseUrl), {
+        createRequester: async () => ({ request: requester }),
+        clock: { now: () => now },
+      });
       try {
         const { providerConnectionId } = await insertKnownRepository(composition);
         const repository = await composition.db.selectFrom("repositories").select("id").executeTakeFirstOrThrow();
@@ -165,6 +169,10 @@ ownership:
           headSha: "previous-head", mode: "shadow", action: "request_human_review", actionStatus: "not_applied", riskScore: 90,
           details: { ownership: { eligibleReviewers: ["@busy", "@idle"] } },
         });
+        // Include the seeded records even when the database clock leads the host.
+        const latest = await composition.db.selectFrom("routing_decisions").select("created_at")
+          .orderBy("created_at", "desc").executeTakeFirstOrThrow();
+        now = new Date(latest.created_at.getTime() + 1);
         const job = routingJob(composition.workspaceId, providerConnectionId);
         await processRoutingJob(job, composition.buildRoutingServices(job));
         const decision = await composition.db.selectFrom("routing_decisions").selectAll().where("routing_key", "=", job.routingKey).executeTakeFirstOrThrow();
@@ -185,9 +193,23 @@ ownership:
       try {
         const { providerConnectionId } = await insertKnownRepository(composition);
         const job = routingJob(composition.workspaceId, providerConnectionId);
+        await createWorkspaceJobQueue(composition.db, composition.workspaceId).enqueue({
+          provider: "github",
+          providerConnectionId,
+          externalInstallationId: "99",
+          externalRepositoryId: "101",
+          kind: "process_pull_request",
+          payload: job,
+          idempotencyKey: job.routingKey,
+        });
         await processRoutingJob(job, composition.buildRoutingServices(job));
         await composition.db.updateTable("routing_decisions").set({ mode: "enforce", action_status: "succeeded" }).where("routing_key", "=", job.routingKey).execute();
         const before = await composition.db.selectFrom("routing_decisions").selectAll().executeTakeFirstOrThrow();
+        expect(before).toMatchObject({
+          origin_provider_connection_id: providerConnectionId,
+          origin_external_installation_id: "99",
+          origin_external_repository_id: "101",
+        });
         requester.mockClear();
         await processRoutingJob(job, composition.buildRoutingServices(job));
         expect(requester).not.toHaveBeenCalled();

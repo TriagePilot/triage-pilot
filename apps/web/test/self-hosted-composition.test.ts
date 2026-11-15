@@ -182,30 +182,40 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("self-hosted web composit
       const app = createWebApp(composition.services);
       const body = pullRequestBody({ owner: "AcMe", repo: "api" });
 
-      const response = await app.request("/webhooks/github", {
-        method: "POST",
-        headers: signedHeaders(body),
-        body,
-      });
+      try {
+        await composition.localRepositories.replaceProviderConnectionRepositories({
+          provider: "github",
+          externalConnectionId: "99",
+          workspaceLogin: "acme",
+          accountType: "Organization",
+          repositories: [{ provider: "github", externalRepositoryId: "101", owner: "AcMe", name: "api" }],
+        });
+        const response = await app.request("/webhooks/github", {
+          method: "POST",
+          headers: signedHeaders(body),
+          body,
+        });
 
-      expect(response.status).toBe(202);
-      const job = await composition.db.selectFrom("jobs").select(["workspace_id", "provider", "payload"]).executeTakeFirstOrThrow();
-      expect(job.workspace_id).toBe(composition.workspaceId);
-      expect(job.provider).toBe("github");
-      expect(job.payload).toMatchObject({
-        kind: "process_change_request",
-        workspaceId: composition.workspaceId,
-        changeRequest: {
-          repository: { provider: "github", externalId: "101", owner: "AcMe", name: "api" },
-          externalId: "7",
-          number: 7,
-          baseRevision: "trusted-base-123",
-          headRevision: "head-456",
-        },
-      });
-      expect(JSON.stringify(job.payload)).not.toContain("pull_request");
-
-      await composition.close();
+        expect(response.status).toBe(202);
+        const job = await composition.db.selectFrom("jobs").select(["workspace_id", "provider", "payload"])
+          .where("kind", "=", "process_pull_request").executeTakeFirstOrThrow();
+        expect(job.workspace_id).toBe(composition.workspaceId);
+        expect(job.provider).toBe("github");
+        expect(job.payload).toMatchObject({
+          kind: "process_change_request",
+          workspaceId: composition.workspaceId,
+          changeRequest: {
+            repository: { provider: "github", externalId: "101", owner: "AcMe", name: "api" },
+            externalId: "7",
+            number: 7,
+            baseRevision: "trusted-base-123",
+            headRevision: "head-456",
+          },
+        });
+        expect(JSON.stringify(job.payload)).not.toContain("pull_request");
+      } finally {
+        await composition.close();
+      }
     });
   });
 

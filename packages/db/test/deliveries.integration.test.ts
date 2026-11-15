@@ -13,7 +13,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("delivery ingestion", () 
     const delivery = kind === "routing" ? { ...deliveryInput(), invalidation, routingPayload: deliveryInput().payload } : { ...humanReviewPolicyDeliveryInput(), invalidation, policyPayload: humanReviewPolicyDeliveryInput().payload };
     expect(await repositories.acceptPullRequestDelivery(delivery)).toEqual({ inserted: false, routingJobId: null, policyJobId: null, deferred: true });
     await expectCounts(db, { repositories: 0, webhook_receipts: 0, jobs: 1 });
-    expect(await createJobClaimer(db).claimNext("worker", new Date())).toBeNull();
+    expect(await createJobClaimer(db).claimNext("worker", await databaseNow(db))).toBeNull();
     await repositories.updateProviderConnectionRepositories({ ...connection("99", "acme"), repositoriesAdded: [repository("101", "api")], repositoryIdsRemoved: [] });
     expect(await replayOne(db)).toBe(true);
     expect(await repositories.acceptPullRequestDelivery(delivery)).toMatchObject({ inserted: false });
@@ -133,7 +133,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("delivery ingestion", () 
     expect(await db.selectFrom("webhook_receipts").selectAll().execute()).toHaveLength(0);
     expect(await replayOne(db)).toBe(true);
     expect(await db.selectFrom("deferred_pull_request_deliveries").selectAll().execute()).toHaveLength(1);
-    const routing = await createJobClaimer(db).claimNext("worker", new Date());
+    const routing = await createJobClaimer(db).claimNext("worker", await databaseNow(db));
     expect(routing?.kind).toBe("process_pull_request");
     expect(await replayOne(db)).toBe(true);
     expect(await db.selectFrom("deferred_pull_request_deliveries").selectAll().execute()).toHaveLength(0);
@@ -613,8 +613,15 @@ async function expectCounts(
 }
 
 async function replayOne(db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0]) {
-  const job = await createJobClaimer(db).claimNext("worker", new Date());
+  const job = await createJobClaimer(db).claimNext("worker", await databaseNow(db));
   if (!job || !job.lockedAt || !job.lockedBy) throw new Error("no deferred job claimed");
   expect(job.kind).toBe("replay_deferred_delivery");
   return replayDeferredPullRequestDelivery(db, { jobId: job.id, workspaceId: job.workspaceId, provider: job.provider, providerConnectionId: job.providerConnectionId, lockedAt: job.lockedAt, lockedBy: job.lockedBy, attemptCount: job.attemptCount, maxAttempts: job.maxAttempts });
+}
+
+async function databaseNow(db: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0]): Promise<Date> {
+  // Job defaults use PostgreSQL's clock, which may lead the host clock. Round up
+  // one millisecond because the driver truncates PostgreSQL's microseconds.
+  const result = await sql<{ now: Date }>`select clock_timestamp() + interval '1 millisecond' as now`.execute(db);
+  return result.rows[0]!.now;
 }
