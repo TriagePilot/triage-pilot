@@ -340,6 +340,7 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
           const evaluation = evaluateHumanReviewPolicy({
             route,
             selectedReviewers: action.selectedActors,
+            requiredApprovalCount: action.requiredApprovalCount,
             reviews: [],
           });
           const checkRun = { owner: repository.owner, repo: repository.name, headSha: action.expectedHeadRevision };
@@ -369,7 +370,14 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
               await adapter.upsertRoutingComment({
                 pullRequest,
                 decisionId: action.decisionId,
-                body: formatRoutingComment({ action: action.action, riskTier: action.risk.tier, risk: action.risk }),
+                body: formatRoutingComment({ action: action.action, riskTier: action.risk.tier, risk: action.risk,
+                  ...(action.reviewerShortfall > 0 ? { guidance: manualReviewGuidance({
+                    requiredApprovalCount: action.requiredApprovalCount,
+                    selectedActors: action.selectedActors,
+                    riskTier: action.risk.tier,
+                    reason: action.noHumanReason,
+                  }) } : {}),
+                }),
               });
             }
             if (route === "human_review" && action.actorsToRequest.length > 0) {
@@ -584,6 +592,7 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
         decisionId: string;
         riskTier: "low" | "medium" | "high";
         risk?: Omit<RiskScoringResult, "tier"> & Partial<Pick<RiskScoringResult, "tier">>;
+        requiredApprovalCount: number;
         selectedReviewers?: string[];
         reviewersToRequest?: string[];
         noHumanReason?: string;
@@ -603,6 +612,8 @@ export function createWorkerRoutingServiceFactory(input: WorkerServiceFactoryInp
             tier: action.riskTier,
             components: action.risk?.components ?? [],
           },
+          requiredApprovalCount: action.requiredApprovalCount,
+          reviewerShortfall: Math.max(action.requiredApprovalCount - (action.selectedReviewers?.length ?? 0), 0),
           selectedActors: action.selectedReviewers ?? [],
           actorsToRequest: action.reviewersToRequest ?? action.selectedReviewers ?? [],
           ...(action.noHumanReason === undefined ? {} : { noHumanReason: action.noHumanReason }),
@@ -885,14 +896,50 @@ export function createWorkerReviewerAvailabilityServiceFactory(input: WorkerServ
                   authority,
                 ),
               })(policyMessage);
-              if (finalizer.action === "reevaluate_policy") {
-                await processHumanReviewPolicyJob(policyMessage, policyServices);
-                return;
+              if (finalizer.action !== "reevaluate_policy") {
+                throw new PermanentJobError("legacy shortage finalizer must be validated and normalized before execution");
               }
-              if (!policyServices.failPolicyCheck || finalizer.summary === null) {
-                throw new PermanentJobError("reviewer replacement policy failure finalizer is not configured");
-              }
-              await policyServices.failPolicyCheck(finalizer.summary, finalizer.decisionId);
+              await processHumanReviewPolicyJob(policyMessage, policyServices);
+              const shortage = await input.db.selectFrom("reviewer_replacements").select(["id", "reason"])
+                .where("workspace_id", "=", message.workspaceId)
+                .where("provider", "=", message.provider)
+                .where("provider_connection_id", "=", message.providerConnectionId)
+                .where("absence_id", "=", message.absenceId)
+                .where("absence_revision", "=", message.absenceRevision)
+                .where("decision_id", "=", finalizer.decisionId)
+                .where("outcome", "=", "no_replacement_available")
+                .executeTakeFirst();
+              if (shortage === undefined) return;
+              const decision = await policyServices.decisions.findLatest({ workspaceId: message.workspaceId,
+                repository: policyMessage.changeRequest.repository, changeRequestId: policyMessage.changeRequest.externalId,
+                changeRequestNumber: policyMessage.changeRequest.number });
+              if (decision === null || decision.decisionId !== finalizer.decisionId || decision.mode !== "enforce"
+                || decision.policyCheckState !== "in_progress") return;
+              if (decision.requiredApprovalCount !== 1 && decision.requiredApprovalCount !== 2) return;
+              const current = await policyServices.provider.fetchChangeRequestState(policyMessage);
+              if (current.state !== "open" || current.currentHeadRevision !== decision.headRevision) return;
+              const snapshot = await input.db.selectFrom("routing_decisions").select("details")
+                .where("workspace_id", "=", message.workspaceId)
+                .where("id", "=", decision.decisionId).executeTakeFirstOrThrow();
+              const risk = readRoutingCommentRisk(snapshot.details);
+              const credentials = await credentialProvider.getCredential({ workspaceId: message.workspaceId,
+                providerConnectionId: message.providerConnectionId });
+              const requester = authorizedRequester(await baseRequester({ appId: credentials.appId,
+                privateKey: credentials.privateKey,
+                installationId: toSafeInteger((await findKnownRepository(input.db, policyMessage)).externalConnectionId),
+              }), authority);
+              await createAdapter(requester).upsertRoutingComment({
+                pullRequest: { owner: decision.repository.owner, repo: decision.repository.name,
+                  pullNumber: decision.changeRequestNumber }, decisionId: decision.decisionId,
+                body: [
+                  formatRoutingComment({ action: decision.action, riskTier: risk?.tier ?? "",
+                    ...(risk ? { risk } : {}) }),
+                  "",
+                  manualReviewGuidance({ requiredApprovalCount: decision.requiredApprovalCount,
+                    selectedActors: decision.selectedActors, reason: shortage.reason || "no_replacement_available",
+                    ...(risk ? { riskTier: risk.tier } : {}) }),
+                ].join("\n"),
+              });
             }, input.providerMutationTimeoutMs === undefined
               ? {}
               : { timeoutMs: input.providerMutationTimeoutMs });
@@ -919,9 +966,30 @@ export function createWorkerReviewerAvailabilityServiceFactory(input: WorkerServ
   };
 }
 
+function readRoutingCommentRisk(details: unknown): {
+  tier: string;
+  score: number;
+  classifierVersion: string;
+  components: ScoreComponent[];
+} | undefined {
+  if (typeof details !== "object" || details === null || !("risk" in details)) return undefined;
+  const risk = details.risk;
+  if (typeof risk !== "object" || risk === null
+    || !("tier" in risk) || (risk.tier !== "low" && risk.tier !== "medium" && risk.tier !== "high")
+    || !("score" in risk) || typeof risk.score !== "number" || !Number.isFinite(risk.score)
+    || !("classifierVersion" in risk) || typeof risk.classifierVersion !== "string"
+    || !("components" in risk) || !Array.isArray(risk.components)
+    || !risk.components.every((component): component is ScoreComponent =>
+      typeof component === "object" && component !== null
+      && typeof component.reason === "string" && typeof component.detail === "string"
+      && typeof component.score === "number" && Number.isFinite(component.score))) return undefined;
+  return { tier: risk.tier, score: risk.score, classifierVersion: risk.classifierVersion, components: risk.components };
+}
+
 function formatRoutingComment(input: {
   action: string;
   riskTier: string;
+  guidance?: string;
   risk?: {
     score: number;
     classifierVersion: string;
@@ -936,6 +1004,7 @@ function formatRoutingComment(input: {
 
   return [
     `TriagePilot decision: ${input.action}`,
+    ...(input.guidance ? ["", input.guidance] : []),
     "",
     `**Risk score:** ${input.risk.score}/100 · **Tier:** ${input.riskTier}`,
     `**Classifier:** ${input.risk.classifierVersion}`,
@@ -946,6 +1015,24 @@ function formatRoutingComment(input: {
     components || "No score components were recorded.",
     "</details>",
   ].join("\n");
+}
+
+function manualReviewGuidance(input: {
+  requiredApprovalCount: number;
+  selectedActors: string[];
+  riskTier?: string;
+  reason?: string | undefined;
+}): string {
+  const reason = input.reason === "no_replacement_available"
+    ? "No replacement is available for an absent required reviewer."
+    : input.reason && input.reason !== "no_eligible_reviewer"
+      ? input.reason
+      : input.selectedActors.length === 0
+        ? "TriagePilot couldn’t automatically select reviewers because no configured reviewer is currently eligible."
+        : "TriagePilot couldn’t automatically select enough eligible reviewers.";
+  const selected = input.selectedActors.length > 0
+    ? ` Automatically selected reviewers: ${input.selectedActors.join(", ")}.` : "";
+  return `${reason}\n\nThis ${input.riskTier ? `${input.riskTier}-risk ` : ""}PR requires **${input.requiredApprovalCount} human approval${input.requiredApprovalCount === 1 ? "" : "s"}**.${selected} Please manually request ${input.selectedActors.length > 0 ? "any additional " : ""}reviews from suitable reviewers in GitHub. TriagePilot will update the required check automatically when enough approvals are received.`;
 }
 
 function formatComponentScore(component: ScoreComponent): string {
@@ -1090,6 +1177,9 @@ export function createWorkerHumanReviewPolicyServiceFactory(input: WorkerService
             throw new PermanentJobError("human-review policy check is already failed");
           }
           if (existing?.state === "in_progress") {
+            await adapter.updateHumanReviewPolicyCheck({
+              checkRun, checkRunId: existing.checkRunId, state: "in_progress", summary: check.summary,
+            });
             if (
               existing.checkRunId !== check.decision.policyCheckRunId ||
               check.decision.policyCheckState !== "in_progress"

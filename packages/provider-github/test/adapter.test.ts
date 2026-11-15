@@ -740,10 +740,17 @@ describe("GitHubAdapter", () => {
     });
   });
 
-  it("accepts only terminal states when updating a human-review policy check", () => {
+  it("accepts waiting and terminal states when updating a human-review policy check", () => {
     type UpdateInput = Parameters<GitHubAdapter["updateHumanReviewPolicyCheck"]>[0];
 
-    expectTypeOf<UpdateInput["state"]>().toEqualTypeOf<"success" | "failure">();
+    expectTypeOf<UpdateInput["state"]>().toEqualTypeOf<"in_progress" | "success" | "failure">();
+  });
+
+  it("updates waiting output without completing the check", async () => {
+    const request = vi.fn(async () => ({ data: {} }));
+    await new GitHubAdapter({ request } as never).updateHumanReviewPolicyCheck({ checkRun: { owner: "acme", repo: "app", headSha: "head-1" }, checkRunId: "71", state: "in_progress", summary: "Waiting for 1 more human approval." });
+    expect(request).toHaveBeenCalledWith("PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}", expect.objectContaining({ status: "in_progress", output: expect.objectContaining({ summary: "Waiting for 1 more human approval." }) }));
+    expect(request.mock.calls[0]?.[1]).not.toHaveProperty("conclusion");
   });
 
   it.each(["success", "failure"] as const)("completes a human-review policy check with %s", async (state) => {

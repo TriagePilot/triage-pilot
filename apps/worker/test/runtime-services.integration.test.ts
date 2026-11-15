@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { withPostgresTestDatabase } from "../../../packages/db/test/postgres";
-import { createWorkspaceReviewerAvailability, ensureLocalWorkspace, readOperationsOverview } from "@triagepilot/db";
+import { createWorkspaceReviewerAvailability, ensureLocalWorkspace, persistDecision, recordPolicyCheck, readOperationsOverview } from "@triagepilot/db";
 import {
   createWorkerHumanReviewPolicyServiceFactory,
   createWorkerRoutingServiceFactory,
 } from "../src/runtime-services";
+import { processHumanReviewPolicyJob } from "../src/review-policy-processor";
 import { resolveAnalyticsScope } from "../../../packages/db/src/reviewer-backlog";
 import { readAnalyticsFacts } from "../../../packages/db/src/analytics";
 import { processRoutingJob, type RoutingJobMessage } from "../src/processor";
@@ -282,7 +283,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
           actionStatus: "pending",
           riskScore: 5,
           selectedActors: ["@user-d82a5f"],
-          details: { pullNumber: 7 },
+          details: { pullNumber: 7, routing: { requestedReviewerCount: 1 } },
           organizationConfigVersion: null,
           repositoryConfigPath: null,
           repositoryConfigRevision: null,
@@ -312,6 +313,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
       const failedAt = new Date("2026-08-18T12:03:00.000Z");
       await services.decisions.markActionFailed(decision.decisionId, "GitHub denied the action", failedAt);
       await services.applyDecisionActions({
+        requiredApprovalCount: 1,
         action: "request_human_review",
         decisionId: decision.decisionId,
         expectedHeadSha: "abc123",
@@ -376,7 +378,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
         action_status: "failed",
         action_error: "GitHub denied the action",
         action_failed_at: failedAt,
-        details: { pullNumber: 7 },
+        details: { pullNumber: 7, routing: { requestedReviewerCount: 1 } },
         pull_number: 7,
         head_sha: "abc123",
         policy_check_run_id: "71",
@@ -385,6 +387,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("worker routing runtime s
       routingRequest.mockClear();
       await db.updateTable("provider_connections").set({ status: "suspended" }).where("id", "=", connection.id).execute();
       await expect(services.applyDecisionActions({
+        requiredApprovalCount: 1,
         action: "request_human_review", decisionId: decision.decisionId, expectedHeadSha: "abc123", riskTier: "medium", selectedReviewers: ["@user-d82a5f"], reviewersToRequest: ["@user-d82a5f"],
       })).rejects.toThrow("not known");
       expect(routingRequest).not.toHaveBeenCalled();
@@ -639,5 +642,76 @@ it.runIf(Boolean(process.env.TEST_DATABASE_URL)).each([
     expect(next.deliveryId).not.toBe(reroute.deliveryId);
     await processRoutingJob(next, factory(next));
     expect(await db.selectFrom("routing_decisions").select("action_status").where("routing_key", "=", next.routingKey).executeTakeFirstOrThrow()).toEqual({ action_status: "succeeded" });
+  });
+});
+
+it.runIf(Boolean(process.env.TEST_DATABASE_URL)).each([
+  { quota: 1, pool: [], approvals: [], mode: "enforce" },
+  { quota: 2, pool: [], approvals: [], mode: "enforce" },
+  { quota: 2, pool: ["@selected"], approvals: [], mode: "enforce" },
+  { quota: 2, pool: ["@manual-one", "@manual-two"], approvals: ["manual-one", "manual-two"], mode: "enforce" },
+  { quota: 2, pool: [], approvals: [], mode: "shadow" },
+] as const)("evaluates shortage quota $quota with $pool and existing approvals $approvals in $mode", async ({ quota, pool, approvals, mode }) => {
+  await withPostgresTestDatabase(async (db) => {
+    const workspaceId = await ensureLocalWorkspace(db);
+    const connection = await db.insertInto("provider_connections").values({ workspace_id: workspaceId, provider: "github", external_connection_id: "99", workspace_login: "acme", account_type: "Organization", status: "active", permissions: {} }).returning("id").executeTakeFirstOrThrow();
+    const repository = await db.insertInto("repositories").values({ workspace_id: workspaceId, provider: "github", provider_connection_id: connection.id, external_repository_id: "101", owner: "acme", name: "api", default_branch: "main", config_state: "valid" }).returning("id").executeTakeFirstOrThrow();
+    const historical = await persistDecision(db, workspaceId, { repositoryId: repository.id, deliveryId: "historical", routingKey: "historical", changeRequestId: "7", pullNumber: 7, headSha: "abc123", mode: "enforce", action: "no_eligible_reviewer", actionStatus: "succeeded", riskScore: 100, details: { routing: { requestedReviewerCount: quota } } });
+    await recordPolicyCheck(db, workspaceId, { decisionId: historical.decisionId, checkRunId: "70", state: "failure" });
+    await db.updateTable("routing_decisions").set({ created_at: new Date("2026-01-01") }).where("id", "=", historical.decisionId).execute();
+    const scopedMessage = { ...message, workspaceId, providerConnectionId: connection.id, deliveryId: "operator-recovery", routingKey: "operator-recovery:same-head" };
+    let activeApprovals: string[] = [...approvals];
+    const checks: Record<string, unknown>[] = [];
+    const comments: { id: number; body: string }[] = [];
+    const request = vi.fn(async (route: string, params: Record<string, unknown>) => {
+      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}") return { data: { state: "open", draft: false, head: { sha: "abc123", ref: "feature" }, base: { sha: "base-123", ref: "main" }, user: { login: "author" } } };
+      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/files") return { data: [{ filename: "src/change.ts", additions: 1, deletions: 0 }] };
+      if (route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews") return { data: activeApprovals.map(login => ({ user: { login, type: "User" }, state: "APPROVED", submitted_at: "2026-11-13T10:00:00Z" })) };
+      if (route === "GET /repos/{owner}/{repo}/commits/{ref}/check-runs") return { data: { check_runs: checks } };
+      if (route === "GET /repos/{owner}/{repo}/issues/{issue_number}/comments") return { data: comments };
+      if (route === "GET /repos/{owner}/{repo}/issues/{issue_number}/labels" || route === "GET /repos/{owner}/{repo}/pulls/{pull_number}/commits") return { data: [] };
+      if (route === "POST /repos/{owner}/{repo}/check-runs") {
+        const id = checks.length + 71;
+        checks.push({ ...params, id, app: { id: 123 } });
+        return { data: { id } };
+      }
+      if (route === "PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}") {
+        Object.assign(checks.find(check => String(check.id) === String(params.check_run_id))!, params);
+        return { data: {} };
+      }
+      if (route === "POST /repos/{owner}/{repo}/issues/{issue_number}/comments") comments.push({ id: 1, body: String(params.body) });
+      if (route.startsWith("POST ")) return { data: {} };
+      throw new Error(`unexpected route ${route}`);
+    });
+    const input = { db, github: { appId: "123", privateKey: "test-key" }, createRequester: async () => ({ request }) };
+    const services = createWorkerRoutingServiceFactory({ ...input, createConfigurationSource: () => ({
+      async loadOrganization() { return null; },
+      async loadRepository() { return { content: `mode: ${mode}\nrouting: { high_risk_reviewers: ${quota} }\nrisk:\n  paths: [{ pattern: "src/**", weight: ${quota === 1 ? 30 : 100}, tag: code }]\nownership:\n  fallback_reviewers: ${JSON.stringify(pool)}\n`, path: ".triagepilot.yml", revision: "base-123" }; },
+    }) })(scopedMessage);
+    await processRoutingJob(scopedMessage, services);
+    const latest = await db.selectFrom("routing_decisions").selectAll().where("id", "!=", historical.decisionId).executeTakeFirstOrThrow();
+    expect(latest.details).toMatchObject({ routing: { requestedReviewerCount: quota, reviewerShortfall: quota - (approvals.length ? 0 : pool.length) } });
+    expect(latest.action).toBe(pool.length && !approvals.length ? "request_human_review" : "no_eligible_reviewer");
+    if (mode === "shadow") {
+      expect(request.mock.calls.every(([route]) => route.startsWith("GET "))).toBe(true);
+      expect(await db.selectFrom("jobs").select("id").execute()).toEqual([]);
+      return;
+    }
+    expect(comments).toHaveLength(1);
+    expect(comments[0]!.body).toContain(`**${quota} human approval`);
+    const queued = await db.selectFrom("jobs").select("payload").where("kind", "=", "evaluate_human_review_policy").executeTakeFirstOrThrow();
+    const policy = queued.payload as Parameters<typeof processHumanReviewPolicyJob>[0];
+    await processHumanReviewPolicyJob(policy, createWorkerHumanReviewPolicyServiceFactory(input)(policy));
+    const currentCheck = () => checks.find(check => check.name === "triagepilot/human-review-policy")!;
+    expect(currentCheck()).toMatchObject(approvals.length ? { status: "completed", conclusion: "success" } : { status: "in_progress" });
+    if (!approvals.length) {
+      activeApprovals = ["manual-one"];
+      await processHumanReviewPolicyJob(policy, createWorkerHumanReviewPolicyServiceFactory(input)(policy));
+      expect(currentCheck()).toMatchObject(quota === 1 ? { conclusion: "success" } : { status: "in_progress", output: { summary: "Waiting for 1 more human approval." } });
+      activeApprovals = ["manual-one", "manual-two"];
+      await processHumanReviewPolicyJob(policy, createWorkerHumanReviewPolicyServiceFactory(input)(policy));
+    }
+    expect(currentCheck()).toMatchObject({ status: "completed", conclusion: "success", external_id: latest.id });
+    expect(await db.selectFrom("routing_decisions").select(["policy_check_state", "policy_check_run_id"]).where("id", "=", historical.decisionId).executeTakeFirstOrThrow()).toEqual({ policy_check_state: "failure", policy_check_run_id: "70" });
   });
 });

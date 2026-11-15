@@ -88,7 +88,7 @@ export async function evaluateReviewPolicy(
   const evaluation = evaluateHumanReviewPolicy({
     route,
     selectedReviewers: decision.selectedActors,
-    ...(decision.requiredApprovalCount === undefined ? {} : { requiredApprovalCount: decision.requiredApprovalCount }),
+    requiredApprovalCount: decision.requiredApprovalCount,
     reviews: await ports.provider.fetchReviews(job),
   });
   if (evaluation.state === "success") {

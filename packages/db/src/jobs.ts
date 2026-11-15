@@ -3,6 +3,7 @@ import { isReviewerLoadObservation } from "@triagepilot/contracts";
 import { sql, type Kysely, type Transaction } from "kysely";
 import type { ProviderConnectionId, ProviderKind, WorkspaceId } from "@triagepilot/contracts";
 
+import { parseOriginalReviewerPool, parseStrictActorList } from "./decisions.js";
 import type { Database, JobRow } from "./kysely.js";
 import {
   persistMutationIntentRecoveryTransaction,
@@ -499,15 +500,16 @@ function isValidRecoveryShape(
   const outcome = value.outcome;
   const expectedEffect = outcome === "replaced" || outcome === "permanent_failure";
   if (value.providerEffectsApplied !== expectedEffect) return false;
-  const expectedAction = outcome === "replaced" || outcome === "skipped_policy_satisfied"
-    ? "reevaluate_policy" : outcome === "no_replacement_available" ? "fail_policy" : null;
+  const expectedAction = outcome === "permanent_failure" ? null : "reevaluate_policy";
+  const legacyShortage = outcome === "no_replacement_available" && isRecord(value.finalizer)
+    && value.finalizer.action === "fail_policy";
   if (expectedAction === null) {
     if (value.finalizer !== null) return false;
-  } else if (!isRecord(value.finalizer) || value.finalizer.action !== expectedAction
+  } else if (!isRecord(value.finalizer) || (value.finalizer.action !== expectedAction && !legacyShortage)
     || !hasOnlyKeys(value.finalizer, ["action", "decisionId", "summary"])
     || !isUuid(value.finalizer.decisionId)
-    || (expectedAction === "reevaluate_policy" && value.finalizer.summary !== null)
-    || (expectedAction === "fail_policy" && !isNonBlank(value.finalizer.summary))) return false;
+    || (!legacyShortage && value.finalizer.summary !== null)
+    || (legacyShortage && !isNonBlank(value.finalizer.summary))) return false;
   if (value.phase === "persist_replacement") {
     if (value.replacementId !== null || !isRecord(value.persistence)) return false;
   } else if (!isUuid(value.replacementId) || value.persistence !== null) return false;
@@ -593,6 +595,9 @@ async function recoverySourceMatches(
     || raw.job.absenceId !== scope.absenceId
     || raw.job.absenceRevision !== scope.absenceRevision) return false;
   if (raw.replacementId === null) {
+    if (raw.mutationIntentId === null) {
+      return nonMutatingPersistenceSourceMatches(trx, job, scope, raw);
+    }
     if (!isUuid(raw.mutationIntentId)) return false;
     const intent = await trx.selectFrom("reviewer_mutation_intents").selectAll()
       .where("id", "=", raw.mutationIntentId)
@@ -636,6 +641,67 @@ async function recoverySourceMatches(
     && row.outcome === raw.outcome
     && row.replacement_actor_id === raw.replacementActorId
     && row.mutation_intent_id === raw.mutationIntentId;
+}
+
+async function nonMutatingPersistenceSourceMatches(
+  trx: Transaction<Database>,
+  job: JobRow,
+  scope: { absenceId: string; absenceRevision: number },
+  recovery: Record<string, unknown>,
+): Promise<boolean> {
+  if (recovery.providerEffectsApplied !== false
+    || (recovery.outcome !== "no_replacement_available" && recovery.outcome !== "skipped_policy_satisfied")
+    || !isNonBlank(recovery.unavailableActorId)
+    || !isRecord(recovery.persistence) || !isRecord(recovery.persistence.event)) return false;
+  const persistence = recovery.persistence;
+  const event = recovery.persistence.event;
+  if (!isUuid(persistence.decisionId) || !isNonBlank(persistence.expectedHeadRevision)
+    || !isNonBlank(event.repositoryId) || !isNonBlank(event.changeRequestId)) return false;
+  const decision = await trx.selectFrom("routing_decisions")
+    .innerJoin("repositories", (join) => join
+      .onRef("repositories.workspace_id", "=", "routing_decisions.workspace_id")
+      .onRef("repositories.id", "=", "routing_decisions.repository_id"))
+    .select(["routing_decisions.details", "routing_decisions.selected_reviewers"])
+    .where("routing_decisions.workspace_id", "=", job.workspace_id)
+    .where("routing_decisions.id", "=", persistence.decisionId)
+    .where("routing_decisions.head_sha", "=", persistence.expectedHeadRevision)
+    .where("routing_decisions.change_request_id", "=", event.changeRequestId)
+    .where("routing_decisions.mode", "=", "enforce")
+    .where("routing_decisions.action", "=", "request_human_review")
+    .where("repositories.provider", "=", job.provider)
+    .where("repositories.provider_connection_id", "=", job.provider_connection_id)
+    .where("repositories.external_repository_id", "=", event.repositoryId)
+    .executeTakeFirst();
+  if (decision === undefined
+    || !parseStrictActorList(decision.selected_reviewers)?.includes(recovery.unavailableActorId)
+    || !parseOriginalReviewerPool(decision.details)?.eligibleActors.includes(recovery.unavailableActorId)) return false;
+
+  // The commit may have succeeded before the persistence response was lost.
+  // Bind any existing row before allowing exhaustion to finalize pending history.
+  const replacement = await trx.selectFrom("reviewer_replacements").selectAll()
+    .where("workspace_id", "=", job.workspace_id)
+    .where("provider", "=", job.provider)
+    .where("provider_connection_id", "=", job.provider_connection_id)
+    .where("absence_id", "=", scope.absenceId)
+    .where("absence_revision", "=", scope.absenceRevision)
+    .where("decision_id", "=", persistence.decisionId)
+    .forUpdate().executeTakeFirst();
+  if (replacement !== undefined) {
+    return replacement.unavailable_actor_id === recovery.unavailableActorId
+      && replacement.outcome === recovery.outcome
+      && replacement.replacement_actor_id === null
+      && replacement.mutation_intent_id === null
+      && (persistence.selectionContext === undefined
+        || isDeepStrictEqual(persistence.selectionContext, replacement.selection_context));
+  }
+  const absence = await trx.selectFrom("reviewer_absences")
+    .select(["revision", "external_actor_id"])
+    .where("workspace_id", "=", job.workspace_id)
+    .where("provider", "=", job.provider)
+    .where("provider_connection_id", "=", job.provider_connection_id)
+    .where("id", "=", scope.absenceId).executeTakeFirst();
+  return absence?.revision === scope.absenceRevision
+    && absence.external_actor_id === recovery.unavailableActorId;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
