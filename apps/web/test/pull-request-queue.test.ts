@@ -51,19 +51,20 @@ it("preserves bootstrap progress through the real client and route", async () =>
   const { createSelfHostedPullRequestQueueApi } = await import("../src/admin/api");
   const snapshot = queueSnapshot({ status: "unavailable", syncState: "syncing", membershipComplete: false, classificationComplete: false, totalOpen: null, refreshError: "Provider unavailable", syncProgress: { runId: "run", phase: "queued", updatedAt: "2026-01-01T00:00:00.000Z", completedRepositories: 0, totalRepositories: null, retryAt: "2026-01-01T00:01:00.000Z" } });
   const { app, headers } = await setup({ readPullRequestQueue: async () => snapshot });
-  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => app.request(String(url), { ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), ...headers } }));
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => app.request(String(url), { ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), cookie: headers.cookie } }));
   try {
     const client = createSelfHostedPullRequestQueueApi();
-    expect(await client.readPullRequestQueue({ workspaceId: headers["x-triagepilot-workspace"] } as any, { forceRefresh: false })).toEqual(snapshot);
+    expect(await client.readPullRequestQueue({ id: headers["x-triagepilot-workspace"], displayName: "Self-hosted" }, { forceRefresh: false })).toEqual(snapshot);
+    await expect(client.readPullRequestQueue({ id: "other", displayName: "Other workspace" }, { forceRefresh: false })).rejects.toMatchObject({ status: 403 });
   } finally { fetchMock.mockRestore(); }
 });
 
 it("preserves a safe authority error through the real client and route", async () => {
   const { createSelfHostedPullRequestQueueApi } = await import("../src/admin/api");
   const { app, headers } = await setup({ readPullRequestQueue: async () => { throw new PullRequestQueueUnavailableError("authority"); } });
-  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => app.request(String(url), { ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), ...headers } }));
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => app.request(String(url), { ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), cookie: headers.cookie } }));
   try {
     const client = createSelfHostedPullRequestQueueApi();
-    await expect(client.readPullRequestQueue({ workspaceId: headers["x-triagepilot-workspace"] } as any, { forceRefresh: false })).rejects.toMatchObject({ status: 404, message: "The GitHub installation is unavailable." });
+    await expect(client.readPullRequestQueue({ id: headers["x-triagepilot-workspace"], displayName: "Self-hosted" }, { forceRefresh: false })).rejects.toMatchObject({ status: 404, message: "The GitHub installation is unavailable." });
   } finally { fetchMock.mockRestore(); }
 });

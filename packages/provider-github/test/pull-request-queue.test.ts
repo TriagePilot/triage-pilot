@@ -158,6 +158,38 @@ describe("authorization at every queue request boundary", () => {
 });
 
 describe("bounded queue reads", () => {
+  it.each([
+    { field: "requested_reviewers", boundary: "page" },
+    { field: "requested_teams", boundary: "page" },
+    { field: "requested_reviewers", boundary: "detail" },
+    { field: "requested_teams", boundary: "detail" },
+  ])("falls back for omitted $field in $boundary reads", async ({ field, boundary }) => {
+    const missing = { ...pr(), [field]: undefined };
+    const request = vi.fn(async (route: string) => ({ data: route.endsWith("/requested_reviewers") ? { users: [user], teams: [{ id: 19, slug: "platform" }] } : boundary === "page" ? [missing, pr(2)] : missing }));
+    const reader = createGitHubPullRequestQueueReader({ request }), ctx = context();
+    const result = boundary === "page" ? await reader.listOpenPullRequestsPage({ ...ctx, repository, page: 1 }) : await reader.readPullRequest({ ...ctx, repository, pullNumber: 1 });
+    const pulls = "pulls" in result ? result.pulls : result.status === "missing" ? [] : [result.pull];
+    expect(pulls).toHaveLength(boundary === "page" ? 2 : 1);
+    expect(pulls[0]).toMatchObject({ number: 1, requestedUsers: [{ id: "12", login: "alex" }], requestedTeams: [{ id: "19", name: "acme/platform" }] });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(ctx.assertAuthorized).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenLastCalledWith("GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers", expect.objectContaining({ owner: "Acme", repo: "repo", pull_number: 1 }));
+  });
+  it.each(["page", "detail"] as const)("blocks the %s reviewer fallback after cancellation or revocation", async boundary => {
+    for (const mode of ["abort", "authority"]) {
+      const controller = new AbortController(); let read = false;
+      const assertAuthorized = vi.fn(async () => { if (read && mode === "authority") throw new Error("revoked"); });
+      const request = vi.fn(async () => {
+        read = true; if (mode === "abort") controller.abort();
+        const missing = { ...pr(), requested_reviewers: undefined };
+        return { data: boundary === "page" ? [missing] : missing };
+      });
+      const reader = createGitHubPullRequestQueueReader({ request }), ctx = { ...context(), signal: controller.signal, assertAuthorized, repository };
+      const result = boundary === "page" ? reader.listOpenPullRequestsPage({ ...ctx, page: 1 }) : reader.readPullRequest({ ...ctx, pullNumber: 1 });
+      await expect(result).rejects.toThrow(mode === "authority" ? "revoked" : undefined);
+      expect(request).toHaveBeenCalledTimes(1);
+    }
+  });
   it("reads exactly one inventory or pull page with fresh authorization", async () => {
     const request = vi.fn(async (route: string) => ({ data: route.includes("installation") ? { total_count: 101, repositories: Array.from({ length: 100 }, (_, i) => repo(i + 1)) } : [pr()] }));
     const reader = createGitHubPullRequestQueueReader({ request }); const ctx = context();

@@ -6,6 +6,20 @@ import { withPostgresTestDatabase } from "./postgres";
 import { claimQueueSyncCheckpoint, commitQueueSyncCheckpoint, commitQueueSyncPage, completeQueueSyncChunk, readQueueSyncRun, startQueueSyncRun, requestQueueReconciliation } from "../src/queue-sync-runs";
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("queue sync run checkpoints", () => {
+  it("projects the active replacement ahead of a failed run with a later timestamp", async () => withPostgresTestDatabase(async db => {
+    const workspace = await db.insertInto("workspaces").values({ external_key: "sync-replacement" }).returning("id").executeTakeFirstOrThrow();
+    const connection = await db.insertInto("provider_connections").values({ workspace_id: workspace.id, provider: "github", external_connection_id: "installation", workspace_login: "acme", account_type: "Organization", status: "active", permissions: {} }).returning("id").executeTakeFirstOrThrow();
+    const scope = { workspaceId: workspace.id, providerConnectionId: connection.id, externalInstallationId: "installation" };
+    const predecessor = await startQueueSyncRun(db, scope);
+    await db.updateTable("jobs").set({ status: "failed" }).where("id", "=", predecessor.jobId).execute();
+    const replacement = await startQueueSyncRun(db, scope);
+    expect(replacement.runId).not.toBe(predecessor.runId);
+    expect((await readQueueSyncRun(db, scope, predecessor.runId))?.status).toBe("failed");
+    await db.updateTable("queue_sync_runs").set({ updated_at: sql<Date>`now() + interval '1 minute'` }).where("id", "=", predecessor.runId).execute();
+    expect((await readQueueProjection(db, scope)).syncRun).toMatchObject({ runId: replacement.runId, status: "queued" });
+    await db.updateTable("queue_sync_runs").set({ status: "running" }).where("id", "=", replacement.runId).execute();
+    expect((await readQueueProjection(db, scope)).syncRun).toMatchObject({ runId: replacement.runId, status: "running" });
+  }));
   it("coalesces scheduled and manual requests and gives later runs fresh dispatches", async () => withPostgresTestDatabase(async db => {
     const workspace = await db.insertInto("workspaces").values({ external_key: "schedule" }).returning("id").executeTakeFirstOrThrow();
     const connection = await db.insertInto("provider_connections").values({ workspace_id: workspace.id, provider: "github", external_connection_id: "old", workspace_login: "acme", account_type: "Organization", status: "active", permissions: {} }).returning("id").executeTakeFirstOrThrow();

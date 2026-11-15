@@ -37,8 +37,7 @@ export function createPullRequestSyncService<L, Scope, RunToken>(ports: PullRequ
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(new PullRequestQueueUnavailableError("timeout")), 10_000);
     const context = { signal: controller.signal, assertAuthorized: async () => { controller.signal.throwIfAborted(); await ports.assertAuthorized(scope, repository); controller.signal.throwIfAborted(); } };
     try {
-      await context.assertAuthorized();
-      return await Promise.race([fn(context), new Promise<never>((_, reject) => controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true }))]);
+      return await Promise.race([context.assertAuthorized().then(() => fn(context)), new Promise<never>((_, reject) => controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true }))]);
     } finally { clearTimeout(timer); }
   }
   async function refreshPullChunk(key: SyncPullKey, lease: L): Promise<{ done: boolean }> {

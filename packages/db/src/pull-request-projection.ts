@@ -85,6 +85,7 @@ export async function readQueueProjection(db: Kysely<Database>, scope: QueueInst
       .where(sql<boolean>`(run.checkpoint_repository_id is null or exists (select 1 from repositories r
         where r.workspace_id = run.workspace_id and r.provider_connection_id = run.provider_connection_id
           and r.id = run.checkpoint_repository_id and r.external_repository_id = run.checkpoint_external_repository_id))`)
+      .orderBy(sql<number>`case when run.status in ('queued', 'running') then 0 else 1 end`)
       .orderBy("run.updated_at", "desc").orderBy("run.id", "desc").executeTakeFirst();
     const verified = await trx.selectFrom("queue_sync_runs as run").select("run.verified_at")
       .where("run.workspace_id", "=", scope.workspaceId).where("run.provider_connection_id", "=", scope.providerConnectionId).where("run.external_installation_id", "=", scope.externalInstallationId)

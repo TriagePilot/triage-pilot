@@ -71,10 +71,10 @@ export function createGitHubPullRequestQueueReader(requester: Requester) {
     verifyRepo(pr.base.repo, repository);
     return { number, baseRevision: string(pr.base.sha), headRevision: string(pr.head.sha), isDraft: pr.draft };
   }
-  function pullFromEntry(entry: unknown, repository: RepositoryRef, organization: string): QueuePullRequest {
+  async function pullFromEntry(context: Context, entry: unknown, repository: RepositoryRef): Promise<QueuePullRequest> {
     if (!record(entry)) return invalid();
     const metadata = basic(entry, repository);
-    return { repository, changeRequestId: String(metadata.number), ...metadata, title: string(entry.title), author: actor(entry.user), createdAt: timestamp(entry.created_at), updatedAt: timestamp(entry.updated_at), ...targets(entry.requested_reviewers, entry.requested_teams, organization) };
+    return { repository, changeRequestId: String(metadata.number), ...metadata, title: string(entry.title), author: actor(entry.user), createdAt: timestamp(entry.created_at), updatedAt: timestamp(entry.updated_at), ...await readTargets(context, repository, entry, metadata.number) };
   }
   function validatePage(page: number) { if (!Number.isSafeInteger(page) || page < 1) invalid(); }
   function pageEntries(data: unknown): unknown[] { if (!Array.isArray(data) || data.length > 100) return invalid(); return data; }
@@ -101,11 +101,12 @@ export function createGitHubPullRequestQueueReader(requester: Requester) {
       if (repository.provider !== "github" || repository.owner.toLowerCase() !== context.githubOrganization.toLowerCase()) invalid();
       const entries = pageEntries(await request(context, "GET /repos/{owner}/{repo}/pulls", { owner: repository.owner, repo: repository.name, state: "open", per_page: 100, page: context.page }));
       const numbers = new Set<number>(); const ids = new Set<string>();
-      const pulls = entries.map(entry => {
+      const pulls: QueuePullRequest[] = [];
+      for (const entry of entries) {
         if (!record(entry) || entry.state !== "open") return invalid();
-        const pull = pullFromEntry(entry, repository, context.githubOrganization), entryId = id(entry.id);
-        if (numbers.has(pull.number) || ids.has(entryId)) invalid(); numbers.add(pull.number); ids.add(entryId); return pull;
-      });
+        const pull = await pullFromEntry(context, entry, repository), entryId = id(entry.id);
+        if (numbers.has(pull.number) || ids.has(entryId)) invalid(); numbers.add(pull.number); ids.add(entryId); pulls.push(pull);
+      }
       return { pulls, nextPage: entries.length === 100 ? context.page + 1 : null };
     },
     async readPullRequest(context: Context & { repository: RepositoryRef; pullNumber: number }) {
@@ -114,7 +115,7 @@ export function createGitHubPullRequestQueueReader(requester: Requester) {
       const data = await request(context, "GET /repos/{owner}/{repo}/pulls/{pull_number}", { owner: repository.owner, repo: repository.name, pull_number: pullNumber }, true);
       if (data === null) return { status: "missing" as const };
       if (!record(data) || (data.state !== "open" && data.state !== "closed")) return invalid();
-      const pull = pullFromEntry(data, repository, context.githubOrganization); if (pull.number !== pullNumber) invalid();
+      const pull = await pullFromEntry(context, data, repository); if (pull.number !== pullNumber) invalid();
       return { status: data.state as "open" | "closed", pull };
     },
     async listReviewsPage(context: Context & { repository: RepositoryRef; pullNumber: number; page: number }) {

@@ -23,6 +23,27 @@ function fixture() {
   return { ports, reads, effects, get committed() { return committed; }, invalidate() { generation++; }, get checkpoint() { return checkpoint; } };
 }
 describe("pull request synchronization chunks", () => {
+  it.each(["pull", "inventory"])("times out stalled authorization before the %s read and blocks late continuation", async boundary => {
+    vi.useFakeTimers();
+    let authorize!: () => void;
+    try {
+      const f = fixture();
+      f.ports.assertAuthorized = vi.fn(() => new Promise<void>(resolve => { authorize = resolve; }));
+      f.ports.listRepositories = vi.fn(f.ports.listRepositories);
+      const service = createPullRequestSyncService(f.ports);
+      const result = boundary === "pull" ? service.refreshPullChunk(key, "lease") : service.reconcileConnectionChunk("scope", "run", "lease");
+      let error: unknown;
+      const settled = result.catch(reason => { error = reason; });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(error).toMatchObject({ reason: "timeout" });
+      authorize();
+      await settled;
+      expect(f.reads).toEqual([]);
+      expect(f.ports.listRepositories).not.toHaveBeenCalled();
+      expect(f.effects).toEqual([]);
+      expect(f.committed).toBeUndefined();
+    } finally { vi.useRealTimers(); }
+  });
   it("reads one page per chunk and confirms current lifecycle before committing", async () => {
     const f = fixture(), service = createPullRequestSyncService(f.ports);
     for (let i = 0; i < 5; i++) expect(await service.refreshPullChunk(key, "lease")).toEqual({ done: i === 4 });
