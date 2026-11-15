@@ -816,8 +816,8 @@ describe("activateReviewerAbsence", () => {
     }));
     expect(ports.provider.reconcileReviewRequest).not.toHaveBeenCalled();
     expect(ports.finalizers.run).toHaveBeenCalledWith(expect.objectContaining({
-      action: "fail_policy",
-      summary: "No replacement is available for an absent required reviewer.",
+      action: "reevaluate_policy",
+      summary: null,
     }));
     expect(ports.provider.inspectChangeRequest).toHaveBeenCalledTimes(2);
   });

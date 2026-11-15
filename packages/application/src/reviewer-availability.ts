@@ -22,7 +22,6 @@ import {
   type ReviewerAbsenceWindow,
 } from "@triagepilot/core";
 
-const NO_REPLACEMENT_POLICY_SUMMARY = "No replacement is available for an absent required reviewer.";
 const reviewerMutationIntentIdBrand: unique symbol = Symbol("ReviewerMutationIntentId");
 
 export type ReviewerMutationIntentId = string & {
@@ -259,7 +258,7 @@ type ReviewerReplacementRecoveryFinalizer<Outcome extends ReviewerReplacementRec
   Outcome extends "replaced" | "skipped_policy_satisfied"
     ? { finalizer: ReviewerReplacementFinalizerAction & { action: "reevaluate_policy" } }
     : Outcome extends "no_replacement_available"
-      ? { finalizer: ReviewerReplacementFinalizerAction & { action: "fail_policy" } }
+      ? { finalizer: ReviewerReplacementFinalizerAction & { action: "reevaluate_policy" | "fail_policy" } }
       : { finalizer: null };
 
 type ReviewerReplacementRecoveryEffects<Outcome extends ReviewerReplacementRecoveryOutcome> =
@@ -570,6 +569,7 @@ export function assertReviewerReplacementFinalizerRecovery(
     throw new ReviewerReplacementContractError("Reviewer replacement recovery is malformed");
   }
   const record = value;
+  const job = value.job;
   if (value.providerEffectsApplied === true) {
     if (!isNonEmptyString(value.mutationIntentId)) {
       throw new ReviewerReplacementContractError(
@@ -597,11 +597,12 @@ export function assertReviewerReplacementFinalizerRecovery(
     if (!isRecord(record.finalizer)) {
       throw new ReviewerReplacementContractError("Reviewer replacement recovery finalizer is malformed");
     }
-    const expectedAction = value.outcome === "no_replacement_available"
-      ? "fail_policy"
-      : "reevaluate_policy";
+    const validAction = record.finalizer.action === "reevaluate_policy"
+      || (value.outcome === "no_replacement_available" && record.finalizer.action === "fail_policy"
+        && isNonEmptyString(record.finalizer.summary));
     if (
-      record.finalizer.action !== expectedAction
+      !validAction
+      || (record.finalizer.action === "reevaluate_policy" && record.finalizer.summary !== null)
       || !isNonEmptyString(record.finalizer.decisionId)
       || (record.finalizer.summary !== null && typeof record.finalizer.summary !== "string")
     ) {
@@ -624,7 +625,12 @@ export function assertReviewerReplacementFinalizerRecovery(
   if (record.persistence !== null) {
     assertPersistReviewerReplacementInput(record.persistence);
     if (
-      record.persistence.outcome !== value.outcome
+      record.persistence.providerConnectionId !== job.providerConnectionId
+      || record.persistence.absenceId !== job.absenceId
+      || record.persistence.absenceRevision !== job.absenceRevision
+      || record.persistence.event.workspaceId !== job.workspaceId
+      || (isRecord(record.finalizer) && record.persistence.decisionId !== record.finalizer.decisionId)
+      || record.persistence.outcome !== value.outcome
       || record.persistence.provider !== record.provider
       || record.persistence.unavailableActorId !== record.unavailableActorId
       || record.persistence.replacementActorId !== value.replacementActorId
@@ -984,14 +990,14 @@ async function finalizeCandidatePlan(
   try {
     persisted = await ports.availability.persistReplacement(persistence);
   } catch (error) {
-    if (!providerEffectsApplied) throw error;
+    if (!providerEffectsApplied && plan.finalizer === null) throw error;
     return {
       recovery: recovery(
         job,
         "persist_replacement",
         plan.finalizer,
         null,
-        true,
+        providerEffectsApplied,
         persistence,
         errorMessage(error),
         plan,
@@ -1466,11 +1472,8 @@ function finalizerFor(
   decisionId: string,
   outcome: ReviewerReplacementOutcome,
 ): ReviewerReplacementFinalizerAction | null {
-  if (outcome === "replaced" || outcome === "skipped_policy_satisfied") {
+  if (outcome === "replaced" || outcome === "skipped_policy_satisfied" || outcome === "no_replacement_available") {
     return { action: "reevaluate_policy", decisionId, summary: null };
-  }
-  if (outcome === "no_replacement_available") {
-    return { action: "fail_policy", decisionId, summary: NO_REPLACEMENT_POLICY_SUMMARY };
   }
   return null;
 }

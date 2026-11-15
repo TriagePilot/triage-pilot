@@ -62,7 +62,7 @@ export interface HumanReviewPolicyDecision {
   mode: RepositoryMode;
   action: RoutingAction;
   selectedReviewers: string[];
-  requiredApprovalCount?: number;
+  requiredApprovalCount?: number | undefined;
   policyCheckRunId: string | null;
   policyCheckState: "not_started" | "in_progress" | "success" | "failure";
 }
@@ -385,7 +385,7 @@ export async function findLatestHumanReviewPolicyDecision(
     mode: decision.mode,
     action: decision.action as RoutingAction,
     selectedReviewers: parseSelectedReviewers(decision.selectedReviewers),
-    requiredApprovalCount: parseRequiredApprovalCount(decision.details, parseSelectedReviewers(decision.selectedReviewers)),
+    requiredApprovalCount: parseRequiredApprovalCount(decision.details),
     policyCheckRunId: decision.policyCheckRunId,
     policyCheckState: decision.policyCheckState,
   };
@@ -497,7 +497,7 @@ export async function findReviewerReplacementCandidates(
   });
 }
 
-function parseRequiredApprovalCount(details: unknown, selectedReviewers: string[]): number {
+function parseRequiredApprovalCount(details: unknown): number | undefined {
   if (
     typeof details === "object" &&
     details !== null &&
@@ -508,7 +508,7 @@ function parseRequiredApprovalCount(details: unknown, selectedReviewers: string[
     (details.routing.requestedReviewerCount === 1 || details.routing.requestedReviewerCount === 2)
   ) return details.routing.requestedReviewerCount;
 
-  return selectedReviewers.length;
+  return undefined;
 }
 
 export async function updatePolicyCheckState(

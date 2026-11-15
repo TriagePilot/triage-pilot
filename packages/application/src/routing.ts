@@ -83,6 +83,8 @@ export type RoutingActionInput = {
   decisionId: string;
   selectedActors: ExternalActorId[];
   actorsToRequest: ExternalActorId[];
+  requiredApprovalCount: number;
+  reviewerShortfall: number;
   noHumanReason?: string;
 } & (
   | { action: RoutingAction; risk: RiskScoringResult; branchExclusion?: never }
@@ -282,7 +284,7 @@ export async function processChangeRequest(
     highRiskReviewers: config.routing.highRiskReviewers,
     selectionKey: `${job.changeRequest.repository.owner}/${job.changeRequest.repository.name}#${job.changeRequest.number}`,
   });
-  const initialActionStatus: ActionStatus = config.mode === "enforce" && routing.action !== "no_eligible_reviewer"
+  const initialActionStatus: ActionStatus = config.mode === "enforce"
     ? "pending"
     : "not_applied";
   const decision: DecisionInput = {
@@ -349,11 +351,13 @@ async function persistAndApply(
         ...(assessment.risk === null
           ? { action: "policy_approval" as const, ...assessment }
           : { action: routing.action, risk: assessment.risk }),
+        requiredApprovalCount: routing.requestedReviewerCount,
+        reviewerShortfall: routing.reviewerShortfall,
         selectedActors: routing.selectedReviewers,
         actorsToRequest: routing.reviewersToRequest,
         ...(routing.noHumanReason === undefined ? {} : { noHumanReason: routing.noHumanReason }),
       });
-      if (routing.action === "request_human_review") {
+      if (routing.action === "request_human_review" || routing.action === "no_eligible_reviewer") {
         await ports.enqueueReviewPolicy({
           kind: "evaluate_human_review_policy",
           deliveryId: `routing-policy:${job.deliveryId}`,

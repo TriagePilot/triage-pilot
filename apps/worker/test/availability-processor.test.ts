@@ -88,6 +88,48 @@ describe("reviewer absence availability processor", () => {
     expect(services.provider.reconcileReviewRequest).not.toHaveBeenCalled();
   });
 
+  it.each(["persist_replacement", "run_finalizer"] as const)("normalizes legacy shortage recovery in %s after matching durable provenance", async (phase) => {
+    const services = buildServices();
+    const old = replacedRecovery(phase);
+    const input = { ...old, outcome: "no_replacement_available", replacementActorId: null, mutationIntentId: null, providerEffectsApplied: false,
+      finalizer: { action: "fail_policy", decisionId: "decision-1", summary: "No replacement is available for an absent required reviewer." },
+      persistence: phase === "persist_replacement" ? { ...persistence("replaced"), outcome: "no_replacement_available", replacementActorId: null, mutationIntentId: null, replaceCohort: false, event: { ...persistence("replaced").event, outcome: "no_replacement_available", replacementActor: null } } : null,
+    } as ReviewerReplacementFinalizerRecovery;
+    services.availability.persistReplacement = vi.fn(async () => ({ inserted: true, activationCurrent: true, replacement: { id: "replacement-1", state: "finalizer_pending" as const } }));
+    expectPendingRecovery(services, { ...input, replacementId: "replacement-1" } as ReviewerReplacementFinalizerRecovery);
+    await expect(recoverReviewerReplacementFinalizer(input, services)).resolves.toBeNull();
+    expect(services.finalizers.run).toHaveBeenCalledWith(expect.objectContaining({ action: "reevaluate_policy", summary: null }));
+    expect(services.provider.reconcileReviewRequest).not.toHaveBeenCalled();
+    expect(services.provider.inspectChangeRequest).not.toHaveBeenCalled();
+  });
+
+  it("rejects legacy shortage recovery when durable provenance differs", async () => {
+    const services = buildServices();
+    const input = { ...replacedRecovery("run_finalizer"), outcome: "no_replacement_available", replacementActorId: null, mutationIntentId: null, providerEffectsApplied: false,
+      finalizer: { action: "fail_policy", decisionId: "decision-1", summary: "No replacement available" },
+    } as ReviewerReplacementFinalizerRecovery;
+    expectPendingRecovery(services, input);
+    const load = services.availability.loadReplacement;
+    services.availability.loadReplacement = async (id) => ({ ...(await load(id))!, outcome: "replaced" } as never);
+    expect(await recoverReviewerReplacementFinalizer(input, services)).toMatchObject({ retryable: false });
+    expect(services.finalizers.run).not.toHaveBeenCalled();
+  });
+
+  it("finishes stale non-mutating persistence recovery without a mutation audit", async () => {
+    const services = buildServices();
+    const input = shortagePersistenceRecovery();
+    services.availability.persistReplacement = vi.fn(async () => ({ inserted: false, activationCurrent: false, replacement: null }));
+    await expect(recoverReviewerReplacementFinalizer(input, services)).resolves.toBeNull();
+    expect(services.availability.persistMutationIntentRecovery).not.toHaveBeenCalled();
+    expect(services.finalizers.run).not.toHaveBeenCalled();
+  });
+
+  it("exhausts unpersisted non-mutating recovery without inventing a mutation audit", async () => {
+    const services = buildServices();
+    await expect(markReviewerReplacementRecoveryExhausted(shortagePersistenceRecovery(), services, "exhausted")).resolves.toBeUndefined();
+    expect(services.availability.persistMutationIntentRecovery).not.toHaveBeenCalled();
+  });
+
   it("completes a replacement after process death without rerunning its finalizer", async () => {
     const services = buildServices();
     const recovery = replacedRecovery("complete_replacement");
@@ -377,4 +419,15 @@ function expectPendingRecovery(
     mutationIntentId: recovery.mutationIntentId,
     lastError: null,
   })) as never;
+}
+
+function shortagePersistenceRecovery(): ReviewerReplacementFinalizerRecovery {
+  const original = persistence("replaced");
+  return {
+    ...replacedRecovery("persist_replacement"),
+    outcome: "no_replacement_available", replacementActorId: null, mutationIntentId: null, providerEffectsApplied: false,
+    finalizer: { action: "reevaluate_policy", decisionId: "decision-1", summary: null },
+    persistence: { ...original, outcome: "no_replacement_available", replacementActorId: null, mutationIntentId: null,
+      replaceCohort: false, event: { ...original.event, outcome: "no_replacement_available", replacementActor: null } },
+  } as ReviewerReplacementFinalizerRecovery;
 }

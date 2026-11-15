@@ -8,6 +8,7 @@ describe("evaluateHumanReviewPolicy", () => {
       evaluateHumanReviewPolicy({
         route: "human_review",
         selectedReviewers: ["@user-e64b19", "@user-f30c8a"],
+        requiredApprovalCount: 2,
         headSha: "head-3",
         reviews: [
           {
@@ -55,6 +56,7 @@ describe("evaluateHumanReviewPolicy", () => {
       evaluateHumanReviewPolicy({
         route: "human_review",
         selectedReviewers: ["@user-d82a5f", "@user-e64b19"],
+        requiredApprovalCount: 2,
         headSha: "head-2",
         reviews: [
           {
@@ -83,6 +85,7 @@ describe("evaluateHumanReviewPolicy", () => {
       evaluateHumanReviewPolicy({
         route: "no_human",
         selectedReviewers: [],
+        requiredApprovalCount: 0,
         headSha: "head-2",
         reviews: [],
       }),
@@ -93,17 +96,18 @@ describe("evaluateHumanReviewPolicy", () => {
     });
   });
 
-  it("fails a human-review route with no eligible reviewer", () => {
+  it("waits for manual approvals when no reviewer is eligible", () => {
     expect(
       evaluateHumanReviewPolicy({
         route: "no_eligible_reviewer",
         selectedReviewers: [],
+        requiredApprovalCount: 1,
         headSha: "head-2",
         reviews: [],
       }),
     ).toEqual({
-      state: "failure",
-      summary: "No eligible human reviewer is available for this required review.",
+      state: "in_progress",
+      summary: "Waiting for 1 more human approval.",
       missingReviewers: [],
     });
   });
@@ -113,6 +117,7 @@ describe("evaluateHumanReviewPolicy", () => {
       evaluateHumanReviewPolicy({
         route: "human_review",
         selectedReviewers: ["@user-d82a5f", "@user-e64b19"],
+        requiredApprovalCount: 2,
         headSha: "head-2",
         reviews: [
           {
@@ -145,6 +150,7 @@ describe("evaluateHumanReviewPolicy", () => {
       evaluateHumanReviewPolicy({
         route: "human_review",
         selectedReviewers: ["@user-d82a5f"],
+        requiredApprovalCount: 1,
         headSha: "head-2",
         reviews: [
           {
@@ -169,6 +175,7 @@ describe("evaluateHumanReviewPolicy", () => {
       evaluateHumanReviewPolicy({
         route: "human_review",
         selectedReviewers: ["@user-d82a5f"],
+        requiredApprovalCount: 1,
         headSha: "head-2",
         reviews: [
           {
@@ -193,6 +200,7 @@ describe("evaluateHumanReviewPolicy", () => {
       evaluateHumanReviewPolicy({
         route: "human_review",
         selectedReviewers: ["@user-d82a5f"],
+        requiredApprovalCount: 1,
         headSha: "head-2",
         reviews: [
           {
@@ -217,6 +225,7 @@ describe("evaluateHumanReviewPolicy", () => {
       evaluateHumanReviewPolicy({
         route: "human_review",
         selectedReviewers: ["@user-d82a5f"],
+        requiredApprovalCount: 1,
         headSha: "head-2",
         reviews: [
           {
@@ -241,6 +250,7 @@ describe("evaluateHumanReviewPolicy", () => {
       evaluateHumanReviewPolicy({
         route: "human_review",
         selectedReviewers: ["@User-D82A5F"],
+        requiredApprovalCount: 1,
         headSha: "head-2",
         reviews: [
           {
