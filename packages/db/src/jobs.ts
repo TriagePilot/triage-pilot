@@ -12,7 +12,7 @@ import {
   type ReviewerMutationIntent,
 } from "./availability.js";
 
-export type JobKind = "process_pull_request" | "evaluate_human_review_policy" | "activate_reviewer_absence";
+export type JobKind = "process_pull_request" | "evaluate_human_review_policy" | "activate_reviewer_absence" | "refresh_queue_pull" | "reconcile_queue_connection" | "replay_deferred_delivery";
 export type JobStatus = "queued" | "running" | "succeeded" | "failed";
 
 export interface JobRecord {
@@ -20,6 +20,8 @@ export interface JobRecord {
   workspaceId: WorkspaceId;
   provider: ProviderKind;
   providerConnectionId: ProviderConnectionId;
+  externalInstallationId: string | null;
+  externalRepositoryId: string | null;
   kind: JobKind;
   status: JobStatus;
   payload: unknown;
@@ -38,6 +40,8 @@ export interface EnqueueJobInput {
   kind: JobKind;
   payload: unknown;
   idempotencyKey: string;
+  externalInstallationId?: string;
+  externalRepositoryId?: string;
   runAt?: Date;
   maxAttempts?: number;
 }
@@ -74,7 +78,7 @@ export interface WorkspaceJobQueue {
     lease: JobLease,
     error: string,
     now: Date,
-    options: { retryable: boolean; recovery?: JobRecovery },
+    options: { retryable: boolean; recovery?: JobRecovery; rateLimitRetryAt?: Date },
   ): Promise<JobTransitionResult>;
   exhaustReviewerAbsenceActivation(
     lease: JobLease,
@@ -306,6 +310,20 @@ export async function recoverStaleJobs(
       }
     }
   }
+  const retryableSyncJobs = await db.selectFrom("jobs").select(["id", "locked_at", "locked_by", "attempt_count"])
+    .where("workspace_id", "=", workspaceId).where("kind", "=", "reconcile_queue_connection")
+    .where("status", "=", "running").where("locked_at", "<", staleBefore).whereRef("attempt_count", "<", "max_attempts").execute();
+  for (const job of retryableSyncJobs) {
+    await db.transaction().execute(async trx => {
+      const run = await trx.selectFrom("queue_sync_runs").select("id").where("workspace_id", "=", workspaceId).where("dispatch_job_id", "=", job.id).forUpdate().executeTakeFirst();
+      let update = trx.updateTable("jobs").set({ status: "queued", locked_at: null, locked_by: null, updated_at: now })
+        .where("id", "=", job.id).where("workspace_id", "=", workspaceId).where("status", "=", "running")
+        .where("locked_at", "=", job.locked_at!).where("attempt_count", "=", job.attempt_count);
+      update = job.locked_by === null ? update.where("locked_by", "is", null) : update.where("locked_by", "=", job.locked_by);
+      const updated = await update.returning("id").executeTakeFirst();
+      if (updated && run) await trx.updateTable("queue_sync_runs").set({ status: "queued", updated_at: now }).where("id", "=", run.id).execute();
+    });
+  }
   await db.updateTable("jobs")
       .set({
         status: "queued",
@@ -315,6 +333,7 @@ export async function recoverStaleJobs(
       })
       .where("workspace_id", "=", workspaceId)
       .where("status", "=", "running")
+      .where("kind", "!=", "reconcile_queue_connection")
       .where("locked_at", "<", staleBefore)
       .whereRef("attempt_count", "<", "max_attempts")
       .execute();
@@ -323,13 +342,34 @@ export async function recoverStaleJobs(
 async function failIsolatedStaleJob(
   db: Kysely<Database>, lease: JobLease, error: string, now: Date,
 ): Promise<void> {
-  await db.updateTable("jobs").set({
-    status: "failed", locked_at: null, locked_by: null, last_error: error, run_at: now, updated_at: now,
-  }).where("id", "=", lease.jobId).where("workspace_id", "=", lease.workspaceId)
-    .where("provider", "=", lease.provider).where("provider_connection_id", "=", lease.providerConnectionId)
-    .where("status", "=", "running").where("locked_by", "=", lease.lockedBy)
-    .where("locked_at", "=", lease.lockedAt).where("attempt_count", "=", lease.attemptCount)
-    .execute();
+  await db.transaction().execute(async trx => {
+    const run = await lockSyncRun(trx, lease);
+    const updated = await trx.updateTable("jobs").set({
+      status: "failed", locked_at: null, locked_by: null, last_error: error, run_at: now, updated_at: now,
+    }).where("id", "=", lease.jobId).where("workspace_id", "=", lease.workspaceId)
+      .where("provider", "=", lease.provider).where("provider_connection_id", "=", lease.providerConnectionId)
+      .where("status", "=", "running").where("locked_by", "=", lease.lockedBy)
+      .where("locked_at", "=", lease.lockedAt).where("attempt_count", "=", lease.attemptCount)
+      .returning("id").executeTakeFirst();
+    if (updated && run) await trx.updateTable("queue_sync_runs").set({ status: "failed", updated_at: now }).where("id", "=", run.id).execute();
+  });
+}
+
+/** Terminalize only still-queued jobs for the revoked physical installation.
+ * Reuse activation exhaustion so mutation intents and finalizers stay consistent. */
+export async function failQueuedJobsForRevokedConnection(
+  db: Kysely<Database>, workspaceId: WorkspaceId, provider: ProviderKind,
+  providerConnectionId: string, revocationId: string, now: Date,
+): Promise<void> {
+  const jobs = await db.selectFrom("jobs").select(["id", "attempt_count", "max_attempts"])
+    .where("workspace_id", "=", workspaceId).where("provider", "=", provider)
+    .where("provider_connection_id", "=", providerConnectionId).where("status", "=", "queued").execute();
+  for (const job of jobs) {
+    await exhaustReviewerAbsenceActivationTransaction(db, {
+      jobId: job.id, workspaceId, provider, providerConnectionId,
+      lockedBy: "revocation-cleanup", lockedAt: now, attemptCount: job.attempt_count, maxAttempts: job.max_attempts,
+    }, `provider connection revoked (${revocationId})`, now, revocationId);
+  }
 }
 
 async function exhaustReviewerAbsenceActivationTransaction(
@@ -337,18 +377,27 @@ async function exhaustReviewerAbsenceActivationTransaction(
   lease: JobLease,
   error: string,
   now: Date,
+  queuedRevocationId?: string,
 ): Promise<JobTransitionResult> {
   return await db.transaction().execute(async (trx) => {
-    const job = await trx.selectFrom("jobs").selectAll()
+    const syncRun = await lockSyncRun(trx, lease);
+    let query = trx.selectFrom("jobs").selectAll()
       .where("id", "=", lease.jobId)
       .where("workspace_id", "=", lease.workspaceId)
       .where("provider", "=", lease.provider)
       .where("provider_connection_id", "=", lease.providerConnectionId)
-      .where("status", "=", "running")
-      .where("locked_by", "=", lease.lockedBy)
-      .where("locked_at", "=", lease.lockedAt)
-      .where("attempt_count", "=", lease.attemptCount)
-      .forUpdate().executeTakeFirst();
+      .where("attempt_count", "=", lease.attemptCount);
+    if (queuedRevocationId) {
+      query = query.where("status", "=", "queued")
+        .where(sql<boolean>`exists (select 1 from provider_connections c join provider_connection_revocations v
+          on v.workspace_id = c.workspace_id and v.provider = c.provider and v.physical_connection_id = c.id and v.external_connection_id = c.external_connection_id
+          where c.id = jobs.provider_connection_id and c.workspace_id = jobs.workspace_id and c.provider = jobs.provider and c.status = 'revoked'
+            and v.revoked_connection_id = ${queuedRevocationId} and v.cleanup_completed_at is null
+            and (jobs.external_installation_id is null or jobs.external_installation_id = c.external_connection_id))`);
+    } else {
+      query = query.where("status", "=", "running").where("locked_by", "=", lease.lockedBy).where("locked_at", "=", lease.lockedAt);
+    }
+    const job = await query.forUpdate().executeTakeFirst();
     if (job === undefined) return { updated: false, reason: "stale_lease" };
 
     const scope = parseActivationScope(job);
@@ -459,8 +508,15 @@ async function exhaustReviewerAbsenceActivationTransaction(
       status: "failed", run_at: now, locked_at: null, locked_by: null,
       last_error: finalError, updated_at: now,
     }).where("id", "=", job.id).execute();
+    if (syncRun && job.kind === "reconcile_queue_connection") await trx.updateTable("queue_sync_runs").set({ status: "failed", updated_at: now }).where("id", "=", syncRun.id).execute();
     return { updated: true };
   });
+}
+
+async function lockSyncRun(trx: import("kysely").Transaction<Database>, lease: JobLease) {
+  return trx.selectFrom("queue_sync_runs").select("id").where("workspace_id", "=", lease.workspaceId)
+    .where("provider_connection_id", "=", lease.providerConnectionId).where("dispatch_job_id", "=", lease.jobId)
+    .where("status", "in", ["queued", "running"]).forUpdate().executeTakeFirst();
 }
 
 function parseActivationScope(job: JobRow): { absenceId: string; absenceRevision: number } | null {
@@ -727,6 +783,8 @@ function toJobRecord(row: JobRow): JobRecord {
     workspaceId: row.workspace_id,
     provider: row.provider,
     providerConnectionId: row.provider_connection_id,
+    externalInstallationId: row.external_installation_id,
+    externalRepositoryId: row.external_repository_id,
     kind: row.kind as JobKind,
     status: row.status,
     payload: row.payload,
@@ -749,6 +807,18 @@ export function createJobClaimer(db: Kysely<Database>): JobClaimer {
           .selectAll()
           .where("status", "=", "queued")
           .where("run_at", "<=", now)
+          .where(sql<boolean>`(jobs.kind not in ('process_pull_request', 'evaluate_human_review_policy', 'refresh_queue_pull', 'reconcile_queue_connection', 'replay_deferred_delivery') or (
+            jobs.external_installation_id is not null
+            and exists (select 1 from provider_connections c
+              where c.workspace_id = jobs.workspace_id and c.provider = jobs.provider and c.id = jobs.provider_connection_id
+                and c.status = 'active' and c.external_connection_id = jobs.external_installation_id
+                and not exists (select 1 from provider_connection_revocations v
+                  where v.workspace_id = c.workspace_id and v.provider = c.provider and v.external_connection_id = c.external_connection_id)
+                and (jobs.kind = 'reconcile_queue_connection' or exists (select 1 from repositories r
+                  where r.workspace_id = c.workspace_id and r.provider = c.provider and r.provider_connection_id = c.id
+                    and r.external_repository_id = jobs.external_repository_id)))
+          ))`)
+          .orderBy(sql`case when jobs.kind in ('refresh_queue_pull', 'reconcile_queue_connection', 'replay_deferred_delivery') then 1 else 0 end`, "asc")
           .orderBy("run_at", "asc")
           .orderBy("created_at", "asc")
           .orderBy("id", "asc")
@@ -790,6 +860,8 @@ export function createWorkspaceJobQueue(
           workspace_id: workspaceId,
           provider: input.provider,
           provider_connection_id: input.providerConnectionId,
+          external_installation_id: input.externalInstallationId ?? null,
+          external_repository_id: input.externalRepositoryId ?? null,
           kind: input.kind,
           payload: input.payload,
           idempotency_key: input.idempotencyKey,
@@ -832,17 +904,20 @@ export function createWorkspaceJobQueue(
     async markFailed(lease, error, now, options) {
       if (lease.workspaceId !== workspaceId) return { updated: false, reason: "stale_lease" };
       const recovery = options.recovery;
-      const exhausted = recovery === undefined && (!options.retryable || lease.attemptCount >= lease.maxAttempts);
+      const maxAttempts = options.rateLimitRetryAt ? Math.max(lease.maxAttempts, 20) : lease.maxAttempts;
+      const exhausted = recovery === undefined && (!options.retryable || lease.attemptCount >= maxAttempts);
 
-      const updated = await db
+      return await db.transaction().execute(async trx => {
+      const syncRun = await lockSyncRun(trx, lease);
+      const updated = await trx
         .updateTable("jobs")
         .set({
           status: recovery === undefined && exhausted ? "failed" : "queued",
           ...(recovery === undefined
-            ? {}
+            ? options.rateLimitRetryAt ? { max_attempts: maxAttempts } : {}
             : { payload: recovery.payload, max_attempts: recovery.maxAttempts }),
           last_error: error,
-          run_at: recovery === undefined && exhausted ? now : buildNextRunAt(now, lease.attemptCount),
+          run_at: recovery === undefined && exhausted ? now : options.rateLimitRetryAt && options.rateLimitRetryAt > now ? options.rateLimitRetryAt : buildNextRunAt(now, lease.attemptCount),
           locked_at: null,
           locked_by: null,
           updated_at: now,
@@ -855,9 +930,12 @@ export function createWorkspaceJobQueue(
         .where("locked_by", "=", lease.lockedBy)
         .where("locked_at", "=", lease.lockedAt)
         .where("attempt_count", "=", lease.attemptCount)
-        .returning("id")
+        .returning(["id", "kind"])
         .executeTakeFirst();
+      if (updated && syncRun && updated.kind === "reconcile_queue_connection") await trx.updateTable("queue_sync_runs")
+        .set({ status: exhausted ? "failed" : "queued", updated_at: now }).where("id", "=", syncRun.id).execute();
       return updated ? { updated: true } : { updated: false, reason: "stale_lease" };
+      });
     },
 
     async exhaustReviewerAbsenceActivation(lease, error, now) {

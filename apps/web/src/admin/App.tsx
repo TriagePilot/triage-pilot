@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   Analytics,
+  PullRequests,
+  type PullRequestQueueApiClient,
   type AnalyticsApiClient,
   EffectiveConfiguration,
   OverviewPage,
@@ -19,6 +21,7 @@ import {
 import {
   AdminApiError,
   createSelfHostedAnalyticsApi,
+  createSelfHostedPullRequestQueueApi,
   createSelfHostedOperationsApi,
   getSession,
   login,
@@ -27,6 +30,7 @@ import {
 
 type AuthState = "checking" | "signed-out" | "signed-in";
 type SectionId =
+  | "pull-requests"
   | "analytics"
   | "overview"
   | "repositories"
@@ -37,6 +41,7 @@ type SectionId =
 
 const sectionLabels: Record<SectionId, string> = {
   analytics: "Analytics",
+  "pull-requests": "Pull requests",
   overview: "Overview",
   repositories: "Repositories",
   decisions: "Routing decisions",
@@ -269,6 +274,7 @@ interface DashboardProps {
   onUnauthorized?(message: string): void;
   api?: OperationsApiClient;
   analyticsApi?: AnalyticsApiClient;
+  pullRequestQueueApi?: PullRequestQueueApiClient;
 }
 
 export function Dashboard({
@@ -281,6 +287,7 @@ export function Dashboard({
   onUnauthorized,
   api: providedApi,
   analyticsApi: providedAnalyticsApi,
+  pullRequestQueueApi: providedPullRequestQueueApi,
 }: DashboardProps) {
   const api = useMemo(
     () =>
@@ -297,6 +304,10 @@ export function Dashboard({
       providedAnalyticsApi ??
       createSelfHostedAnalyticsApi(onUnauthorized ? { onUnauthorized } : {}),
     [providedAnalyticsApi, onUnauthorized],
+  );
+  const pullRequestQueueApi = useMemo(
+    () => providedPullRequestQueueApi ?? createSelfHostedPullRequestQueueApi(onUnauthorized ? { onUnauthorized } : {}),
+    [providedPullRequestQueueApi, onUnauthorized],
   );
   const [currentOverview, setCurrentOverview] = useState(overview);
   const [activeRoute, setActiveRoute] = useState(routeFromHash);
@@ -408,6 +419,7 @@ export function Dashboard({
           {sectionLink("overview", "overview")}
           {sectionLink("repositories", "repository")}
           {sectionLink("decisions", "route")}
+          {sectionLink("pull-requests", "pull-request")}
           {sectionLink("analytics", "overview")}
           {sectionLink("reviewer-availability", "user")}
           {sectionLink("effective-configuration", "settings")}
@@ -470,6 +482,9 @@ export function Dashboard({
           </div>
         </header>
         <main className="shell">
+          {activeSection === "pull-requests" ? (
+            <PullRequests api={pullRequestQueueApi} workspace={workspace} authorization={selfHostedAuthorization} {...(onUnauthorized ? { onUnauthorized } : {})} />
+          ) : null}
           {error ? (
             <p role="alert" className="notice notice--danger dashboard-notice">
               {error}
@@ -713,6 +728,7 @@ function UiIcon({ name }: { name: string }) {
         <path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1m0-12.8-2.1 2.1m-8.6 8.6-2.1 2.1" />
       </>
     ),
+    "pull-request": <><circle cx="6" cy="5" r="2" /><circle cx="6" cy="19" r="2" /><circle cx="18" cy="19" r="2" /><path d="M6 7v10m8-13 4 4-4 4m0-4h1a3 3 0 0 1 3 3v6" /></>,
     health: <path d="M3 12h4l2-5 4 10 2-5h6" />,
   };
   return (

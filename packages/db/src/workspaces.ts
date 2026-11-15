@@ -16,6 +16,8 @@ import {
 import {
   acceptHumanReviewPolicyDelivery,
   acceptRoutingDelivery,
+  acceptPullRequestDelivery,
+  type PullRequestDeliveryInput,
   type HumanReviewPolicyDeliveryInput,
   type RoutingDeliveryInput,
 } from "./deliveries.js";
@@ -68,6 +70,7 @@ export interface WorkspaceRepositories {
   findRepositoryConfigurationTarget(repositoryId: string): Promise<RepositoryConfigurationTarget | null>;
   recoverStaleJobs(now: Date, staleAfterMs?: number): Promise<void>;
   applyFixedRetention(now: Date): Promise<void>;
+  acceptPullRequestDelivery(input: PullRequestDeliveryInput): Promise<{ inserted: boolean; routingJobId: string | null; policyJobId: string | null; deferred?: boolean }>;
   acceptRoutingDelivery(input: RoutingDeliveryInput): Promise<{ inserted: boolean; jobId: string | null }>;
   acceptHumanReviewPolicyDelivery(input: HumanReviewPolicyDeliveryInput): Promise<{ inserted: boolean; jobId: string | null }>;
   activateConfiguredProviderConnection(input: ProviderConnectionMetadata): Promise<void>;
@@ -97,6 +100,7 @@ export function createWorkspaceRepositories(
       findRepositoryConfigurationTarget(db, workspaceId, repositoryId),
     recoverStaleJobs: (now, staleAfterMs) => recoverStaleJobs(db, workspaceId, now, staleAfterMs),
     applyFixedRetention: (now) => applyFixedRetention(db, workspaceId, now),
+    acceptPullRequestDelivery: (input) => acceptPullRequestDelivery(db, workspaceId, input),
     acceptRoutingDelivery: (input) => acceptRoutingDelivery(db, workspaceId, input),
     acceptHumanReviewPolicyDelivery: (input) => acceptHumanReviewPolicyDelivery(db, workspaceId, input),
     activateConfiguredProviderConnection: (input) => activateConfiguredProviderConnection(db, workspaceId, input),

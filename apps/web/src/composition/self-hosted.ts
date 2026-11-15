@@ -110,7 +110,7 @@ export async function createSelfHostedWebComposition(
     services,
     configuration,
     routingRecovery,
-    close: () => db.destroy(),
+    close: async () => { services.disposePullRequestQueue(); await db.destroy(); },
   };
 }
 

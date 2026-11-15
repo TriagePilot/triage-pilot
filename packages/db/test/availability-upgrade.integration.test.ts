@@ -22,9 +22,47 @@ const FINAL_MIGRATIONS = [
   "0009_provider_connection_revocations.sql",
   "0010_provider_connection_preemptive_revocations.sql",
   "0011_reviewer_selection_context.sql",
+  "0012_pull_request_projection.sql",
+  "0013_queue_pull_checkpoints.sql",
+  "0014_queue_verification.sql",
+  "0015_queue_sync_schedule.sql",
+  "0016_deferred_pull_request_deliveries.sql",
 ];
 
 describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reviewer availability migration histories", () => {
+  it("backfills origin only from retained receipt and job evidence", async () => {
+    await withPostgresTestDatabaseUrl(async databaseUrl => {
+      await applyMigrationHistory(databaseUrl, FINAL_MIGRATIONS.slice(0, FINAL_MIGRATIONS.indexOf("0012_pull_request_projection.sql")));
+      const pool = new pg.Pool({ connectionString: databaseUrl });
+      try {
+        const workspace = (await pool.query<{ id: string }>("select id from workspaces where external_key = 'self-hosted'")).rows[0]!.id;
+        const connection = (await pool.query<{ id: string }>("insert into provider_connections (workspace_id, provider, external_connection_id, workspace_login, account_type, status, permissions) values ($1, 'github', 'new-install', 'acme', 'Organization', 'active', '{}') returning id", [workspace])).rows[0]!.id;
+        const repository = (await pool.query<{ id: string }>("insert into repositories (workspace_id, provider, provider_connection_id, external_repository_id, owner, name) values ($1, 'github', $2, 'repo', 'acme', 'api') returning id", [workspace, connection])).rows[0]!.id;
+        await pool.query("insert into webhook_receipts (workspace_id, provider, delivery_id, event_name, external_connection_id, payload_summary, created_at) values ($1, 'github', 'proved', 'pull_request', 'old-install', '{}', '2026-01-01')", [workspace]);
+        await pool.query("insert into jobs (workspace_id, provider, provider_connection_id, kind, payload, idempotency_key, created_at) values ($1, 'github', $2, 'process_pull_request', $3, 'proved-key', '2026-01-02'), ($1, 'github', $2, 'process_pull_request', $4, 'unknown-key', '2026-01-02')", [workspace, connection, { deliveryId: "proved", changeRequest: { repository: { externalId: "repo" } } }, { deliveryId: "unknown", changeRequest: { repository: { externalId: "repo" } } }]);
+        await pool.query("insert into jobs (workspace_id, provider, provider_connection_id, kind, status, locked_at, locked_by, payload, idempotency_key) values ($1, 'github', $2, 'process_pull_request', 'running', now(), 'old-worker', '{}', 'unknown-running'), ($1, 'github', $2, 'process_pull_request', 'succeeded', null, null, '{}', 'unknown-succeeded')", [workspace, connection]);
+        await pool.query("insert into webhook_receipts (workspace_id, provider, delivery_id, event_name, external_connection_id, payload_summary, created_at) values ($1, 'github', 'policy-proved', 'pull_request_review', 'old-install', '{}', '2026-01-01')", [workspace]);
+        await pool.query("insert into jobs (workspace_id, provider, provider_connection_id, kind, payload, idempotency_key, created_at) values ($1, 'github', $2, 'evaluate_human_review_policy', $3, 'policy-proved', '2026-01-02'), ($1, 'github', $2, 'evaluate_human_review_policy', $4, 'policy-unknown', '2026-01-02')", [workspace, connection, { deliveryId: "policy-proved", changeRequest: { repository: { externalId: "repo" } } }, { deliveryId: "policy-unknown", changeRequest: { repository: { externalId: "repo" } } }]);
+        await pool.query("insert into routing_decisions (workspace_id, repository_id, delivery_id, routing_key, action, risk_score, details, effective_config_hash, inheritance_mode, created_at) values ($1, $2, 'proved', 'proved-key', 'route', 0, '{}', 'hash', 'legacy', '2026-01-03'), ($1, $2, 'unknown', 'unknown-key', 'route', 0, '{}', 'hash', 'legacy', '2026-01-03')", [workspace, repository]);
+      } finally { await pool.end(); }
+      await runMigrations(databaseUrl);
+      const verification = new pg.Pool({ connectionString: databaseUrl });
+      try {
+        const result = await verification.query("select routing_key, origin_external_installation_id, origin_external_repository_id from routing_decisions order by routing_key");
+        expect(result.rows).toEqual([{ routing_key: "proved-key", origin_external_installation_id: "old-install", origin_external_repository_id: "repo" }, { routing_key: "unknown-key", origin_external_installation_id: null, origin_external_repository_id: null }]);
+        const routingJobs = await verification.query("select idempotency_key, status, external_installation_id, external_repository_id, locked_at, locked_by, last_error from jobs where kind = 'process_pull_request' order by idempotency_key");
+        expect(routingJobs.rows).toEqual([
+          { idempotency_key: "proved-key", status: "queued", external_installation_id: "old-install", external_repository_id: "repo", locked_at: null, locked_by: null, last_error: null },
+          { idempotency_key: "unknown-key", status: "failed", external_installation_id: null, external_repository_id: null, locked_at: null, locked_by: null, last_error: "legacy routing job lacks immutable installation or repository provenance" },
+          { idempotency_key: "unknown-running", status: "failed", external_installation_id: null, external_repository_id: null, locked_at: null, locked_by: null, last_error: "legacy routing job lacks immutable installation or repository provenance" },
+          { idempotency_key: "unknown-succeeded", status: "succeeded", external_installation_id: null, external_repository_id: null, locked_at: null, locked_by: null, last_error: null },
+        ]);
+        const policyJobs = await verification.query("select idempotency_key, status, external_installation_id, external_repository_id, last_error from jobs where kind = 'evaluate_human_review_policy' order by idempotency_key");
+        expect(policyJobs.rows).toEqual([{ idempotency_key: "policy-proved", status: "queued", external_installation_id: "old-install", external_repository_id: "repo", last_error: null }, { idempotency_key: "policy-unknown", status: "failed", external_installation_id: null, external_repository_id: null, last_error: "legacy policy job lacks immutable installation or repository provenance" }]);
+      } finally { await verification.end(); }
+    });
+  }, 20_000);
+
   it("builds the workspace-scoped availability schema from a fresh database", async () => {
     await withPostgresTestDatabaseUrl(async (databaseUrl) => {
       await runMigrations(databaseUrl);

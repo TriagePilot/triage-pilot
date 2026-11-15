@@ -21,6 +21,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       const repository = await db.selectFrom("repositories").select("provider_connection_id").where("id", "=", repositoryId).executeTakeFirstOrThrow();
       const job = { kind: "process_change_request" as const, workspaceId, providerConnectionId: repository.provider_connection_id, deliveryId: "delivery-replay", routingKey: "routing-replay", eventName: "change_request.opened", isDraft: false,
         changeRequest: { repository: { provider: "github" as const, externalId: "101", owner: "acme", name: "api" }, externalId: "7", number: 7, baseRevision: "base", headRevision: "head" } };
+      await db.insertInto("jobs").values({ workspace_id: workspaceId, provider: "github", provider_connection_id: job.providerConnectionId, external_installation_id: "99", external_repository_id: "101", kind: "process_pull_request", payload: job, idempotency_key: job.routingKey }).execute();
       const persisted = await persistDecision(db, workspaceId, { repositoryId, deliveryId: job.deliveryId, routingKey: job.routingKey, changeRequestId: "7", pullNumber: 7, headSha: "head", mode: "enforce", action: "request_human_review", actionStatus: "pending", riskScore: 50, details: { original: true } });
       expect(await findSucceededRoutingDecision(db, workspaceId, job)).toBeNull();
       await markActionSucceeded(db, workspaceId, persisted.decisionId, new Date());
@@ -28,7 +29,9 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("routing decisions", () =
       expect(await findSucceededRoutingDecision(db, workspaceId, { ...job, changeRequest: { ...job.changeRequest, headRevision: "other" } })).toBeNull();
       expect(await findSucceededRoutingDecision(db, workspaceId, { ...job, providerConnectionId: "00000000-0000-0000-0000-000000000000" })).toBeNull();
       expect(await findSucceededRoutingDecision(db, "other", job)).toBeNull();
-      await db.updateTable("provider_connections").set({ status: "suspended" }).where("id", "=", job.providerConnectionId).execute();
+      await db.updateTable("provider_connections").set({ external_connection_id: "replacement" }).where("id", "=", job.providerConnectionId).execute();
+      expect(await findSucceededRoutingDecision(db, workspaceId, job)).toBeNull();
+      await db.updateTable("provider_connections").set({ external_connection_id: "99", status: "suspended" }).where("id", "=", job.providerConnectionId).execute();
       expect(await findSucceededRoutingDecision(db, workspaceId, job)).toBeNull();
     });
   });

@@ -87,3 +87,7 @@ Add `.triagepilot.yml` to each selected repository. Missing configuration and `m
 ## Inspect analytics
 
 After administrator login, open **Analytics** for historical enforced outcomes or shadow projections and current tracked reviewer workload. [Analytics and reviewer backlog](../operations/analytics.md) explains the one-reviewer baseline, editable effort estimate, 90-day coverage, and live freshness. This requires no additional GitHub permission or repository configuration switch.
+
+## Inspect open pull requests
+
+After administrator login, open **Pull requests** for the grouped queue of open pull requests in selected repositories, excluding drafts and bot-authored pull requests. See [Open pull-request queue](../operations/pull-request-queue.md) for filters, evidence, freshness, and coverage.

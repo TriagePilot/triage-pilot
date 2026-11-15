@@ -2,6 +2,7 @@ const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export interface WorkerMaintenanceServices {
   recoverStaleJobs(now: Date): Promise<void>;
+  scheduleQueueSync?(now: Date, reason: "startup" | "scheduled"): Promise<void>;
   cleanupRevokedProviderConnections(now: Date): Promise<void>;
   applyRetention(now: Date): Promise<void>;
   updateHeartbeat(now: Date): Promise<void>;
@@ -17,6 +18,7 @@ export async function runWorkerStartup(
   now: Date,
 ): Promise<WorkerMaintenanceState> {
   await services.recoverStaleJobs(now);
+  await services.scheduleQueueSync?.(now, "startup");
   await runProviderConnectionCleanup(services, now);
   await services.applyRetention(now);
   await services.updateHeartbeat(now);
@@ -30,6 +32,7 @@ export async function runWorkerMaintenance(
   now: Date,
 ): Promise<WorkerMaintenanceState> {
   await services.recoverStaleJobs(now);
+  await services.scheduleQueueSync?.(now, "scheduled");
   await runProviderConnectionCleanup(services, now);
   await services.updateHeartbeat(now);
   await runPlatformOutboxDrain(services, now);

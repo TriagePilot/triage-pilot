@@ -16,9 +16,14 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
       `.execute(db);
       expect(result.rows.map((row) => row.table_name)).toEqual([
         "decision_outbox",
+        "deferred_pull_request_deliveries",
         "jobs",
         "provider_connection_revocations",
         "provider_connections",
+        "queue_pull_work",
+        "queue_sync_runs",
+        "queue_sync_scan_members",
+        "queue_sync_schedule",
         "repositories",
         "reviewer_absences",
         "reviewer_mutation_intents",
@@ -153,6 +158,11 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("reduced schema", () => {
         { name: "0009_provider_connection_revocations.sql" },
         { name: "0010_provider_connection_preemptive_revocations.sql" },
         { name: "0011_reviewer_selection_context.sql" },
+        { name: "0012_pull_request_projection.sql" },
+        { name: "0013_queue_pull_checkpoints.sql" },
+        { name: "0014_queue_verification.sql" },
+        { name: "0015_queue_sync_schedule.sql" },
+        { name: "0016_deferred_pull_request_deliveries.sql" },
       ]);
     });
   });

@@ -428,6 +428,9 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace persistence is
       const repositoriesA = createWorkspaceRepositories(db, workspaceA);
       const repositoriesB = createWorkspaceRepositories(db, workspaceB);
 
+      await seedConnectionAndRepository(db, workspaceA, "github", "99", "200", "api");
+      await seedConnectionAndRepository(db, workspaceB, "github", "99", "200", "api");
+
       await expect(repositoriesA.acceptRoutingDelivery(routingDelivery("same-delivery", "same-routing")))
         .resolves.toMatchObject({ inserted: true });
       await expect(repositoriesB.acceptRoutingDelivery(routingDelivery("same-delivery", "same-routing")))
@@ -450,8 +453,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("workspace persistence is
         .groupBy("workspace_id")
         .orderBy("workspace_id")
         .execute()).resolves.toEqual(expect.arrayContaining([
-        { workspace_id: workspaceA, count: "2" },
-        { workspace_id: workspaceB, count: "2" },
+        { workspace_id: workspaceA, count: "3" },
+        { workspace_id: workspaceB, count: "3" },
       ]));
     });
   });
@@ -605,6 +608,8 @@ function job(idempotencyKey: string, providerConnectionId: string, runAt: Date) 
     provider: "github" as const,
     providerConnectionId,
     payload: { fixture: true },
+    externalInstallationId: "99",
+    externalRepositoryId: "200",
     idempotencyKey,
     runAt,
   };

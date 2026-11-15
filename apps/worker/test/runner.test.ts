@@ -67,6 +67,8 @@ const jobScope = {
 const jobRecord: JobRecord = {
   id: "job-1",
   ...jobScope,
+  externalInstallationId: "123",
+  externalRepositoryId: "456",
   kind: "process_pull_request",
   status: "queued",
   payload: routingJobPayload,
@@ -544,6 +546,8 @@ describe("runWorkerOnce", () => {
       claimNext: vi.fn(async (): Promise<JobRecord> => ({
         id: "job-1",
         ...jobScope,
+        externalInstallationId: "123",
+        externalRepositoryId: "456",
         kind: "process_pull_request",
         status: "running",
         payload: {
@@ -660,7 +664,7 @@ describe("runWorkerOnce", () => {
     });
 
     expect(processHumanReviewPolicyJob).toHaveBeenCalledWith(
-      policyJobPayload,
+      { ...policyJobPayload, externalInstallationId: "123", externalRepositoryId: "456" },
       policyServices,
     );
     expect(buildHumanReviewPolicyServices).toHaveBeenCalledWith(

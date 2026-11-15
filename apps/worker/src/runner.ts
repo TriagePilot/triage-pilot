@@ -1,5 +1,5 @@
 import type { JobClaimer, JobLease, JobRecord, JobTransitionResult, WorkspaceJobQueue } from "@triagepilot/db";
-import type { WorkspaceId } from "@triagepilot/contracts";
+import { PullRequestQueueUnavailableError, type WorkspaceId } from "@triagepilot/contracts";
 import type { HumanReviewPolicyJobPayload } from "@triagepilot/contracts";
 import {
   assertReviewerReplacementFinalizerRecovery,
@@ -33,6 +33,8 @@ export interface WorkerRunnerInput {
   workspaceQueue(workspaceId: WorkspaceId): WorkspaceJobQueue;
   workerId: string;
   now: Date;
+  processDeferredDelivery?(lease: JobLease): Promise<boolean>;
+  processQueueSyncJob?(job: JobRecord, lease: JobLease): Promise<void>;
   processRoutingJob(message: RoutingJobMessage, services: RoutingJobServices): Promise<void>;
   buildRoutingServices(message: RoutingJobMessage): RoutingJobServices;
   processHumanReviewPolicyJob?(
@@ -71,7 +73,14 @@ export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> 
   let reviewerReplacementRecovery: ReviewerReplacementFinalizerRecovery | null = null;
 
   try {
-    if (job.kind === "process_pull_request") {
+    if (job.kind === "replay_deferred_delivery") {
+      if (!input.processDeferredDelivery || !await input.processDeferredDelivery(lease)) throw new StaleJobLeaseError("deferred delivery lease unavailable");
+      return true;
+    } else if (job.kind === "refresh_queue_pull" || job.kind === "reconcile_queue_connection") {
+      if (!input.processQueueSyncJob) throw new PermanentJobError("queue sync processor is not configured");
+      await input.processQueueSyncJob(job, lease);
+      return true;
+    } else if (job.kind === "process_pull_request") {
       const message = parseRoutingJobPayload(job);
       routingServices = input.buildRoutingServices(message);
       const recovery = parsePolicyCheckFailureRecovery(job.payload);
@@ -186,6 +195,8 @@ export async function runWorkerOnce(input: WorkerRunnerInput): Promise<boolean> 
     assertLeaseUpdated(
       await claimedQueue().markFailed(lease, classified.message, new Date(), {
         retryable,
+        ...((job.kind === "refresh_queue_pull" || job.kind === "reconcile_queue_connection") && error instanceof PullRequestQueueUnavailableError && error.reason === "rate_limited"
+          ? { rateLimitRetryAt: error.retryAt ?? new Date(Date.now() + 60_000) } : {}),
       }),
       lease,
     );
@@ -390,6 +401,8 @@ function withClaimedScope(job: JobRecord): unknown {
     ...job.payload,
     workspaceId: job.workspaceId,
     providerConnectionId: job.providerConnectionId,
+    externalInstallationId: job.externalInstallationId,
+    externalRepositoryId: job.externalRepositoryId,
     changeRequest: {
       ...changeRequest,
       ...(isRecord(repository) ? { repository: { ...repository, provider: job.provider } } : {}),

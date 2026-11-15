@@ -1,4 +1,4 @@
-import type { NormalizedChangeRequestEvent } from "@triagepilot/contracts";
+import type { NormalizedChangeRequestEvent, QueueInvalidationRef } from "@triagepilot/contracts";
 import { z } from "zod";
 
 const ROUTING_PULL_REQUEST_ACTIONS = new Set(["opened", "reopened", "synchronize", "ready_for_review"]);
@@ -102,4 +102,13 @@ function toNormalizedEvent(
     },
     isDraft: payload.pull_request.draft,
   };
+}
+
+const INVALIDATION_PULL_ACTIONS = new Set(["opened", "reopened", "synchronize", "closed", "edited", "ready_for_review", "converted_to_draft", "review_requested", "review_request_removed"]);
+
+export function normalizeQueueInvalidation(eventName: string, payload: unknown): QueueInvalidationRef | null {
+  if (eventName !== "pull_request" && eventName !== "pull_request_review") return null;
+  const parsed = (eventName === "pull_request_review" ? pullRequestReviewWebhookSchema : pullRequestWebhookSchema).parse(payload);
+  if (!(eventName === "pull_request" ? INVALIDATION_PULL_ACTIONS : REVIEW_PULL_REQUEST_ACTIONS).has(parsed.action)) return null;
+  return { externalInstallationId: parsed.installation.id, repository: { provider: "github", externalId: parsed.repository.id, owner: parsed.repository.owner.login, name: parsed.repository.name }, pullNumber: parsed.pull_request.number };
 }

@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 
 import { describe, expect, it } from "vitest";
 
@@ -101,9 +101,22 @@ describe("release workflow guardrails", () => {
 
   it("uses the current database migration for manifest creation and publication verification", async () => {
     const release = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
-    const migrationArgument = "--database-migration 0011_reviewer_selection_context.sql";
+    const migrations = await readdir(new URL("../packages/db/migrations/", import.meta.url));
+    const latestMigration = migrations.filter((name) => name.endsWith(".sql")).sort().at(-1);
+    expect(latestMigration).toBeDefined();
+    const migrationArgument = `--database-migration ${latestMigration}`;
 
     expect(release.split(migrationArgument)).toHaveLength(3);
+  });
+
+  it("verifies upgrades against the current database migration", async () => {
+    const upgrade = await readFile(new URL("../scripts/test-previous-release-upgrade.sh", import.meta.url), "utf8");
+    const migrations = await readdir(new URL("../packages/db/migrations/", import.meta.url));
+    const latestMigration = migrations.filter((name) => name.endsWith(".sql")).sort().at(-1);
+    expect(latestMigration).toBeDefined();
+
+    expect(upgrade).toContain(`[[ "$latest_migration" == "${latestMigration}" ]]`);
+    expect(upgrade).toContain(`Expected highest migration ${latestMigration}, found $latest_migration`);
   });
 
   it("pins gitleaks by digest in CI and release workflows", async () => {

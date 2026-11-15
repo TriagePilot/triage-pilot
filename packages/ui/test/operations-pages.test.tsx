@@ -351,7 +351,7 @@ it("keeps provider links and reviewer details in the shipped decision page", asy
   const link = container.querySelector<HTMLAnchorElement>(
     'a[href="https://provider.test/pull/1"]',
   );
-  expect(link?.textContent).toBe("#1");
+  expect(link?.textContent).toBe("team/repository-1#1");
   expect(link?.target).toBe("_blank");
   expect(link?.rel).toBe("noreferrer");
   expect(container.querySelector(".decision-inspector")?.textContent).toContain(

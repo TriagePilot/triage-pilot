@@ -7,6 +7,7 @@
 - [Backups and restore](self-hosting/backups.md)
 - [Upgrades](self-hosting/upgrades.md)
 - [Retention](operations/retention.md)
+- [Open pull-request queue](operations/pull-request-queue.md)
 - [Analytics and reviewer backlog](operations/analytics.md)
 - [Reviewer availability](operations/reviewer-availability.md)
 - [Job troubleshooting](troubleshooting/jobs.md)

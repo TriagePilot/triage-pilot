@@ -6,7 +6,8 @@ import {
   type RoutingJobPayload,
   type WorkspaceId,
 } from "@triagepilot/contracts";
-import type { GitHubWebhookInput, NormalizedGitHubWebhookEvent } from "@triagepilot/provider-github";
+import { normalizeQueueInvalidation, type GitHubWebhookInput, type NormalizedGitHubWebhookEvent } from "@triagepilot/provider-github";
+import type { QueueInvalidationRef } from "@triagepilot/contracts";
 import type {
   GitHubInstallationMetadata,
   GitHubId,
@@ -43,6 +44,13 @@ export interface WebhookServices {
   getWebhookSecret(): Promise<string>;
   verifySignature(input: { body: string; secret: string; signature: string | null }): Promise<void>;
   normalizeGitHubWebhook(input: GitHubWebhookInput): NormalizedGitHubWebhookEvent | null;
+  acceptPullRequestDelivery(input: {
+    deliveryId: string; eventName: string; eventAction: string; hookId: string | null;
+    installation: GitHubInstallationMetadata; repository: GitHubRepositoryMetadata;
+    invalidation: QueueInvalidationRef;
+    routingPayload?: Omit<RoutingJobPayload, "workspaceId" | "providerConnectionId">;
+    policyPayload?: Omit<HumanReviewPolicyJobPayload, "workspaceId" | "providerConnectionId">;
+  }): Promise<{ inserted: boolean; routingJobId: string | null; policyJobId: string | null; deferred?: boolean }>;
   acceptRoutingDelivery(input: {
     deliveryId: string;
     eventName: string;
@@ -101,66 +109,27 @@ export function githubWebhookRoutes(services: WebhookServices) {
     const parsedBody = body ? (JSON.parse(body) as unknown) : {};
 
     if (eventName === "pull_request" || eventName === "pull_request_review") {
+      const invalidation = normalizeQueueInvalidation(eventName, parsedBody);
+      if (!invalidation) return c.json({ ok: true, ignored: "action" as const }, 202);
+      const envelope = z.object({ action: z.string(), repository: z.object({ owner: accountSchema }) }).parse(parsedBody);
+      if (!isConfiguredOrganization(envelope.repository.owner, services.githubOrganization)) {
+        return ignoreAccount(c, services, eventName, deliveryId, envelope.repository.owner);
+      }
       const normalized = services.normalizeGitHubWebhook({ eventName, deliveryId, payload: parsedBody });
-      if (normalized === null) {
-        return c.json({ ok: true, ignored: "action" as const }, 202);
+      let routingPayload: Omit<RoutingJobPayload, "workspaceId" | "providerConnectionId"> | undefined;
+      let policyPayload: Omit<HumanReviewPolicyJobPayload, "workspaceId" | "providerConnectionId"> | undefined;
+      if (normalized?.eventName === "change_request") {
+        routingPayload = { kind: "process_change_request", deliveryId, eventName: `${normalized.eventName}.${normalized.eventAction}`, changeRequest: normalized.changeRequest, isDraft: normalized.isDraft,
+          routingKey: buildRoutingKey({ workspaceId: services.workspaceId, provider: normalized.provider, repositoryId: normalized.changeRequest.repository.externalId, changeRequestId: normalized.changeRequest.externalId, trustedConfigRevision: normalized.changeRequest.baseRevision, headRevision: normalized.changeRequest.headRevision, isDraft: normalized.isDraft }) + (normalized.eventAction === "edited" ? `:retarget:${deliveryId}` : "") };
+      } else if (normalized?.eventName === "change_request_review") {
+        policyPayload = { kind: "evaluate_human_review_policy", deliveryId, changeRequest: { repository: normalized.changeRequest.repository, externalId: normalized.changeRequest.externalId, number: normalized.changeRequest.number } };
       }
-      if (!isConfiguredOrganization(normalized.providerAccount, services.githubOrganization)) {
-        return ignoreAccount(c, services, eventName, deliveryId, normalized.providerAccount);
-      }
+      const accepted = await services.acceptPullRequestDelivery({ deliveryId, eventName, eventAction: envelope.action, hookId: c.req.header("x-github-hook-id") ?? null,
+        installation: { githubInstallationId: invalidation.externalInstallationId, accountLogin: invalidation.repository.owner },
+        repository: { githubRepositoryId: invalidation.repository.externalId, owner: invalidation.repository.owner, name: invalidation.repository.name }, invalidation, ...(routingPayload ? { routingPayload } : {}), ...(policyPayload ? { policyPayload } : {}) });
+      if (accepted.deferred) return c.json({ ok: true, deferred: true as const }, 202);
+      return accepted.inserted ? c.json({ ok: true }, 202) : c.json({ ok: true, duplicate: true as const }, 202);
 
-      if (normalized.eventName === "change_request") {
-        const routingPayload: Omit<RoutingJobPayload, "workspaceId" | "providerConnectionId"> = {
-          kind: "process_change_request",
-          deliveryId,
-          eventName: `${normalized.eventName}.${normalized.eventAction}`,
-          changeRequest: normalized.changeRequest,
-          isDraft: normalized.isDraft,
-          routingKey: buildRoutingKey({
-            workspaceId: services.workspaceId,
-            provider: normalized.provider,
-            repositoryId: normalized.changeRequest.repository.externalId,
-            changeRequestId: normalized.changeRequest.externalId,
-            trustedConfigRevision: normalized.changeRequest.baseRevision,
-            headRevision: normalized.changeRequest.headRevision,
-            isDraft: normalized.isDraft,
-          }) + (normalized.eventAction === "edited" ? `:retarget:${deliveryId}` : ""),
-        };
-        const accepted = await services.acceptRoutingDelivery({
-          deliveryId,
-          eventName,
-          eventAction: normalized.eventAction,
-          hookId: c.req.header("x-github-hook-id") ?? null,
-          installation: toInstallationMetadata(normalized),
-          repository: toRepositoryMetadata(normalized),
-          payload: routingPayload,
-        });
-        return accepted.inserted
-          ? c.json({ ok: true }, 202)
-          : c.json({ ok: true, duplicate: true as const }, 202);
-      }
-
-      const reviewPolicyPayload: Omit<HumanReviewPolicyJobPayload, "workspaceId" | "providerConnectionId"> = {
-        kind: "evaluate_human_review_policy",
-        deliveryId,
-        changeRequest: {
-          repository: normalized.changeRequest.repository,
-          externalId: normalized.changeRequest.externalId,
-          number: normalized.changeRequest.number,
-        },
-      };
-      const accepted = await services.acceptHumanReviewPolicyDelivery({
-        deliveryId,
-        eventName,
-        eventAction: normalized.eventAction,
-        hookId: c.req.header("x-github-hook-id") ?? null,
-        installation: toInstallationMetadata(normalized),
-        repository: toRepositoryMetadata(normalized),
-        payload: reviewPolicyPayload,
-      });
-      return accepted.inserted
-        ? c.json({ ok: true }, 202)
-        : c.json({ ok: true, duplicate: true as const }, 202);
     }
 
     if (eventName === "installation") {

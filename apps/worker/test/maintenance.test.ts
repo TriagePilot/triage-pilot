@@ -5,6 +5,7 @@ import { runWorkerMaintenance, runWorkerStartup } from "../src/maintenance";
 function buildServices() {
   return {
     recoverStaleJobs: vi.fn(async (_now: Date) => {}),
+    scheduleQueueSync: vi.fn(async (_now: Date, _reason: "startup" | "scheduled") => {}),
     cleanupRevokedProviderConnections: vi.fn(async (_now: Date) => {}),
     applyRetention: vi.fn(async (_now: Date) => {}),
     updateHeartbeat: vi.fn(async (_now: Date) => {}),
@@ -18,6 +19,7 @@ describe("worker maintenance", () => {
     const now = new Date("2026-08-18T10:00:00.000Z");
 
     await expect(runWorkerStartup(services, now)).resolves.toEqual({ lastRetentionAt: now });
+    expect(services.scheduleQueueSync).toHaveBeenCalledWith(now, "startup");
     expect(services.recoverStaleJobs).toHaveBeenCalledOnce();
     expect(services.recoverStaleJobs).toHaveBeenCalledWith(now);
     expect(services.cleanupRevokedProviderConnections).toHaveBeenCalledWith(now);
@@ -35,6 +37,7 @@ describe("worker maintenance", () => {
     const now = new Date("2026-08-19T09:00:00.000Z");
 
     await expect(runWorkerMaintenance({ lastRetentionAt }, services, now)).resolves.toEqual({ lastRetentionAt });
+    expect(services.scheduleQueueSync).toHaveBeenCalledWith(now, "scheduled");
     expect(services.recoverStaleJobs).toHaveBeenCalledWith(now);
     expect(services.cleanupRevokedProviderConnections).toHaveBeenCalledWith(now);
     expect(services.updateHeartbeat).toHaveBeenCalledWith(now);
