@@ -38,7 +38,7 @@ const routingInputSchema = z.object({
   exclude_target_branches: z.array(z.string().min(1)).default([]),
   exclude_source_branch_patterns: z.array(z.string().min(1)).default([]),
   include_draft_pull_requests: z.boolean().default(false),
-}).strict().default({}).transform((routing) => ({
+}).strict().prefault({}).transform((routing) => ({
   highRiskReviewers: routing.high_risk_reviewers,
   excludeTargetBranches: routing.exclude_target_branches,
   excludeSourceBranchPatterns: routing.exclude_source_branch_patterns,
@@ -74,7 +74,7 @@ const riskThresholdDocumentSchema = z.object({
 const riskThresholdInputSchema = z.object({
   low: z.number().int().min(0).max(100).default(25),
   high: z.number().int().min(0).max(100).default(70),
-}).strict().default({});
+}).strict().prefault({});
 const riskSizeDocumentSchema = z.object({
   high_changed_files: z.number().int().positive().optional(),
   high_changed_lines: z.number().int().positive().optional(),
@@ -82,7 +82,7 @@ const riskSizeDocumentSchema = z.object({
 const riskSizeInputSchema = z.object({
   high_changed_files: z.number().int().positive().default(100),
   high_changed_lines: z.number().int().positive().default(5000),
-}).strict().default({}).transform((size) => ({
+}).strict().prefault({}).transform((size) => ({
   highChangedFiles: size.high_changed_files,
   highChangedLines: size.high_changed_lines,
 }));
@@ -93,7 +93,7 @@ const riskAiAuthorshipDocumentSchema = z.object({
 const riskAiAuthorshipInputSchema = z.object({
   enabled: z.boolean().default(true),
   modifier: z.number().int().min(0).max(100).default(10),
-}).strict().default({});
+}).strict().prefault({});
 const riskDocumentSchema = z.object({
   size: riskSizeDocumentSchema.optional(),
   thresholds: riskThresholdDocumentSchema.optional(),
@@ -109,7 +109,7 @@ const riskInputSchema = z.object({
   authors: riskAuthorRulesSchema.default([]),
   suppressors: z.array(riskSuppressorInputSchema).default([]),
   ai_authorship: riskAiAuthorshipInputSchema,
-}).strict().default({}).transform((risk) => ({
+}).strict().prefault({}).transform((risk) => ({
   size: risk.size,
   thresholds: risk.thresholds,
   paths: risk.paths,
@@ -129,7 +129,7 @@ const ownershipDocumentSchema = z.object({
 const ownershipInputSchema = z.object({
   rules: z.array(ownershipRuleInputSchema).default([]),
   fallback_reviewers: z.array(reviewerHandleSchema).default([]),
-}).strict().default({}).transform((ownership) => ({
+}).strict().prefault({}).transform((ownership) => ({
   rules: ownership.rules,
   fallbackReviewers: ownership.fallback_reviewers,
 }));
@@ -252,8 +252,8 @@ function zodFailure(issues: z.ZodIssue[]): { ok: false; diagnostics: ConfigDiagn
   };
 }
 
-export function formatDiagnosticPath(path: Array<string | number>): string {
+export function formatDiagnosticPath(path: PropertyKey[]): string {
   return path.reduce<string>((formatted, segment) => (
-    typeof segment === "number" ? `${formatted}[${segment}]` : `${formatted}.${segment}`
+    typeof segment === "number" ? `${formatted}[${segment}]` : `${formatted}.${String(segment)}`
   ), "$" );
 }

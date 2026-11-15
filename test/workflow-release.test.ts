@@ -3,8 +3,8 @@ import { readFile, readdir } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 describe("release workflow guardrails", () => {
-  it("keeps the v1.1.1 release version synchronized across publishable artifacts", async () => {
-    const expectedVersion = "1.1.1";
+  it("keeps the v1.2.0 release version synchronized across publishable artifacts", async () => {
+    const expectedVersion = "1.2.0";
     const packageDirectories = ["contracts", "config", "core", "application", "db", "provider-github", "ui"];
     const rootManifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
     const dockerfile = await readFile(new URL("../Dockerfile", import.meta.url), "utf8");
@@ -31,6 +31,7 @@ describe("release workflow guardrails", () => {
     expect(internalDependencyCount).toBe(8);
     expect(lockfile.match(new RegExp(`specifier: workspace:${expectedVersion.replaceAll(".", "\\.")}`, "g"))).toHaveLength(8);
     expect(lockfile).not.toContain("workspace:1.1.0");
+    expect(lockfile).not.toContain("workspace:1.1.1");
   });
 
   it("runs CI and release verification on Node 24", async () => {

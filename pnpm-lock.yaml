@@ -27,8 +27,8 @@ importers:
   apps/web:
     dependencies:
       '@hono/node-server':
-        specifier: ^1.19.15
-        version: 1.19.15(hono@4.13.5)
+        specifier: ^2.1.3
+        version: 2.1.8(hono@4.13.18)
       '@triagepilot/application':
         specifier: workspace:*
         version: link:../../packages/application
@@ -51,14 +51,14 @@ importers:
         specifier: workspace:*
         version: link:../../packages/shared
       hono:
-        specifier: ^4.13.5
-        version: 4.13.5
+        specifier: ^4.13.16
+        version: 4.13.18
       kysely:
         specifier: ^0.28.17
         version: 0.28.17
       zod:
-        specifier: ^3.24.1
-        version: 3.25.76
+        specifier: ^4.6.7
+        version: 4.6.7
     devDependencies:
       '@triagepilot/ui':
         specifier: workspace:*
@@ -109,42 +109,42 @@ importers:
   packages/application:
     dependencies:
       '@triagepilot/config':
-        specifier: workspace:1.1.1
+        specifier: workspace:1.2.0
         version: link:../config
       '@triagepilot/contracts':
-        specifier: workspace:1.1.1
+        specifier: workspace:1.2.0
         version: link:../contracts
       '@triagepilot/core':
-        specifier: workspace:1.1.1
+        specifier: workspace:1.2.0
         version: link:../core
 
   packages/config:
     dependencies:
       '@triagepilot/contracts':
-        specifier: workspace:1.1.1
+        specifier: workspace:1.2.0
         version: link:../contracts
       yaml:
         specifier: ^2.6.1
         version: 2.9.0
       zod:
-        specifier: ^3.24.1
-        version: 3.25.76
+        specifier: ^4.6.7
+        version: 4.6.7
 
   packages/contracts: {}
 
   packages/core:
     dependencies:
       '@triagepilot/contracts':
-        specifier: workspace:1.1.1
+        specifier: workspace:1.2.0
         version: link:../contracts
       minimatch:
-        specifier: ^10.0.1
-        version: 10.2.5
+        specifier: ^11.0.1
+        version: 11.0.8
 
   packages/db:
     dependencies:
       '@triagepilot/contracts':
-        specifier: workspace:1.1.1
+        specifier: workspace:1.2.0
         version: link:../contracts
       kysely:
         specifier: ^0.28.17
@@ -166,11 +166,11 @@ importers:
         specifier: ^9.1.4
         version: 9.2.4
       '@triagepilot/contracts':
-        specifier: workspace:1.1.1
+        specifier: workspace:1.2.0
         version: link:../contracts
       zod:
-        specifier: ^3.24.1
-        version: 3.25.76
+        specifier: ^4.6.7
+        version: 4.6.7
     devDependencies:
       '@types/node':
         specifier: ^24.0.0
@@ -185,7 +185,7 @@ importers:
   packages/ui:
     dependencies:
       '@triagepilot/contracts':
-        specifier: workspace:1.1.1
+        specifier: workspace:1.2.0
         version: link:../contracts
     devDependencies:
       '@types/react':
@@ -598,11 +598,14 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@hono/node-server@1.19.15':
-    resolution: {integrity: sha512-Za2ai6TLdKjUvnur+eenO6nuYYipVAEhyCAdaV8IRvmU9kK8crOZUSYvIXn72E4f8fJqyAbpcJuTsYYmZp9Deg==}
-    engines: {node: '>=18.14.1'}
+  '@hono/node-server@2.1.8':
+    resolution: {integrity: sha512-jdf7FHh6A1lzjpHHQUgxsg2GeER2vMetnAOfeActzcoli6jamlK+NAwL6Dsr5Fl3BS3tYUQzCdtZjU8Qxv7bEA==}
+    engines: {node: '>=20'}
     peerDependencies:
-      hono: ^4
+      hono: ^4 || ^5.0.0-0
+
+  '@isaacs/nonrecursive-glob-match@1.1.0':
+    resolution: {integrity: sha512-GPm/Dbvk5RLmhRnxXIa7nTpK0xtl4E0wj0MslsuNiJ1FIROU+2+9lgUC/dgF7Ey4QCWhfEsgxilMRMCdHPfDfw==}
 
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
@@ -948,9 +951,9 @@ packages:
   before-after-hook@3.0.2:
     resolution: {integrity: sha512-Nik3Sc0ncrMK4UUdXQmAnRtzmNQTAAXmXIopizwZ1W1t8QmfJj+zL4OA2I7XPTPW5z5TDqv4hRo/JzouDJnX3A==}
 
-  brace-expansion@5.0.7:
-    resolution: {integrity: sha512-7oFy703dxfY3/NLxC1fh2SUCQ0H9rmAY+5EpDVfXjUTTs+HEwR2nYaqLv+GWcTsumwxPfiz6CzCNkwXwBUwqCA==}
-    engines: {node: 18 || 20 || >=22}
+  brace-expansion@5.0.13:
+    resolution: {integrity: sha512-Vh3dmFbc4wZeox7M9I/0L9GfFd83Su4+yCck/OF9Gi/P/dAHn0RT7X4K9R7gMNMhDck3DvhR6QXsnQdjjgwNvQ==}
+    engines: {node: 20 || >=22}
 
   browserslist@4.28.5:
     resolution: {integrity: sha512-Cu2E6QejHWzuDMTkuwgpABFgDfZrXLQq5V13YOACZx4mFAG4IwGTbTfHPMr4WtxlHoXSM8FIuRwYYCz5XiabaQ==}
@@ -1039,8 +1042,8 @@ packages:
     resolution: {integrity: sha512-7MB+bJLkxu3SowAfBJbjW+c55kNz5tkR45gu2qzrxznezhLeN5YIlJbwUgSzlGc+qWoZ8Ykg71H5ezz69xixrw==}
     engines: {node: '>=20.0.0'}
 
-  hono@4.13.5:
-    resolution: {integrity: sha512-O6+/eCYRkzzzy0rPWwKLiGBR1nFuUPZynnwjxN1MBA62NNqbT0wQEzQyK2gSO5yDIDB336sXQleAhOHrzlYyKw==}
+  hono@4.13.18:
+    resolution: {integrity: sha512-H9q/E1XizaWstJxUW881dmLxEj+t/TrGGnyxINkm4+sK0qUwsMtFdo2BWI9Vs3cIS19MU6b6iCijoUoEf4f3DA==}
     engines: {node: '>=16.9.0'}
 
   js-tokens@4.0.0:
@@ -1070,9 +1073,9 @@ packages:
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
 
-  minimatch@10.2.5:
-    resolution: {integrity: sha512-MULkVLfKGYDFYejP07QOurDLLQpcjk7Fw+7jXS2R2czRQzR56yHRveU5NDJEOviH+hETZKSkIk5c+T23GjFUMg==}
-    engines: {node: 18 || 20 || >=22}
+  minimatch@11.0.8:
+    resolution: {integrity: sha512-nFQuYSTVrGvysVBps5Ih+0BdnYFN/Cj3C816r6+p7yK+FHrVLGE4O4N9AFwykrlNlvM2HYt+Rad1Uiro6h88Ig==}
+    engines: {node: 20 || >=22}
 
   ms@2.1.3:
     resolution: {integrity: sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==}
@@ -1361,8 +1364,8 @@ packages:
     engines: {node: '>= 14.6'}
     hasBin: true
 
-  zod@3.25.76:
-    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+  zod@4.6.7:
+    resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
 snapshots:
 
@@ -1634,9 +1637,11 @@ snapshots:
   '@esbuild/win32-x64@0.28.1':
     optional: true
 
-  '@hono/node-server@1.19.15(hono@4.13.5)':
+  '@hono/node-server@2.1.8(hono@4.13.18)':
     dependencies:
-      hono: 4.13.5
+      hono: 4.13.18
+
+  '@isaacs/nonrecursive-glob-match@1.1.0': {}
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
@@ -1985,7 +1990,7 @@ snapshots:
 
   before-after-hook@3.0.2: {}
 
-  brace-expansion@5.0.7:
+  brace-expansion@5.0.13:
     dependencies:
       balanced-match: 4.0.4
 
@@ -2113,7 +2118,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  hono@4.13.5: {}
+  hono@4.13.18: {}
 
   js-tokens@4.0.0: {}
 
@@ -2135,9 +2140,10 @@ snapshots:
     dependencies:
       '@jridgewell/sourcemap-codec': 1.6.0
 
-  minimatch@10.2.5:
+  minimatch@11.0.8:
     dependencies:
-      brace-expansion: 5.0.7
+      '@isaacs/nonrecursive-glob-match': 1.1.0
+      brace-expansion: 5.0.13
 
   ms@2.1.3: {}
 
@@ -2357,4 +2363,4 @@ snapshots:
 
   yaml@2.9.0: {}
 
-  zod@3.25.76: {}
+  zod@4.6.7: {}
