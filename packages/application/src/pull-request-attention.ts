@@ -9,7 +9,7 @@ export function classifyPullRequestAttention(input: { pullRequest: QueuePullRequ
   const assessmentStatus: QueueAttention["assessmentStatus"] = assessment === null ? "missing" : identityCurrent ? "current" : "historical";
   const route = assessment?.action === "policy_approval" ? "no_human" : assessment?.action === "request_human_review" ? "human_review" : assessment?.action === "no_eligible_reviewer" ? "no_eligible_reviewer" : null;
   const current = identityCurrent && assessment !== null && assessment.mode === "enforce" && assessment.actionStatus === "succeeded" && assessment.requiredReviews !== null && route !== null && (assessment.policyCheckState === "success" || assessment.policyCheckState === "in_progress" || assessment.policyCheckState === "failure");
-  const reviews = reviewState.reviews.map((r) => ({ actor: r.actor.id, actorType: r.actor.type, state: r.state.toLowerCase(), submittedAt: r.submittedAt }));
+  const reviews = reviewState.reviews.flatMap((r) => r.actor.type === "unknown" ? [] : [{ actor: r.actor.id, actorType: r.actor.type, state: r.state.toLowerCase(), submittedAt: r.submittedAt }]);
   const approvedCount = reviewState.status === "complete" ? activeApprovedReviewers(reviews).length : null;
   const requiredCount = current ? assessment.requiredReviews : null;
   const sufficient = current && assessment.requiredReviews !== null && approvedCount !== null && approvedCount >= assessment.requiredReviews;
@@ -19,7 +19,7 @@ export function classifyPullRequestAttention(input: { pullRequest: QueuePullRequ
   if (assessment?.mode === "shadow") secondaryReasons.push("The assessment is a shadow projection, not an applied requirement.");
   else if (assessmentStatus === "historical") secondaryReasons.push("The assessment is historical and may not apply to this pull request.");
   const result = (group: QueueAttention["group"], badge: QueueAttention["badge"], reason: string, actorIds: string[] = [], teamIds: string[] = [], checkUpdatePending = false): QueueAttention => ({ group, badge, reason, actorIds, teamIds, secondaryReasons, approvedCount, requiredCount, assessmentStatus, checkUpdatePending });
-  if (pr.isDraft) return result("other", "draft", "Pull request is a draft.", [pr.author.id]);
+  if (pr.isDraft) return result("other", "draft", "Pull request is a draft.", pr.author.id === null ? [] : [pr.author.id]);
   if (reviewState.status === "checking") return result("other", "checking", "Checking review status.");
   if (reviewState.status !== "complete") return result("other", "status_unknown", "Review state is unavailable or changed during acquisition.");
 
@@ -31,12 +31,12 @@ export function classifyPullRequestAttention(input: { pullRequest: QueuePullRequ
     const previous = latest.get(review.actor.id);
     if (!previous || time > previous.time || (time === previous.time && index > previous.index)) latest.set(review.actor.id, { state, time, index });
   });
-  const users = pr.requestedUsers.filter((user) => user.type === "human").map((user) => user.id);
+  const users = pr.requestedUsers.flatMap((user) => user.type === "human" ? [user.id] : []);
   const teams = pr.requestedTeams.map((team) => team.id);
   const blockers = [...latest].filter(([id, entry]) => entry.state === "changes_requested" && !users.includes(id)).map(([id]) => id);
   if (blockers.length) {
     if (users.length || teams.length) secondaryReasons.push("Other review requests are also outstanding.");
-    return result("authors", "authors_move", "Changes requested by a reviewer need the author's attention.", [pr.author.id]);
+    return result("authors", "authors_move", "Changes requested by a reviewer need the author's attention.", pr.author.id === null ? [] : [pr.author.id]);
   }
   if (users.length || teams.length) {
     if (sufficient) secondaryReasons.push("The live human approval count meets the current requirement.");

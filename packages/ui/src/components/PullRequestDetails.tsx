@@ -1,14 +1,15 @@
 import { useEffect, useRef } from "react";
 import type { QueueItem } from "@triagepilot/contracts";
 
-export interface PullRequestDetailsProps { item: QueueItem; onClose(): void; returnFocusTo: HTMLElement | null }
+export interface PullRequestDetailsProps { item: QueueItem; onClose(): void; returnFocusTo: () => HTMLElement | null }
 export function PullRequestDetails({ item, onClose, returnFocusTo }: PullRequestDetailsProps): JSX.Element {
   const panel = useRef<HTMLDivElement>(null);
   const close = useRef(onClose); close.current = onClose;
+  const focusTarget = useRef(returnFocusTo); focusTarget.current = returnFocusTo;
   useEffect(() => {
     panel.current?.querySelector<HTMLElement>("button")?.focus();
-    return () => { returnFocusTo?.focus(); };
-  }, [returnFocusTo]);
+    return () => { focusTarget.current()?.focus(); };
+  }, []);
   const { pullRequest: pull, attention, assessment, reviewState } = item;
   const names = [...pull.requestedUsers.map((person) => `${person.login} (${person.id})`), ...pull.requestedTeams.map((team) => `${team.name} (${team.id})`)];
   const ownerNames = [...attention.actorIds.map((id) => pull.author.id === id ? pull.author.login : pull.requestedUsers.find((person) => person.id === id)?.login ?? id), ...attention.teamIds.map((id) => pull.requestedTeams.find((team) => team.id === id)?.name ?? id)];

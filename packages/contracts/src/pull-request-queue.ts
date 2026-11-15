@@ -1,7 +1,7 @@
 import type { ActionStatus, RepositoryMode, RiskTier, RoutingAction } from "./events.js";
 import type { ChangeRequestId, ExternalActorId, RepositoryRef, WorkspaceId } from "./ids.js";
 
-export interface QueueActor { id: string; login: string; type: "human" | "bot" | "other" }
+export type QueueActor = { id: string; login: string; type: "human" | "bot" | "other" } | { id: null; login: "Unknown author"; type: "unknown" };
 export interface QueueRepository { repository: RepositoryRef; recordId: string | null }
 export interface QueuePullRequest { repository: RepositoryRef; changeRequestId: ChangeRequestId; number: number; title: string; author: QueueActor; createdAt: string; updatedAt: string; baseRevision: string; headRevision: string; isDraft: boolean; requestedUsers: QueueActor[]; requestedTeams: Array<{ id: string; name: string }> }
 export interface QueueReview { id: string; actor: QueueActor; state: string; commitId: string | null; submittedAt: string | null }

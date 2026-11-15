@@ -116,7 +116,7 @@ it("polls real client through bootstrap to completion and coalesces refresh clic
   window.location.hash = "#pull-requests";
   const syncing = queueSnapshot({ items: [item], totalOpen: null, status: "partial", syncState: "syncing", membershipComplete: false, classificationComplete: false, stale: true, observedAt: null, lastVerifiedAt: null, syncProgress: { runId: "r", phase: "running", updatedAt: new Date().toISOString(), completedRepositories: 0, totalRepositories: 1, retryAt: null } });
   const done = queueSnapshot({ items: [item], totalOpen: 1 });
-  const fetcher = vi.fn().mockResolvedValueOnce(Response.json(syncing)).mockResolvedValue(Response.json(done));
+  const fetcher = vi.fn().mockResolvedValueOnce(Response.json(syncing)).mockImplementation(async () => Response.json(done));
   vi.stubGlobal("fetch", fetcher);
   const container = mount();
   await act(async () => root!.render(<Dashboard username="admin" workspace={workspace} overview={overview} pullRequestQueueApi={createSelfHostedPullRequestQueueApi()} onLogout={async () => {}} />));
@@ -129,6 +129,8 @@ it("polls real client through bootstrap to completion and coalesces refresh clic
   await act(async () => button(container, "Refresh").click());
   await act(async () => button(container, "Refresh").click());
   expect(fetcher.mock.calls.filter(call => String(call[0]).includes("refresh=true"))).toHaveLength(1);
+  expect(container.textContent).not.toContain("Pull requests unavailable");
+  expect(container.querySelector('[role="alert"]')).toBeNull();
 });
 
 it("preserves unavailable provider details without an active spinner", async () => {

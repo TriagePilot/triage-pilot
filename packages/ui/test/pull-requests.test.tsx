@@ -162,3 +162,54 @@ it("clears the initial list if background enrichment loses authority", async () 
   expect(container.textContent).not.toContain("Change"); expect(container.textContent).toContain("Pull requests unavailable");
   vi.useRealTimers();
 });
+
+
+it("retries failed manual refresh immediately and keeps the successful cooldown", async () => {
+  const snapshot = queueSnapshot({ items: [item], totalOpen: 1 });
+  const api = { readPullRequestQueue: vi.fn().mockResolvedValueOnce(snapshot).mockRejectedValueOnce(new Error("Transient failure")).mockResolvedValue(snapshot) };
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
+  const refresh = () => [...container.querySelectorAll("button")].find(b => b.textContent === "Refresh")!.click();
+  await act(async () => refresh());
+  expect(container.textContent).toContain("Transient failure");
+  await act(async () => refresh());
+  expect(api.readPullRequestQueue).toHaveBeenCalledTimes(3);
+  expect(container.textContent).not.toContain("Pull requests unavailable");
+  await act(async () => refresh());
+  expect(api.readPullRequestQueue).toHaveBeenCalledTimes(3);
+});
+
+it.each([false, true])("restores focus by identity after a group change (filtered=%s)", async filtered => {
+  vi.useFakeTimers();
+  try {
+    const moved = { ...item, attention: { ...item.attention, group: "authors" as const, badge: "authors_move" as const } };
+    const api = { readPullRequestQueue: vi.fn().mockResolvedValueOnce(queueSnapshot({ items: [item], totalOpen: 1 })).mockResolvedValue(queueSnapshot({ items: [moved], totalOpen: 1 })) };
+    container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+    await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
+    if (filtered) {
+      const group = [...container.querySelectorAll("select")].find(el => el.parentElement?.textContent?.startsWith("Group"))!;
+      await act(async () => { group.value = "reviewers"; group.dispatchEvent(new Event("change", { bubbles: true })); });
+    }
+    const oldTrigger = container.querySelector<HTMLButtonElement>(".queue-title")!;
+    await act(async () => oldTrigger.click());
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(oldTrigger.isConnected).toBe(false);
+    const close = [...container.querySelectorAll("button")].find(b => b.textContent === "Close")!;
+    expect(document.activeElement).toBe(close);
+    await act(async () => close.click());
+    const expected = filtered ? [...container.querySelectorAll("button")].find(b => b.textContent === "Refresh") : container.querySelector(".queue-title");
+    expect(document.activeElement).toBe(expected);
+  } finally { vi.useRealTimers(); }
+});
+
+
+it("shows unknown authors without adding them to the person filter", async () => {
+  const unknown = { ...item, pullRequest: { ...item.pullRequest, author: { id: null, login: "Unknown author" as const, type: "unknown" as const } } };
+  const api = { readPullRequestQueue: vi.fn().mockResolvedValue(queueSnapshot({ items: [unknown], totalOpen: 1 })) };
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(<PullRequests api={api} workspace={workspace} authorization={authorization} />));
+  expect(container.querySelector(".queue-row")?.textContent).toContain("Unknown author");
+  const person = [...container.querySelectorAll("select")].find(el => el.parentElement?.textContent?.startsWith("Person"))!;
+  expect(person.textContent).not.toContain("Unknown author");
+  expect(person.textContent).toContain("bob");
+});

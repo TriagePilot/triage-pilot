@@ -183,3 +183,24 @@ describe("bounded queue reads", () => {
     await expect(denied.readPullRequest({ ...ctx, repository, pullNumber: 1 })).rejects.toMatchObject({ reason: "authority" });
   });
 });
+
+
+describe("nullable queue provider fields", () => {
+  it("retains a null author and the remaining pulls on a page", async () => {
+    const reader = createGitHubPullRequestQueueReader({ request: async () => ({ data: [{ ...pr(), user: null }, pr(2)] }) });
+    const result = await reader.listOpenPullRequestsPage({ ...context(), repository, page: 1 });
+    expect(result.pulls).toHaveLength(2);
+    expect(result.pulls[0]?.author).toEqual({ id: null, login: "Unknown author", type: "unknown" });
+    expect(result.pulls[1]?.author.id).toBe("12");
+    expect(await reader.listOpenPullRequests({ ...context(), repository })).toHaveLength(2);
+    const detail = createGitHubPullRequestQueueReader({ request: async () => ({ data: { ...pr(), user: null } }) });
+    expect(await detail.readPullRequest({ ...context(), repository, pullNumber: 1 })).toMatchObject({ status: "open", pull: { author: { type: "unknown", id: null } } });
+  });
+  it.each([null, undefined])("skips unsubmitted reviews (%s) in both review readers", async submitted_at => {
+    const pull = (await createGitHubPullRequestQueueReader({ request: async () => ({ data: [pr()] }) }).listOpenPullRequests({ ...context(), repository }))[0]!;
+    const submitted = { id: 2, user, state: "APPROVED", commit_id: "head", submitted_at: "2020-01-02T00:00:00Z" };
+    const reader = createGitHubPullRequestQueueReader({ request: async route => ({ data: route.endsWith("/reviews") ? [{ id: 1, user, state: "PENDING", commit_id: "head", submitted_at }, submitted] : pr() }) });
+    expect(await reader.listReviewsPage({ ...context(), repository, pullNumber: 1, page: 1 })).toMatchObject({ reviews: [{ id: "2" }], nextPage: null });
+    expect(await reader.readReviewState({ ...context(), pullRequest: pull, includeLifecycle: false })).toMatchObject({ status: "complete", reviews: [{ id: "2" }] });
+  });
+});

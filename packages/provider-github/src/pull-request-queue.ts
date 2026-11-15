@@ -8,6 +8,7 @@ const id = (v: unknown): string => typeof v === "number" && Number.isSafeInteger
 const string = (v: unknown): string => typeof v === "string" && v.trim() ? v : invalid();
 const timestamp = (v: unknown): string => { const s = string(v); if (!Number.isFinite(Date.parse(s))) invalid(); return s; };
 function actor(v: unknown): QueueActor {
+  if (v === null) return { id: null, login: "Unknown author", type: "unknown" };
   if (!record(v)) return invalid();
   const type = v.type === "User" ? "human" : v.type === "Bot" ? "bot" : v.type === "Organization" ? "other" : invalid();
   return { id: id(v.id), login: string(v.login).toLowerCase(), type };
@@ -123,7 +124,7 @@ export function createGitHubPullRequestQueueReader(requester: Requester) {
       const ids = new Set<string>(); const reviews: QueueReview[] = [];
       for (const entry of entries) {
         if (!record(entry)) invalid(); const reviewId = id(entry.id); if (ids.has(reviewId)) invalid(); ids.add(reviewId);
-        if (entry.submitted_at !== null) reviews.push({ id: reviewId, actor: actor(entry.user), state: string(entry.state), commitId: entry.commit_id === null ? null : string(entry.commit_id), submittedAt: timestamp(entry.submitted_at) });
+        if (entry.submitted_at !== null && entry.submitted_at !== undefined) reviews.push({ id: reviewId, actor: actor(entry.user), state: string(entry.state), commitId: entry.commit_id === null ? null : string(entry.commit_id), submittedAt: timestamp(entry.submitted_at) });
       }
       return { reviews, nextPage: entries.length === 100 ? context.page + 1 : null };
     },
@@ -175,7 +176,7 @@ export function createGitHubPullRequestQueueReader(requester: Requester) {
       const reviews: QueueReview[] = []; const ids = new Set<string>();
       for (const entry of entries) {
         if (!record(entry)) invalid(); const reviewId = id(entry.id); if (ids.has(reviewId)) invalid(); ids.add(reviewId);
-        if (entry.submitted_at === null) continue;
+        if (entry.submitted_at === null || entry.submitted_at === undefined) continue;
         reviews.push({ id: reviewId, actor: actor(entry.user), state: string(entry.state), commitId: entry.commit_id === null ? null : string(entry.commit_id), submittedAt: timestamp(entry.submitted_at) });
       }
       reviews.sort((a, b) => (a.submittedAt ?? "").localeCompare(b.submittedAt ?? ""));
@@ -195,7 +196,7 @@ export function createGitHubPullRequestQueueReader(requester: Requester) {
       if (detail.state === "closed") return { status: "closed" };
       if (detail.state !== "open") invalid();
       const currentTargets = await readTargets(context, repository, detail, pull.number);
-      const targetIds = (values: Array<{ id: string }>) => values.map((x) => x.id).sort().join(",");
+      const targetIds = (values: Array<{ id: string | null }>) => values.map((x) => x.id).sort().join(",");
       const changed = current.headRevision !== pull.headRevision || current.baseRevision !== pull.baseRevision || current.isDraft !== pull.isDraft || targetIds(currentTargets.requestedUsers) !== targetIds(pull.requestedUsers) || targetIds(currentTargets.requestedTeams) !== targetIds(pull.requestedTeams);
       return { status: changed ? "changed" : "complete", reviews, observedAt: new Date().toISOString(), lifecycle };
     },

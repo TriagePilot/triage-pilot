@@ -35,7 +35,7 @@ export function createPullRequestQueueService(ports: PullRequestQueuePorts) {
       const pull = snapshot.pull;
       const reviewState = snapshot.reviewState ?? { status: "unavailable" as const, reviews: [], observedAt: null, lifecycle: { status: "unavailable" as const, openedSince: null } };
       const assessment = desiredGeneration > appliedGeneration ? null : assessments.get(queuePullRequestKey(pull.repository, pull.number)) ?? null;
-      return { pullRequest: pull, reviewState, assessment, attention: classifyPullRequestAttention({ pullRequest: pull, reviewState, assessment }), links: ports.linksFor(scope, pull, assessment) };
+      return { pullRequest: pull, reviewState, assessment, attention: classifyPullRequestAttention({ pullRequest: pull, reviewState: desiredGeneration > appliedGeneration ? { ...reviewState, status: "checking" } : reviewState, assessment }), links: ports.linksFor(scope, pull, assessment) };
     });
     await ports.assertActive(scope);
     input.signal?.throwIfAborted();

@@ -19,8 +19,8 @@ function tie(a: QueueItem, b: QueueItem): number {
   const x = a.pullRequest.repository, y = b.pullRequest.repository;
   return x.provider.localeCompare(y.provider) || x.externalId.localeCompare(y.externalId) || a.pullRequest.number - b.pullRequest.number;
 }
-export function buildPullRequestQueueView(snapshot: PullRequestQueueSnapshot, filters: PullRequestQueueFilters): { groups: Array<{ group: QueueGroup; items: QueueItem[] }>; persons: QueueActor[]; filteredCount: number } {
-  const persons = new Map<string, QueueActor>();
+export function buildPullRequestQueueView(snapshot: PullRequestQueueSnapshot, filters: PullRequestQueueFilters): { groups: Array<{ group: QueueGroup; items: QueueItem[] }>; persons: Exclude<QueueActor, { type: "unknown" }>[]; filteredCount: number } {
+  const persons = new Map<string, Exclude<QueueActor, { type: "unknown" }>>();
   for (const { pullRequest: pull } of snapshot.items.filter(({ pullRequest }) => !pullRequest.isDraft && pullRequest.author.type !== "bot")) for (const person of [pull.author, ...pull.requestedUsers]) if (person.type === "human") persons.set(person.id, person);
   const unique = new Map<string, QueueItem>();
   for (const item of snapshot.items.filter(({ pullRequest }) => !pullRequest.isDraft && pullRequest.author.type !== "bot")) unique.set(queuePullRequestKey(item.pullRequest.repository, item.pullRequest.number), item);

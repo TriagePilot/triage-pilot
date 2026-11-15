@@ -53,7 +53,7 @@ it.each([true, false])("does not report a dirty row as classified when refresh i
   const ports = { now: () => new Date("2026-01-01T00:01:00Z"), createSnapshotId: () => "s", resolveScope: async () => scope, assertActive: async () => {}, requestRefresh: async () => {}, workerAvailable: async () => true, readAssessments: async () => new Map([[queuePullRequestKey(pull.repository, pull.number), assessment]]), linksFor: (_scope: unknown, _pull: unknown, current: unknown) => ({ provider: "", decision: current ? "/decision" : null }), readProjection: async () => ({ lastVerifiedAt: new Date("2026-01-01T00:00:00Z"), syncRun: null, runnableClassification: runnable, snapshots: [row] }) };
   const result = await createPullRequestQueueService(ports).read({ workspaceId: scope.workspaceId });
   expect(result).toMatchObject({ status: "partial", syncState: "partial", classificationComplete: false, enrichmentPending: runnable });
-  expect(result.items[0]).toMatchObject({ assessment: null, attention: { assessmentStatus: "missing", badge: "policy_unknown" }, links: { decision: null } });
+  expect(result.items[0]).toMatchObject({ assessment: null, attention: { assessmentStatus: "missing", badge: "checking" }, links: { decision: null } });
 });
 
 it("rechecks authority when projection fails during revocation", async () => {
@@ -88,4 +88,19 @@ it("does not report current classification after lifecycle verification fails wi
   const scope = { workspaceId: "w", providerConnectionId: "c", externalConnectionId: "99", githubOrganization: "acme", knownRepositories: [{ recordId: "r", repository: pull.repository }] } as any;
   const service = createPullRequestQueueService({ now: () => new Date("2026-01-01T00:01:00Z"), createSnapshotId: () => "s", resolveScope: async () => scope, assertActive: async () => {}, requestRefresh: async () => {}, workerAvailable: async () => true, readAssessments: async () => new Map(), linksFor: () => ({ provider: "", decision: null }), readProjection: async () => ({ lastVerifiedAt: new Date("2026-01-01T00:00:00Z"), syncRun: { runId: "run", status: "failed" as const, updatedAt: new Date("2026-01-01T00:00:59Z"), membershipComplete: true, classificationComplete: false, verificationError: "classification failed" }, snapshots: [{ snapshot: { pull, reviewState: queueReviewState({ lifecycle: { status: "unavailable", openedSince: null } }), isOpen: true }, desiredGeneration: 1, appliedGeneration: 1 }] }) });
   expect(await service.read({ workspaceId: scope.workspaceId })).toMatchObject({ classificationComplete: false, status: "partial", syncState: "partial" });
+});
+
+
+it("suppresses stale review attention until the generation is current without changing stored evidence", async () => {
+  const { queuePull, queueReviewState } = await import("../../../test/pull-request-queue-fixtures.js");
+  const pull = queuePull();
+  const scope = { workspaceId: "w", providerConnectionId: "c", externalConnectionId: "99", githubOrganization: "acme", knownRepositories: [{ recordId: "r", repository: pull.repository }] };
+  const reviewState = queueReviewState({ reviews: [{ id: "review", actor: { id: "reviewer", login: "bob", type: "human" }, state: "CHANGES_REQUESTED", commitId: pull.headRevision, submittedAt: "2026-01-01T00:00:00Z" }] });
+  const row = { snapshot: { pull, reviewState, isOpen: true }, desiredGeneration: 2, appliedGeneration: 1 };
+  const service = createPullRequestQueueService({ now: () => new Date(), createSnapshotId: () => "s", resolveScope: async () => scope, assertActive: async () => {}, requestRefresh: async () => {}, workerAvailable: async () => true, readAssessments: async () => new Map(), linksFor: () => ({ provider: "", decision: null }), readProjection: async () => ({ lastVerifiedAt: null, syncRun: null, snapshots: [row] }) });
+  const dirty = await service.read({ workspaceId: scope.workspaceId });
+  expect(dirty.items[0]?.attention).toMatchObject({ badge: "checking", group: "other", approvedCount: null, actorIds: [] });
+  expect(dirty.items[0]?.reviewState).toBe(reviewState);
+  row.appliedGeneration = 2;
+  expect((await service.read({ workspaceId: scope.workspaceId })).items[0]?.attention.badge).toBe("authors_move");
 });
