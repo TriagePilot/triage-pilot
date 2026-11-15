@@ -119,9 +119,12 @@ export async function commitQueueSyncPage(
       const connection = await trx.selectFrom("provider_connections").select("queue_selection_revision").where("id", "=", scope.providerConnectionId).where("workspace_id", "=", scope.workspaceId).executeTakeFirst();
       if (!connection || connection.queue_selection_revision !== token.selectionRevision) throw new Stale();
       let repository: QueueSyncRepository | null = null;
+      let selectionChanged = false;
       if (effect.type === "inventory") {
         await sql`select set_config('triage.queue_scan_materialization', '1', true)`.execute(trx);
         for (const item of effect.repositories) {
+          const existing = await trx.selectFrom("repositories").select("id").where("workspace_id", "=", scope.workspaceId).where("provider_connection_id", "=", scope.providerConnectionId).where("provider", "=", item.provider).where("external_repository_id", "=", item.externalId).executeTakeFirst();
+          if (!existing) selectionChanged = true;
           const repo = await materializeQueueRepository(trx, scope, { provider: item.provider, externalRepositoryId: item.externalId, owner: item.owner, name: item.name });
           await trx.insertInto("queue_sync_scan_members").values({ run_id: runId, repository_id: repo.repositoryId, external_repository_id: repo.externalRepositoryId, pull_number: 0 }).execute();
         }
@@ -135,7 +138,10 @@ export async function commitQueueSyncPage(
         if (!member) throw new Stale();
         for (const pull of effect.pulls) {
           if (pull.repository.externalId !== repository.externalRepositoryId || !Number.isSafeInteger(pull.number) || pull.number <= 0) throw new Error("invalid queue scan member");
-          await trx.insertInto("queue_sync_scan_members").values({ run_id: runId, repository_id: repository.repositoryId, external_repository_id: repository.externalRepositoryId, pull_number: pull.number }).execute();
+          const recorded = await trx.insertInto("queue_sync_scan_members").values({ run_id: runId, repository_id: repository.repositoryId, external_repository_id: repository.externalRepositoryId, pull_number: pull.number })
+            .onConflict(oc => oc.columns(["run_id", "repository_id", "external_repository_id", "pull_number"]).doNothing())
+            .returning("pull_number").executeTakeFirst();
+          if (!recorded) continue;
           await invalidateQueuePullTransaction(trx, { ...scope, ...repository, pullNumber: pull.number });
           const observedAt = new Date();
           await trx.updateTable("queue_pull_work").set({ snapshot: JSON.stringify({ pull, isOpen: true, reviewState: { status: "unavailable", reviews: [], observedAt: null, lifecycle: { status: "unavailable", openedSince: null } }, verifiedAt: observedAt }), verified_at: observedAt, snapshot_revision: sql`snapshot_revision + 1` })
@@ -162,10 +168,13 @@ export async function commitQueueSyncPage(
         await sql`select set_config('triage.queue_scan_materialization', '1', true)`.execute(trx);
         const removed = await sql`delete from repositories r where r.workspace_id = ${scope.workspaceId} and r.provider_connection_id = ${scope.providerConnectionId} and r.provider = 'github' and not exists (select 1 from queue_sync_scan_members m where m.run_id = ${runId} and m.repository_id = r.id and m.external_repository_id = r.external_repository_id and m.pull_number = 0)`.execute(trx);
         await sql`select set_config('triage.queue_scan_materialization', '0', true)`.execute(trx);
-        if (Number(removed.numAffectedRows ?? 0) > 0) {
-          const updated = await sql<{ queue_selection_revision: string }>`update provider_connections set queue_selection_revision = queue_selection_revision + 1 where id = ${scope.providerConnectionId} and workspace_id = ${scope.workspaceId} returning queue_selection_revision`.execute(trx);
-          await trx.updateTable("queue_sync_runs").set({ selection_revision: updated.rows[0]!.queue_selection_revision }).where("id", "=", runId).execute();
-        }
+        if (Number(removed.numAffectedRows ?? 0) > 0) selectionChanged = true;
+      }
+      // Materialization suppresses selection triggers; adopt the revision only after
+      // validating the incoming checkpoint, so this page cannot invalidate itself.
+      if (selectionChanged) {
+        const updated = await sql<{ queue_selection_revision: string }>`update provider_connections set queue_selection_revision = queue_selection_revision + 1 where id = ${scope.providerConnectionId} and workspace_id = ${scope.workspaceId} returning queue_selection_revision`.execute(trx);
+        await trx.updateTable("queue_sync_runs").set({ selection_revision: updated.rows[0]!.queue_selection_revision }).where("id", "=", runId).execute();
       }
       let membershipComplete = run.membership_complete, classificationComplete = run.classification_complete;
       let verificationError: string | null = null; let verifiedAt: Date | null = null; let accepted = true;

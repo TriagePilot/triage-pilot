@@ -115,6 +115,52 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL job operation
     },
   );
 
+  it("exhausts queued revoked activations through the mutation-intent recovery path", async () => {
+    await withPostgresTestDatabase(async db => {
+        const { workspaceId, providerConnectionId } = await createJobTestContext(db);
+        const now = new Date("2026-09-01T12:00:00.000Z");
+        const observation: ReviewerLoadObservation = {
+          status: "complete", source: "tracked_github_pending",
+          observedAt: "2026-09-01T11:59:00.000Z", trackedSince: "2026-06-03T11:59:00.000Z",
+          loads: { replacement: 2, unavailable: 7 }, reason: null,
+        };
+        const repository = await db.insertInto("repositories").values({
+          workspace_id: workspaceId, provider: "github", provider_connection_id: providerConnectionId,
+          external_repository_id: "repository-context", owner: "acme", name: "api",
+          default_branch: "main", config_state: "valid",
+        }).returning("id").executeTakeFirstOrThrow();
+        const { decisionId } = await persistDecision(db, workspaceId, {
+          repositoryId: repository.id, deliveryId: "context-delivery", routingKey: "context-routing",
+          changeRequestId: "change-7", pullNumber: 7, headSha: "head-1", mode: "enforce",
+          action: "request_human_review", actionStatus: "pending", riskScore: 50,
+          selectedReviewers: ["unavailable"], details: {
+            ownership: { preferredReviewers: ["replacement"], eligibleReviewers: ["unavailable", "replacement"] },
+            routing: { requestedReviewerCount: 1 },
+          },
+        });
+        const availability = createWorkspaceReviewerAvailability(db, workspaceId);
+        const absence = await availability.scheduleAbsence({
+          provider: "github", providerConnectionId, externalActorId: "unavailable",
+          startAt: new Date("2026-09-01T10:00:00.000Z"), endAt: new Date("2026-09-01T17:00:00.000Z"), now,
+        });
+        const intent = await availability.prepareMutationIntent({
+          workspaceId, provider: "github", providerConnectionId, absenceId: absence.id,
+          absenceRevision: absence.revision, decisionId, repositoryId: "repository-context",
+          changeRequestId: "change-7", expectedHeadRevision: "head-1",
+          unavailableActorId: "unavailable", replacementActorId: "replacement", selectionContext: observation,
+        });
+      const { createWorkspaceRepositories } = await import("../src/workspaces");
+      const repositories = createWorkspaceRepositories(db, workspaceId);
+      const blocker = await db.insertInto("jobs").values({ workspace_id: workspaceId, provider: "github", provider_connection_id: providerConnectionId, external_installation_id: "99", kind: "process_pull_request", status: "running", payload: {}, idempotency_key: "running-cleanup-blocker" }).returning("id").executeTakeFirstOrThrow();
+      await repositories.revokeConfiguredProviderConnection({ provider: "github", externalConnectionId: "99" });
+      expect(await repositories.cleanupRevokedProviderConnections(now)).toBe(0);
+      expect(await db.selectFrom("jobs").select(["status", "last_error"]).where("kind", "=", "activate_reviewer_absence").executeTakeFirstOrThrow()).toMatchObject({ status: "failed", last_error: expect.stringContaining("revoked") });
+      expect(await availability.listReplacementHistory()).toMatchObject([{ mutationIntentId: intent.id, state: "permanent_failure", outcome: "permanent_failure", lastError: expect.stringContaining("revoked") }]);
+      expect(await db.selectFrom("decision_outbox").select("id").execute()).toHaveLength(1);
+      expect((await db.selectFrom("jobs").select("status").where("id", "=", blocker.id).executeTakeFirstOrThrow()).status).toBe("running");
+    });
+  });
+
   it("requeues transient failures with backoff and fails exhausted attempts", async () => {
     await withPostgresTestDatabase(async (db) => {
       const { workspaceId, providerConnectionId, queue, claimer } = await createJobTestContext(db);

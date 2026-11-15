@@ -148,4 +148,43 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("queue page persistence",
     expect(result.snapshots[0]).toMatchObject({ snapshot: { isOpen: true, reviewState: { status: "unavailable" } }, desiredGeneration: 1, appliedGeneration: 0 });
   }));
 
+  it("invalidates old coverage when inventory adds a repository and accepts the next page", async () => withPostgresTestDatabase(async db => {
+    const { readQueueProjection } = await import("../src/pull-request-projection");
+    const w = await db.insertInto("workspaces").values({ external_key: "inventory-addition" }).returning("id").executeTakeFirstOrThrow();
+    const c = await db.insertInto("provider_connections").values({ workspace_id: w.id, provider: "github", external_connection_id: "i", workspace_login: "acme", account_type: "Organization", status: "active", permissions: {} }).returning(["id", "queue_selection_revision"]).executeTakeFirstOrThrow();
+    const scope = { workspaceId: w.id, providerConnectionId: c.id, externalInstallationId: "i" };
+    await db.insertInto("queue_sync_runs").values({ workspace_id: w.id, provider_connection_id: c.id, external_installation_id: "i", status: "succeeded", selection_revision: c.queue_selection_revision, membership_complete: true, classification_complete: true, verified_at: new Date() }).execute();
+    const run = await startQueueSyncRun(db, scope), at = new Date();
+    await db.updateTable("jobs").set({ status: "running", locked_by: "worker", locked_at: at, attempt_count: 1 }).where("id", "=", run.jobId).execute();
+    const lease = { jobId: run.jobId, workspaceId: w.id, provider: "github" as const, providerConnectionId: c.id, lockedBy: "worker", lockedAt: at, attemptCount: 1, maxAttempts: 5 };
+    const token = await claimQueueSyncCheckpoint(db, scope, run.runId, lease);
+    expect(await commitQueueSyncPage(db, scope, run.runId, token, { stage: "pulls", repositories: [ref], index: 0, page: 1 }, { type: "inventory", repositories: [ref] })).toBe(true);
+    const current = await db.selectFrom("provider_connections").select("queue_selection_revision").where("id", "=", c.id).executeTakeFirstOrThrow();
+    expect(current.queue_selection_revision).not.toBe(c.queue_selection_revision);
+    expect((await readQueueProjection(db, scope)).lastVerifiedAt).toBeNull();
+    const next = await claimQueueSyncCheckpoint(db, scope, run.runId, lease);
+    expect(next.selectionRevision).toBe(current.queue_selection_revision);
+    expect(await commitQueueSyncPage(db, scope, run.runId, next, { stage: "missing", repositories: [ref], index: 0 }, { type: "pulls", repository: ref, pulls: [], complete: true })).toBe(true);
+  }));
+
+  it("advances overlapping pull pages without repeating per-pull effects", async () => withPostgresTestDatabase(async db => {
+    const { queuePull } = await import("../../../test/pull-request-queue-fixtures.js");
+    const w = await db.insertInto("workspaces").values({ external_key: "overlapping-pages" }).returning("id").executeTakeFirstOrThrow();
+    const c = await db.insertInto("provider_connections").values({ workspace_id: w.id, provider: "github", external_connection_id: "i", workspace_login: "acme", account_type: "Organization", status: "active", permissions: {} }).returning("id").executeTakeFirstOrThrow();
+    const scope = { workspaceId: w.id, providerConnectionId: c.id, externalInstallationId: "i" }, run = await startQueueSyncRun(db, scope), at = new Date();
+    await db.updateTable("jobs").set({ status: "running", locked_by: "worker", locked_at: at, attempt_count: 1 }).where("id", "=", run.jobId).execute();
+    const lease = { jobId: run.jobId, workspaceId: w.id, provider: "github" as const, providerConnectionId: c.id, lockedBy: "worker", lockedAt: at, attemptCount: 1, maxAttempts: 5 };
+    let token = await claimQueueSyncCheckpoint(db, scope, run.runId, lease);
+    await commitQueueSyncPage(db, scope, run.runId, token, { stage: "pulls", repositories: [ref], index: 0, page: 1 }, { type: "inventory", repositories: [ref] });
+    token = await claimQueueSyncCheckpoint(db, scope, run.runId, lease);
+    const pull = queuePull({ repository: ref });
+    await commitQueueSyncPage(db, scope, run.runId, token, { stage: "pulls", repositories: [ref], index: 0, page: 2 }, { type: "pulls", repository: ref, pulls: [pull], complete: false });
+    const before = await db.selectFrom("queue_pull_work").selectAll().where("pull_number", "=", pull.number).executeTakeFirstOrThrow();
+    token = await claimQueueSyncCheckpoint(db, scope, run.runId, lease);
+    expect(await commitQueueSyncPage(db, scope, run.runId, token, { stage: "missing", repositories: [ref], index: 0 }, { type: "pulls", repository: ref, pulls: [pull, queuePull({ repository: ref, number: 2 })], complete: true })).toBe(true);
+    expect(await db.selectFrom("queue_pull_work").selectAll().where("pull_number", "=", pull.number).executeTakeFirstOrThrow()).toEqual(before);
+    expect(await db.selectFrom("queue_pull_work").select("pull_number").orderBy("pull_number").execute()).toEqual([{ pull_number: 1 }, { pull_number: 2 }]);
+    expect((await db.selectFrom("queue_sync_runs").select("checkpoint").where("id", "=", run.runId).executeTakeFirstOrThrow()).checkpoint).toMatchObject({ stage: "missing" });
+  }));
+
 });

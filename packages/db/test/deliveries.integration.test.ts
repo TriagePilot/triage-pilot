@@ -22,6 +22,76 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("delivery ingestion", () 
     await expectCounts(db, { repositories: 1, webhook_receipts: 1, jobs: 3 });
   }));
 
+
+  it("defers renamed deliveries until inventory confirms the name without allowing stale names to overwrite it", async () => withPostgresTestDatabase(async db => {
+    const workspaceId = await ensureLocalWorkspace(db), repositories = createWorkspaceRepositories(db, workspaceId);
+    await repositories.replaceProviderConnectionRepositories({ ...connection("99", "acme"), repositories: [repository("101", "old-name")] });
+    const source = deliveryInput();
+    const delivery = { ...source, invalidation: { externalInstallationId: "99", repository: source.payload.changeRequest.repository, pullNumber: 7 }, routingPayload: source.payload };
+    expect(await repositories.acceptPullRequestDelivery(delivery)).toMatchObject({ inserted: false, deferred: true });
+    expect((await db.selectFrom("repositories").select("name").executeTakeFirstOrThrow()).name).toBe("old-name");
+    expect(await db.selectFrom("jobs").select("id").where("kind", "=", "process_pull_request").execute()).toHaveLength(0);
+    const c = await db.selectFrom("provider_connections").select("id").executeTakeFirstOrThrow();
+    await materializeQueueRepository(db, { workspaceId, providerConnectionId: c.id, externalInstallationId: "99" }, repository("101", "api"));
+    expect(await replayOne(db)).toBe(true);
+    expect(await repositories.acceptPullRequestDelivery(delivery)).toMatchObject({ inserted: false });
+    expect(await db.selectFrom("jobs").select("id").where("kind", "=", "process_pull_request").execute()).toHaveLength(1);
+    const staleRef = { ...source.payload.changeRequest.repository, name: "old-name" };
+    const stale = { ...delivery, deliveryId: "stale-name", repository: repository("101", "old-name"), invalidation: { ...delivery.invalidation, repository: staleRef }, routingPayload: { ...source.payload, deliveryId: "stale-name", changeRequest: { ...source.payload.changeRequest, repository: staleRef } } };
+    expect(await repositories.acceptPullRequestDelivery(stale)).toMatchObject({ inserted: false, deferred: true });
+    expect((await db.selectFrom("repositories").select("name").executeTakeFirstOrThrow()).name).toBe("api");
+  }));
+
+  it("fails queued revoked jobs while retaining running work and a new installation", async () => withPostgresTestDatabase(async db => {
+    const workspaceId = await ensureLocalWorkspace(db), repositories = createWorkspaceRepositories(db, workspaceId);
+    await repositories.replaceProviderConnectionRepositories({ ...connection("99", "acme"), repositories: [repository("101", "api")] });
+    const old = await db.selectFrom("provider_connections").select("id").executeTakeFirstOrThrow();
+    await repositories.acceptRoutingDelivery(deliveryInput());
+    const queued = await db.selectFrom("jobs").select("id").where("kind", "=", "process_pull_request").executeTakeFirstOrThrow();
+    const running = await db.insertInto("jobs").values({ workspace_id: workspaceId, provider: "github", provider_connection_id: old.id, external_installation_id: "99", kind: "process_pull_request", status: "running", payload: {}, idempotency_key: "running" }).returning("id").executeTakeFirstOrThrow();
+    await repositories.revokeConfiguredProviderConnection({ provider: "github", externalConnectionId: "99" });
+    await repositories.replaceProviderConnectionRepositories({ ...connection("100", "acme"), repositories: [repository("201", "api")] });
+    expect(await repositories.cleanupRevokedProviderConnections(new Date())).toBe(0);
+    expect(await db.selectFrom("jobs").select(["status", "last_error"]).where("id", "=", queued.id).executeTakeFirstOrThrow()).toMatchObject({ status: "failed", last_error: expect.stringContaining("revok") });
+    expect((await db.selectFrom("jobs").select("status").where("id", "=", running.id).executeTakeFirstOrThrow()).status).toBe("running");
+    expect((await db.selectFrom("provider_connections").select("status").where("external_connection_id", "=", "100").executeTakeFirstOrThrow()).status).toBe("active");
+    await db.updateTable("jobs").set({ status: "failed" }).where("id", "=", running.id).execute();
+    expect(await repositories.cleanupRevokedProviderConnections(new Date())).toBe(1);
+    expect((await db.selectFrom("provider_connection_revocations").select("cleanup_completed_at").executeTakeFirstOrThrow()).cleanup_completed_at).toBeInstanceOf(Date);
+  }));
+
+
+  it("locks only one recovery candidate so another worker can claim the rest", async () => withPostgresTestDatabase(async db => {
+    const workspaceId = await ensureLocalWorkspace(db), repositories = createWorkspaceRepositories(db, workspaceId);
+    await repositories.activateConfiguredProviderConnection(connection("99", "acme"));
+    for (const deliveryId of ["lock-first", "lock-second"]) {
+      const source = deliveryInput();
+      await repositories.acceptPullRequestDelivery({ ...source, deliveryId, invalidation: { externalInstallationId: "99", repository: source.payload.changeRequest.repository, pullNumber: 7 }, routingPayload: { ...source.payload, deliveryId } });
+    }
+    await repositories.updateProviderConnectionRepositories({ ...connection("99", "acme"), repositoriesAdded: [repository("101", "api")], repositoryIdsRemoved: [] });
+    await db.updateTable("jobs").set({ status: "failed", updated_at: new Date(0) }).where("kind", "=", "replay_deferred_delivery").execute();
+    let release!: () => void, claimed!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const selected = new Promise<void>(resolve => { claimed = resolve; });
+    const queries = new Set<unknown>();
+    const paused = db.withPlugin({
+      transformQuery(args) {
+        if (args.node.kind === "SelectQueryNode" && JSON.stringify(args.node.from).includes("deferred_pull_request_deliveries")) queries.add(args.queryId);
+        return args.node;
+      },
+      async transformResult(args) {
+        if (queries.delete(args.queryId)) { claimed(); await gate; }
+        return args.result;
+      },
+    });
+    const recovering = recoverDeferredPullRequestDelivery(paused, workspaceId, new Date());
+    try {
+      await selected;
+      const remaining = await db.transaction().execute(trx => trx.selectFrom("deferred_pull_request_deliveries").select("delivery_id").forUpdate().skipLocked().execute());
+      expect(remaining).toHaveLength(1);
+    } finally { release(); await recovering; }
+  }));
+
   it("recovers exhausted deferred work with a fresh dispatch after authority is restored", async () => withPostgresTestDatabase(async db => {
     const workspaceId = await ensureLocalWorkspace(db);
     const repositories = createWorkspaceRepositories(db, workspaceId);
@@ -460,10 +530,6 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("delivery ingestion", () 
         { id: oldConnection.id, workspace_login: "old-generation", status: "revoked" },
         { id: newConnection.id, workspace_login: "new-generation", status: "active" },
       ]);
-      await expect(repositories.cleanupRevokedProviderConnections(new Date("2100-01-01T00:00:00.000Z")))
-        .resolves.toBe(0);
-      await db.updateTable("jobs").set({ status: "failed" })
-        .where("provider_connection_id", "=", oldConnection.id).execute();
       await expect(repositories.cleanupRevokedProviderConnections(new Date("2100-01-01T00:00:00.000Z")))
         .resolves.toBe(1);
       await expect(repositories.cleanupRevokedProviderConnections(new Date("2100-01-01T00:00:00.000Z")))

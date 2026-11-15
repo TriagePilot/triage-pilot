@@ -2,6 +2,7 @@ import { sql, type Kysely, type Transaction } from "kysely";
 import type { ProviderConnectionId, ProviderKind, RepositoryId, WorkspaceId } from "@triagepilot/contracts";
 
 import type { Database } from "./kysely.js";
+import { failQueuedJobsForRevokedConnection } from "./jobs.js";
 
 type DatabaseExecutor = Kysely<Database> | Transaction<Database>;
 
@@ -223,6 +224,7 @@ async function cleanupRevokedProviderConnection(
   },
   now: Date,
 ): Promise<boolean> {
+  await failQueuedJobsForRevokedConnection(db, workspaceId, candidate.provider, candidate.physical_connection_id, candidate.revoked_connection_id, now);
   return await db.transaction().execute(async (trx) => {
     const revocation = await trx.selectFrom("provider_connection_revocations")
       .select("revoked_connection_id")
@@ -307,12 +309,14 @@ export async function upsertDeliveryRepository(
     .where("workspace_id", "=", workspaceId).where("provider", "=", connection.provider)
     .where("external_connection_id", "=", connection.externalConnectionId).executeTakeFirst();
   if (revoked) return null;
-  const selected = await trx.selectFrom("repositories").select("id")
+  const selected = await trx.selectFrom("repositories").select(["id", "owner", "name"])
     .where("workspace_id", "=", workspaceId).where("provider", "=", repository.provider)
     .where("provider_connection_id", "=", providerConnectionId)
     .where("external_repository_id", "=", repository.externalRepositoryId)
     .forUpdate().executeTakeFirst();
-  if (!selected) return { unavailableConnectionId: providerConnectionId };
+  // Webhooks may arrive out of order. Only authoritative inventory may rename
+  // a selected repository; defer mismatched deliveries until it confirms the name.
+  if (!selected || selected.owner !== repository.owner || selected.name !== repository.name) return { unavailableConnectionId: providerConnectionId };
   return { providerConnectionId, repositoryId: selected.id };
 }
 

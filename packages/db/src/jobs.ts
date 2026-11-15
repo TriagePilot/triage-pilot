@@ -354,24 +354,49 @@ async function failIsolatedStaleJob(
   });
 }
 
+/** Terminalize only still-queued jobs for the revoked physical installation.
+ * Reuse activation exhaustion so mutation intents and finalizers stay consistent. */
+export async function failQueuedJobsForRevokedConnection(
+  db: Kysely<Database>, workspaceId: WorkspaceId, provider: ProviderKind,
+  providerConnectionId: string, revocationId: string, now: Date,
+): Promise<void> {
+  const jobs = await db.selectFrom("jobs").select(["id", "attempt_count", "max_attempts"])
+    .where("workspace_id", "=", workspaceId).where("provider", "=", provider)
+    .where("provider_connection_id", "=", providerConnectionId).where("status", "=", "queued").execute();
+  for (const job of jobs) {
+    await exhaustReviewerAbsenceActivationTransaction(db, {
+      jobId: job.id, workspaceId, provider, providerConnectionId,
+      lockedBy: "revocation-cleanup", lockedAt: now, attemptCount: job.attempt_count, maxAttempts: job.max_attempts,
+    }, `provider connection revoked (${revocationId})`, now, revocationId);
+  }
+}
+
 async function exhaustReviewerAbsenceActivationTransaction(
   db: Kysely<Database>,
   lease: JobLease,
   error: string,
   now: Date,
+  queuedRevocationId?: string,
 ): Promise<JobTransitionResult> {
   return await db.transaction().execute(async (trx) => {
     const syncRun = await lockSyncRun(trx, lease);
-    const job = await trx.selectFrom("jobs").selectAll()
+    let query = trx.selectFrom("jobs").selectAll()
       .where("id", "=", lease.jobId)
       .where("workspace_id", "=", lease.workspaceId)
       .where("provider", "=", lease.provider)
       .where("provider_connection_id", "=", lease.providerConnectionId)
-      .where("status", "=", "running")
-      .where("locked_by", "=", lease.lockedBy)
-      .where("locked_at", "=", lease.lockedAt)
-      .where("attempt_count", "=", lease.attemptCount)
-      .forUpdate().executeTakeFirst();
+      .where("attempt_count", "=", lease.attemptCount);
+    if (queuedRevocationId) {
+      query = query.where("status", "=", "queued")
+        .where(sql<boolean>`exists (select 1 from provider_connections c join provider_connection_revocations v
+          on v.workspace_id = c.workspace_id and v.provider = c.provider and v.physical_connection_id = c.id and v.external_connection_id = c.external_connection_id
+          where c.id = jobs.provider_connection_id and c.workspace_id = jobs.workspace_id and c.provider = jobs.provider and c.status = 'revoked'
+            and v.revoked_connection_id = ${queuedRevocationId} and v.cleanup_completed_at is null
+            and (jobs.external_installation_id is null or jobs.external_installation_id = c.external_connection_id))`);
+    } else {
+      query = query.where("status", "=", "running").where("locked_by", "=", lease.lockedBy).where("locked_at", "=", lease.lockedAt);
+    }
+    const job = await query.forUpdate().executeTakeFirst();
     if (job === undefined) return { updated: false, reason: "stale_lease" };
 
     const scope = parseActivationScope(job);

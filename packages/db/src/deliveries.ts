@@ -78,7 +78,7 @@ export async function recoverDeferredPullRequestDelivery(db: Kysely<Database>, w
     const row = await trx.selectFrom("deferred_pull_request_deliveries as d").selectAll("d").where("d.workspace_id", "=", workspaceId)
       .where(sql<boolean>`exists (select 1 from provider_connections c join repositories r on r.workspace_id = c.workspace_id and r.provider = c.provider and r.provider_connection_id = c.id and r.external_repository_id = d.external_repository_id where c.workspace_id = d.workspace_id and c.id = d.provider_connection_id and c.provider = d.provider and c.status = 'active' and c.external_connection_id = d.external_installation_id and not exists (select 1 from provider_connection_revocations v where v.workspace_id = c.workspace_id and v.provider = c.provider and v.external_connection_id = c.external_connection_id))`)
       .where(sql<boolean>`not exists (select 1 from jobs j where j.id = d.dispatch_job_id and (j.status in ('queued', 'running') or j.updated_at > ${new Date(now.getTime() - 60_000)}))`)
-      .orderBy("d.created_at").orderBy("d.delivery_id").forUpdate().skipLocked().executeTakeFirst();
+      .orderBy("d.created_at").orderBy("d.delivery_id").limit(1).forUpdate().skipLocked().executeTakeFirst();
     if (!row) return false;
     await dispatchDeferred(trx, row, row.dispatch_epoch + 1);
     return true;
