@@ -4,6 +4,10 @@ Notable features and fixes are recorded here by release. Dates reflect the tagge
 
 ## Unreleased
 
+### Changed
+
+- Clarified first-run self-hosting, GitHub App installation delivery, and verification of the first persisted shadow decision.
+
 ## 1.2.0 - 2026-11-15
 
 ### Added
