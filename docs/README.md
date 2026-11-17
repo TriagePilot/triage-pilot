@@ -29,3 +29,8 @@
 - [Deployment overlays](operations/deployment-overlays.md)
 - [Contributing](../CONTRIBUTING.md)
 - [Security policy](../SECURITY.md)
+
+## Reviewer Routing Guides
+
+- [GitHub pull-request reviewer assignment: practical options and trade-offs](https://triage-pilot.com/guides/github-pull-request-reviewer-assignment/)
+- [Risk-based pull-request review for GitHub teams](https://triage-pilot.com/guides/risk-based-pull-request-review/)
