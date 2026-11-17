@@ -27,14 +27,14 @@ The tag checkout is a detached HEAD, which is expected for a version-pinned depl
 cp .env.example .env
 openssl rand -hex 24
 openssl rand -hex 32
-openssl rand -hex 32
 ```
 
-Use the generated values for `ADMIN_PASSWORD`, `SESSION_SECRET`, and `GITHUB_WEBHOOK_SECRET`, respectively. In `.env`, also set:
+Use the generated values for `ADMIN_PASSWORD` and `SESSION_SECRET`, respectively. In `.env`, also set:
 
 - `ADMIN_USERNAME` to the single administrator login;
 - `GITHUB_ORGANIZATION` to the one organization this deployment accepts;
 - `GITHUB_APP_ID` to the App ID from GitHub;
+- `GITHUB_WEBHOOK_SECRET` to the same webhook secret chosen when registering the GitHub App;
 - `GITHUB_PRIVATE_KEY` to the App's PEM private key, with line breaks represented as literal `\n` sequences.
 
 `APP_BASE_URL` must be the public HTTPS origin in production. `SESSION_SECRET` must contain at least 32 characters. Do not leave any `replace-with-` placeholder in a production environment, and never commit `.env` or a secret file. Each secret also has a mounted-file form: set only one of `ADMIN_PASSWORD` / `ADMIN_PASSWORD_FILE`, `SESSION_SECRET` / `SESSION_SECRET_FILE`, `GITHUB_PRIVATE_KEY` / `GITHUB_PRIVATE_KEY_FILE`, and `GITHUB_WEBHOOK_SECRET` / `GITHUB_WEBHOOK_SECRET_FILE`. For the required read-only mounts and a production reverse-proxy setup, see [Production Compose](production-compose.md).
@@ -112,15 +112,15 @@ Add `.triagepilot.yml` to each selected repository. Missing configuration and `m
 
 2. Confirm that the App installation selects this repository, the webhook endpoint is reachable, and the repository appears under **Repositories**. Check the App's recent webhook deliveries if it does not. Personal-account repositories or a different organization are outside this deployment's scope.
 3. Open a non-draft pull request authored by a person, with a representative change, against the branch containing the shadow configuration. Choose a branch not excluded by your policy. Existing PRs are not proof that a new installation has received an event; use a subsequent supported PR event or the recovery flow below.
-4. In **Routing decisions**, find the row for that repository and PR. Confirm its mode is `shadow`, then inspect the risk score/breakdown and selected reviewers. **Configuration** shows the trusted effective policy. Use the query below when you need to confirm the exact persisted head and base configuration revision. Low-risk routing can select no human reviewer; medium risk selects one, and high risk selects one by default or two when configured.
-5. If you need to verify persistence directly, run this read-only query with the same Compose files and local overrides used to start the deployment:
+4. In **Routing decisions**, find the row for that repository and PR. Confirm its mode is `shadow`, then inspect the risk score/breakdown and selected reviewers. **Configuration** shows the trusted effective policy. If Routing shows `configuration failure`, use the query below to inspect the diagnostics, fix the configuration, and re-run routing before treating the result as a successful risk evaluation. The query also confirms the exact persisted head and base configuration revision. Low-risk routing can select no human reviewer; medium risk selects one, and high risk selects one by default or two when configured.
+5. If you need to verify persistence directly, replace `OWNER`, `REPOSITORY`, and `123` below with your test repository owner, name, and PR number, then run this read-only query with the same Compose files and local overrides used to start the deployment:
 
    ```bash
    docker compose -f docker-compose.yml -f docker-compose.release.yml exec postgres psql -U triagepilot triagepilot -c \
-     "select r.owner || '/' || r.name as repository, d.pull_number, d.head_sha, d.repository_config_revision, d.mode, d.risk_score, d.selected_reviewers, d.action_status, d.created_at from routing_decisions d join repositories r on r.id = d.repository_id order by d.created_at desc limit 5;"
+     "select r.owner || '/' || r.name as repository, d.pull_number, d.head_sha, d.repository_config_revision, d.mode, d.risk_score, d.selected_reviewers, d.action, d.config_diagnostics, d.action_status, d.created_at from routing_decisions d join repositories r on r.id = d.repository_id where r.owner = 'OWNER' and r.name = 'REPOSITORY' and d.pull_number = 123 order by d.created_at desc limit 5;"
    ```
 
-   Identify the row for your test PR and head. The expected mode is `shadow` and `action_status` is `not_applied`; reviewer requests, approvals, labels, comments, and checks are not written to GitHub. For an external database, run the equivalent query through your database's read-only operator connection.
+   Identify the row for your test PR and head. The expected mode is `shadow` and `action_status` is `not_applied`; reviewer requests, approvals, labels, comments, and checks are not written to GitHub. These values alone do not establish a successful risk evaluation: if `action` is `configuration_failure`, use `config_diagnostics` to fix the configuration and re-run routing. For an external database, run the equivalent query through your database's read-only operator connection.
 
 The first successful outcome is a persisted decision for the intended PR and head that you can explain. Review a small sample and tune ownership/risk policy before considering enforcement. Shadow mode does not produce the enforce-mode policy check; do not make that check required during the initial evaluation.
 
