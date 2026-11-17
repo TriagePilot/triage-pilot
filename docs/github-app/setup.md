@@ -13,7 +13,13 @@ Configure the permissions in [GitHub App permissions](permissions.md), including
 
 Set the App ID as `GITHUB_APP_ID`. Supply the generated private key through `GITHUB_PRIVATE_KEY` or `GITHUB_PRIVATE_KEY_FILE`, and the webhook secret through `GITHUB_WEBHOOK_SECRET` or `GITHUB_WEBHOOK_SECRET_FILE`. These values are read-only runtime configuration and are not stored in PostgreSQL.
 
-Install the App in the one configured organization and choose **Only select repositories**. Select every repository this deployment should process. Events from a personal account or another organization are acknowledged without creating routing work.
+Once the TriagePilot web service and public HTTPS webhook endpoint are reachable, install the App in the one configured organization and choose **Only select repositories**. Start with one test repository for a new shadow evaluation, then add the other repositories the deployment should process. Events from a personal account or another organization are acknowledged without creating routing work.
+
+## Verify installation delivery
+
+Confirm the selected repository appears under **Repositories** in TriagePilot. In the GitHub App's settings, open **Advanced** and inspect the recent installation/repository-selection webhook delivery. If installation happened while the endpoint was unavailable, fix reachability or secret mismatches and redeliver the failed delivery while GitHub still retains it. GitHub does not automatically retry failed webhook deliveries; see [redelivering GitHub App webhooks](https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/redelivering-webhooks#redelivering-github-app-webhooks).
+
+After installation delivery succeeds, follow the quickstart's [first shadow decision check](../self-hosting/quickstart.md#confirm-the-first-shadow-decision). A successful delivery acknowledgment is not by itself evidence of a persisted routing decision.
 
 For an existing installation, changing the App permissions is not sufficient on its own. Approve GitHub's requested permission update for the configured organization installation. If no approval action is available, reinstall the App and reselect the intended repositories. Confirm the installation grants `statuses:write` before enabling or resuming enforce mode.
 
